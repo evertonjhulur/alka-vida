@@ -1,0 +1,22 @@
+{
+  "name": "@alka/api",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node --watch src/server.ts",
+    "start": "node src/server.ts",
+    "migrate": "node src/db/migrate.ts",
+    "seed": "node src/db/seed.ts",
+    "test": "node --test --test-concurrency=1 \"test/*.test.ts\""
+  },
+  "dependencies": {
+    "@alka/shared": "*",
+    "@electric-sql/pglite": "^0.2.17",
+    "@fastify/cors": "^10.0.2",
+    "@fastify/jwt": "^9.0.3",
+    "@fastify/static": "^10.1.3",
+    "fastify": "^5.2.1",
+    "pg": "^8.13.1"
+  }
+}
