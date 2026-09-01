@@ -25,7 +25,8 @@ Working and verified end to end, in the browser as well as in tests:
 | Counter sales | Own fulfilment type, distinct from pickup (migration 006). |
 | Products & pricing | Products, price lists, full rate-card grid. |
 | Bills of material | Screen at `/products/:productId/bom`. |
-| Suppliers & raw materials | Create/edit, supplier links, volume price breaks. |
+| Suppliers & raw materials | Create/edit, supplier links, volume price breaks. Full material edit, and delete-or-withdraw (migration 010). |
+| Material categories & sizes | Managed by an admin on the raw materials screen — add, rename, retire. No longer a list in the code. |
 | Purchase orders | Raise (auto-priced), receive into FIFO batches. |
 | Production | BOM explosion, feasibility check, FIFO consumption. |
 | Stock | Finished goods, movement ledger, physical counts + reconcile. |
@@ -35,7 +36,7 @@ Working and verified end to end, in the browser as well as in tests:
 | Payments screen | Record, reverse, reassign from one place. |
 | Auth & roles | 4 roles, enforced at route AND service layer. Per-install signing key. |
 
-**Tests: 281 passing** — 64 pure domain (`packages/shared`), 217 API
+**Tests: 291 passing** — 64 pure domain (`packages/shared`), 227 API
 (`packages/api`, against real PostgreSQL via PGlite).
 
 ```bash
@@ -74,6 +75,7 @@ decision behind them:
 | 007 | customer name on the invoice ledger; stop calling invoices overdue a day early |
 | 008 | `business_date(ts)` applied where 004 missed |
 | 009 | standing orders — pause/end, and the unique index that stops an occurrence being raised twice |
+| 010 | material categories and sizes become data the office manages; withdrawing a material from use |
 
 ---
 
@@ -146,6 +148,13 @@ Load-bearing. Each corresponds to a real bug and is pinned by a named test.
    layers.** A stock count works to a target, not a delta, so it repairs drift.
 10. **A printed invoice and an on-screen one read from the same ledger
     figures**, so they cannot disagree.
+11. **Withdrawing a material changes nothing about work already done.** Its
+    stock, its FIFO cost history and every recipe it is on stay exactly as
+    they were; it only stops being *offered* for new POs, recipes and usage.
+    A screen that hides withdrawn materials must hide them from the picker
+    only — never from the list it also uses to look a line's material up.
+    Filtering the whole list is what made a withdrawn component read as
+    costing zero and, on the next save, relabelled it `Water`.
 
 ---
 

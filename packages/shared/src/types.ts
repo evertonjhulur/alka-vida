@@ -38,8 +38,17 @@ export type InvoiceStatus = (typeof INVOICE_STATUSES)[number];
 export const APPROVAL_STATUSES = ['Pending', 'Approved', 'Rejected'] as const;
 export type ApprovalStatus = (typeof APPROVAL_STATUSES)[number];
 
+/**
+ * The categories a fresh install starts with - NOT the permitted set.
+ *
+ * Categories and their sizes are data the office manages (migration 010,
+ * `material_categories`). Nothing in the business logic branches on category,
+ * so a new one cannot affect costing, production or purchasing; the service
+ * validates against that table, which is the only place a list the office
+ * edits can be checked.
+ */
 export const MATERIAL_CATEGORIES = ['Bottle', 'Cap', 'Handle', 'Label', 'Water'] as const;
-export type MaterialCategory = (typeof MATERIAL_CATEGORIES)[number];
+export type MaterialCategory = string;
 
 export const RECURRENCE_PATTERNS = ['Weekly', 'Biweekly', 'Monthly'] as const;
 export type RecurrencePattern = (typeof RECURRENCE_PATTERNS)[number];

@@ -661,6 +661,35 @@ export async function buildServer(db: Db) {
       return { unitCostCents };
     });
 
+  /* ---------------- material categories and sizes ---------------- */
+
+  // Anyone who can see materials needs the list in order to read the screen;
+  // only an admin changes what the list contains.
+  app.get('/api/material-categories', { preHandler: allow('admin', 'user') },
+    async () => catalog.listMaterialCategories(db));
+
+  app.post('/api/material-categories', { preHandler: allow('admin') },
+    async (req) => catalog.createMaterialCategory(db, actorOf(req), req.body as never));
+
+  app.patch('/api/material-categories/:id', { preHandler: allow('admin') },
+    async (req) => {
+      await catalog.updateMaterialCategory(db, actorOf(req),
+        (req.params as { id: string }).id, req.body as never);
+      return { ok: true };
+    });
+
+  // Deletes outright when nothing is filed under it, retires it when
+  // something is. The response says which happened.
+  app.delete('/api/material-categories/:id', { preHandler: allow('admin') },
+    async (req) => catalog.deleteMaterialCategory(db, actorOf(req),
+      (req.params as { id: string }).id));
+
+  app.post('/api/material-categories/:id/restore', { preHandler: allow('admin') },
+    async (req) => {
+      await catalog.restoreMaterialCategory(db, actorOf(req), (req.params as { id: string }).id);
+      return { ok: true };
+    });
+
   /* ---------------- raw materials ---------------- */
 
   app.get('/api/raw-materials', { preHandler: allow('admin', 'user') },
@@ -673,6 +702,19 @@ export async function buildServer(db: Db) {
     async (req) => {
       await catalog.updateRawMaterial(db, actorOf(req),
         (req.params as { id: string }).id, req.body as never);
+      return { ok: true };
+    });
+
+  // Deletes a material nothing has ever used; retires one that carries
+  // history, so past costing and stock value survive. Admin only - it is the
+  // one action on this screen that cannot simply be typed back in.
+  app.delete('/api/raw-materials/:id', { preHandler: allow('admin') },
+    async (req) => catalog.deleteRawMaterial(db, actorOf(req),
+      (req.params as { id: string }).id));
+
+  app.post('/api/raw-materials/:id/restore', { preHandler: allow('admin') },
+    async (req) => {
+      await catalog.restoreRawMaterial(db, actorOf(req), (req.params as { id: string }).id);
       return { ok: true };
     });
 

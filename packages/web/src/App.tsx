@@ -124,7 +124,7 @@ function Shell({ session }: { session: Session }) {
           <Route path="/invoices/:invoiceId" element={<InvoiceDetail session={session} />} />
           <Route path="/statement" element={<Statement />} />
           <Route path="/approvals" element={<Approvals session={session} />} />
-          <Route path="/materials" element={<RawMaterials />} />
+          <Route path="/materials" element={<RawMaterials session={session} />} />
           <Route path="/suppliers" element={<Suppliers />} />
           <Route path="/purchase-orders" element={<PurchaseOrders />} />
           <Route path="/production" element={<Production />} />

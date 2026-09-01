@@ -11,7 +11,11 @@ import assert from 'node:assert/strict';
 import { createPgliteDb, type Db } from '../src/db/index.ts';
 import { migrate } from '../src/db/migrate.ts';
 import { seed } from '../src/db/seed.ts';
-import { setSupplierMaterial } from '../src/services/catalog.ts';
+import {
+  setSupplierMaterial, createRawMaterial, updateRawMaterial, deleteRawMaterial,
+  restoreRawMaterial, listRawMaterials, createMaterialCategory,
+  updateMaterialCategory, deleteMaterialCategory, listMaterialCategories,
+} from '../src/services/catalog.ts';
 import {
   createPurchaseOrder, receivePurchaseOrder, issueMaterial, lookupSupplierPrice,
 } from '../src/services/inventory.ts';
@@ -248,5 +252,221 @@ describe('Business dates are Jamaican dates, not UTC ones', () => {
 
     assert.equal(sheet.d, businessToday(),
       'an order taken at half past seven in the evening belongs on TODAY round');
+  });
+});
+
+/* ------------------------------------------------------------------ */
+
+describe('An admin can correct the material catalogue', () => {
+  // A real user id with a different role: the audit trail is a foreign key,
+  // so an invented id fails on the write rather than on the role check.
+  const driver = (): Actor => ({ id: admin.id, name: 'Driver', role: 'driver' });
+  const office = (): Actor => ({ id: admin.id, name: 'Office', role: 'user' });
+
+  test('a reorder point can be changed, and a size can be CLEARED', async () => {
+    const { id } = await createRawMaterial(db, admin, {
+      name: 'Trial cap', category: 'Cap', sizeSpec: '28mm', reorderPoint: 100,
+    });
+
+    await updateRawMaterial(db, admin, id, { reorderPoint: 250 });
+    let row = await db.one<{ reorder_point: string; size_spec: string | null }>(
+      `SELECT reorder_point::text, size_spec FROM raw_materials WHERE id = $1`, [id]);
+    assert.equal(Number(row.reorder_point), 250);
+    assert.equal(row.size_spec, '28mm', 'a field nobody touched must not move');
+
+    // The COALESCE version of this update could change a size but never
+    // remove one - an empty box read as "leave it alone".
+    await updateRawMaterial(db, admin, id, { sizeSpec: '' });
+    row = await db.one(`SELECT reorder_point::text, size_spec FROM raw_materials WHERE id = $1`,
+      [id]);
+    assert.equal(row.size_spec, null, 'an emptied size must actually clear');
+    assert.equal(Number(row.reorder_point), 250, 'and must not disturb anything else');
+
+    await deleteRawMaterial(db, admin, id);
+  });
+
+  test('a material nothing ever used is deleted outright', async () => {
+    const { id } = await createRawMaterial(db, admin, { name: 'Typo material', category: 'Cap' });
+    const out = await deleteRawMaterial(db, admin, id);
+
+    assert.equal(out.deleted, true);
+    assert.equal(out.retired, false);
+    const left = await db.query(`SELECT id FROM raw_materials WHERE id = $1`, [id]);
+    assert.equal(left.length, 0, 'a material nobody ever touched leaves nothing behind');
+  });
+
+  /**
+   * The invariant behind the whole delete design: a material that has been
+   * bought carries the cost of work already done. Removing it would either be
+   * refused by the database or would tear that record out from under past
+   * production, so it is withdrawn from use instead.
+   */
+  test('a material with history is withdrawn from use, never deleted', async () => {
+    const capId = await materialId('28mm cap');
+    const before = await db.one<{ qty: string }>(
+      `SELECT quantity_on_hand::text AS qty FROM raw_materials WHERE id = $1`, [capId]);
+
+    const out = await deleteRawMaterial(db, admin, capId);
+
+    assert.equal(out.deleted, false);
+    assert.equal(out.retired, true);
+    assert.ok(out.reasons.length > 0, 'it must say WHY it could not be deleted');
+    assert.ok(out.reasons.some((r) => /recipe/.test(r)),
+      `a cap on a product recipe should say so - got ${JSON.stringify(out.reasons)}`);
+
+    const after = await db.one<{ qty: string; retired_at: string | null }>(
+      `SELECT quantity_on_hand::text AS qty, retired_at FROM raw_materials WHERE id = $1`, [capId]);
+    assert.ok(after.retired_at, 'it is withdrawn');
+    assert.equal(after.qty, before.qty, 'its stock, and so its value, is untouched');
+
+    const batches = await db.one<{ n: string }>(
+      `SELECT COUNT(*)::text AS n FROM material_batches WHERE raw_material_id = $1`, [capId]);
+    assert.ok(Number(batches.n) > 0, 'and its FIFO cost history survives');
+  });
+
+  test('a withdrawn material never asks to be reordered', async () => {
+    const capId = await materialId('28mm cap');
+    // Put it below its reorder point while withdrawn.
+    await db.query(
+      `UPDATE raw_materials SET reorder_point = quantity_on_hand + 1 WHERE id = $1`, [capId]);
+
+    const listed = await listRawMaterials(db);
+    const cap = listed.find((m) => (m as { id: string }).id === capId) as
+      { needs_reorder: boolean; retired_at: string | null };
+    assert.ok(cap.retired_at, 'still withdrawn');
+    assert.equal(cap.needs_reorder, false,
+      'buying more of something you have stopped using is exactly the wrong prompt');
+
+    await restoreRawMaterial(db, admin, capId);
+    const back = (await listRawMaterials(db)).find((m) => (m as { id: string }).id === capId) as
+      { needs_reorder: boolean; retired_at: string | null };
+    assert.equal(back.retired_at, null, 'brought back');
+    assert.equal(back.needs_reorder, true, 'and it asks to be reordered again');
+
+    await db.query(`UPDATE raw_materials SET reorder_point = 0 WHERE id = $1`, [capId]);
+  });
+
+  /**
+   * Withdrawing a material must leave every product still made from it
+   * exactly as it was. The first cut of the raw-materials screen filtered
+   * withdrawn materials out of the list the BOM editor ALSO used to look up
+   * each line's cost and component type, so a withdrawn component silently
+   * showed a cost of zero and would have been relabelled 'Water' on the next
+   * save. The recipe is the record of how the product is made; retiring the
+   * purchase of a material says nothing about that.
+   */
+  test('withdrawing a material leaves the recipes made from it untouched', async () => {
+    const labelId = await materialId('280ml label');
+    const before = await db.query<{ product_id: string; component_type: string; quantity: string }>(
+      `SELECT product_id, component_type, quantity::text FROM bom_line_items
+       WHERE raw_material_id = $1 ORDER BY product_id`, [labelId]);
+    assert.ok(before.length > 0, 'the fixture needs this label on at least one recipe');
+
+    await deleteRawMaterial(db, admin, labelId);
+
+    const after = await db.query<{ product_id: string; component_type: string; quantity: string }>(
+      `SELECT product_id, component_type, quantity::text FROM bom_line_items
+       WHERE raw_material_id = $1 ORDER BY product_id`, [labelId]);
+    assert.deepEqual(after, before, 'the recipe is how the product is made, not how it is bought');
+
+    // And the line still finds its material, so it can still be costed.
+    const product = before[0].product_id;
+    const bom = await db.query<{ raw_material_id: string; raw_material_name: string }>(
+      `SELECT b.raw_material_id, rm.name AS raw_material_name
+       FROM bom_line_items b JOIN raw_materials rm ON rm.id = b.raw_material_id
+       WHERE b.product_id = $1 AND b.raw_material_id = $2`, [product, labelId]);
+    assert.equal(bom.length, 1, 'a withdrawn component must not vanish from its recipe');
+    assert.equal(bom[0].raw_material_name, '280ml label');
+
+    await restoreRawMaterial(db, admin, labelId);
+  });
+
+  test('only an admin removes a material', async () => {
+    const { id } = await createRawMaterial(db, office(), { name: 'Office cap', category: 'Cap' });
+    await assert.rejects(() => deleteRawMaterial(db, office(), id), /role|permitted/i);
+    await assert.rejects(() => deleteRawMaterial(db, driver(), id), /role|permitted/i);
+    await deleteRawMaterial(db, admin, id);
+  });
+});
+
+describe('Categories and sizes are the office\'s to change', () => {
+  test('a brand new category takes materials and recipes', async () => {
+    await createMaterialCategory(db, admin, { name: 'Carton', sizes: ['12s', '24s'] });
+
+    const cats = await listMaterialCategories(db);
+    const carton = cats.find((c) => (c as { name: string }).name === 'Carton') as
+      { id: string; sizes: string[] };
+    assert.deepEqual(carton.sizes, ['12s', '24s'], 'sizes come back in the order given');
+
+    // The real proof that the closed list is gone: a material files under it.
+    const { id } = await createRawMaterial(db, admin, {
+      name: 'Shipping carton', category: 'Carton', sizeSpec: '24s',
+    });
+    const row = await db.one<{ category: string }>(
+      `SELECT category FROM raw_materials WHERE id = $1`, [id]);
+    assert.equal(row.category, 'Carton');
+
+    // And onto a product recipe, which carried the same closed list.
+    const product = await productId('Alka Vida 500ml');
+    await db.query(
+      `INSERT INTO bom_line_items (product_id, raw_material_id, component_type, quantity)
+       VALUES ($1,$2,'Carton',0.05)`, [product, id]);
+
+    // Renaming has to carry BOTH across, or the material answers to a name
+    // that no longer exists and drops off the screen.
+    await updateMaterialCategory(db, admin, carton.id, { name: 'Cartons' });
+    const renamed = await db.one<{ category: string }>(
+      `SELECT category FROM raw_materials WHERE id = $1`, [id]);
+    assert.equal(renamed.category, 'Cartons', 'the material followed the rename');
+    const line = await db.one<{ component_type: string }>(
+      `SELECT component_type FROM bom_line_items WHERE raw_material_id = $1`, [id]);
+    assert.equal(line.component_type, 'Cartons', 'and so did its recipe line');
+
+    await db.query(`DELETE FROM bom_line_items WHERE raw_material_id = $1`, [id]);
+    await db.query(`DELETE FROM raw_materials WHERE id = $1`, [id]);
+    await deleteMaterialCategory(db, admin, carton.id);
+  });
+
+  test('a category with materials under it is withdrawn, not deleted', async () => {
+    const bottles = (await listMaterialCategories(db))
+      .find((c) => (c as { name: string }).name === 'Bottle') as { id: string };
+
+    const out = await deleteMaterialCategory(db, admin, bottles.id);
+    assert.equal(out.deleted, false);
+    assert.equal(out.retired, true);
+    assert.ok(out.materialCount > 0, 'it says how many are filed under it');
+
+    const still = await db.one<{ n: string }>(
+      `SELECT COUNT(*)::text AS n FROM raw_materials WHERE category = 'Bottle'`);
+    assert.ok(Number(still.n) > 0, 'nothing filed under it was orphaned');
+
+    // A withdrawn category takes nothing new.
+    await assert.rejects(
+      () => createRawMaterial(db, admin, { name: 'Late bottle', category: 'Bottle' }),
+      /retired|withdrawn/i,
+    );
+
+    await db.query(`UPDATE material_categories SET retired_at = NULL WHERE id = $1`, [bottles.id]);
+  });
+
+  test('a category nobody uses is deleted outright, and only by an admin', async () => {
+    await assert.rejects(
+      () => createMaterialCategory(db, { id: admin.id, name: 'Office', role: 'user' },
+        { name: 'Sundries' }),
+      /role|permitted/i,
+    );
+
+    const { id } = await createMaterialCategory(db, admin, { name: 'Sundries' });
+    const out = await deleteMaterialCategory(db, admin, id);
+    assert.equal(out.deleted, true);
+    const left = await db.query(`SELECT id FROM material_categories WHERE id = $1`, [id]);
+    assert.equal(left.length, 0);
+  });
+
+  test('a material cannot be filed under a category that does not exist', async () => {
+    await assert.rejects(
+      () => createRawMaterial(db, admin, { name: 'Mystery', category: 'Nonsense' }),
+      /no category/i,
+    );
   });
 });

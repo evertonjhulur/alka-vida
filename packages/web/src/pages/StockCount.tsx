@@ -2,7 +2,10 @@ import { useEffect, useState } from 'react';
 import { api, type Session } from '../lib/api';
 import { money, date } from '../lib/format';
 
-interface Material { id: string; name: string; quantity_on_hand: number; unit_of_measure: string }
+interface Material {
+  id: string; name: string; quantity_on_hand: number; unit_of_measure: string;
+  retired_at: string | null;
+}
 interface FinishedGood { product_id: string; name: string; bottles_on_hand: number }
 
 interface Audit {
@@ -25,7 +28,11 @@ export default function StockCount({ session }: { session: Session }) {
   const [busy, setBusy] = useState(false);
 
   async function load() {
-    setMaterials(await api.get<Material[]>('/api/raw-materials'));
+    // A material withdrawn from use drops off the count UNLESS stock of it is
+    // still on the shelf - that stock is still on the books and still has to
+    // be counted, and counting it to zero is how it is written off.
+    setMaterials((await api.get<Material[]>('/api/raw-materials'))
+      .filter((m) => !m.retired_at || Number(m.quantity_on_hand) > 0));
     setGoods(await api.get<FinishedGood[]>('/api/finished-goods'));
     setAudits(await api.get<Audit[]>('/api/audits'));
   }

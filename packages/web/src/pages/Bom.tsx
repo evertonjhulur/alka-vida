@@ -16,6 +16,7 @@ interface BomLine {
 interface Material {
   id: string; name: string; category: string; size_spec: string | null;
   unit_of_measure: string; blended_cost_cents: number;
+  retired_at: string | null;
 }
 
 interface Product {
@@ -42,6 +43,11 @@ export default function Bom() {
         api.get<{ products: Product[] }>('/api/pricing'),
       ]);
       setLines(bom);
+      // The FULL list, withdrawn materials included. Only the picker below
+      // hides them. This list is also how a line finds its material to read
+      // off a cost and a component type, and a line whose material was
+      // missing from it showed a cost of zero and, on the next save, was
+      // relabelled 'Water'.
       setMaterials(mats);
       setProduct(matrix.products.find((p) => p.id === productId) ?? null);
     } catch (e) {
@@ -201,7 +207,11 @@ export default function Bom() {
             <select id="bm" value={draft.rawMaterialId} style={{ width: '100%' }}
                     onChange={(e) => setDraft({ ...draft, rawMaterialId: e.target.value })}>
               <option value="">Select a material…</option>
-              {materials.map((m) => (
+              {/* A material withdrawn from use is not offered for a NEW line.
+                  One already on this recipe keeps its place - the product is
+                  still made that way, and its costing must not change on its
+                  own. */}
+              {materials.filter((m) => !m.retired_at).map((m) => (
                 <option key={m.id} value={m.id}>{label(m)} — {m.category}</option>
               ))}
             </select>

@@ -16,7 +16,10 @@ interface Supplier {
   notes: string | null; materials: SuppliedMaterial[];
 }
 
-interface Material { id: string; name: string; unit_of_measure: string; size_spec: string | null }
+interface Material {
+  id: string; name: string; unit_of_measure: string; size_spec: string | null;
+  retired_at: string | null;
+}
 
 interface PriceForm {
   rawMaterialId: string;
@@ -43,6 +46,9 @@ export default function Suppliers() {
 
   async function load() {
     setSuppliers(await api.get<Supplier[]>('/api/suppliers'));
+    // The FULL list. Only the picker hides withdrawn materials - this list is
+    // also how the form reads a material's unit, and a supplier's existing
+    // pricing for a withdrawn material still has to describe itself.
     setMaterials(await api.get<Material[]>('/api/raw-materials'));
   }
   useEffect(() => { load().catch((e) => setError(e.message)); }, []);
@@ -135,9 +141,14 @@ export default function Suppliers() {
             <select id={`m-${s.id}`} value={price.rawMaterialId} style={{ width: '100%' }}
                     onChange={(e) => setPrice({ ...price, rawMaterialId: e.target.value })}>
               <option value="">Select a material…</option>
-              {materials.map((m) => (
-                <option key={m.id} value={m.id}>{materialLabel(m)}</option>
-              ))}
+              {/* Pricing is for what you will buy next, so a material
+                  withdrawn from use is not offered - unless it is the one
+                  already loaded into this form for correction. */}
+              {materials
+                .filter((m) => !m.retired_at || m.id === price.rawMaterialId)
+                .map((m) => (
+                  <option key={m.id} value={m.id}>{materialLabel(m)}</option>
+                ))}
             </select>
           </div>
           <div className="field">
