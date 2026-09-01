@@ -5,3 +5,6 @@ dist/
 .env
 .env.*
 .DS_Store
+
+# Local settings: holds the mail account password.
+Alka Vida settings.txt

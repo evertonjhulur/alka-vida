@@ -13,7 +13,7 @@ interface Holding {
 }
 interface Movement {
   id: string; quantity: number; direction: string; reference: string | null;
-  reference_type: string; txn_date: string; notes: string | null;
+  reference_type: string; txn_day: string; notes: string | null;
 }
 
 export default function BottlePool({ session }: { session: Session }) {
@@ -191,7 +191,7 @@ export default function BottlePool({ session }: { session: Session }) {
           <tbody>
             {history.map((m) => (
               <tr key={m.id}>
-                <td>{date(m.txn_date)}</td>
+                <td>{date(m.txn_day)}</td>
                 <td>
                   <span className={`chip ${
                     m.reference_type === 'BottleReturn' ? 'ok'

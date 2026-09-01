@@ -9,7 +9,7 @@
 
 import type { Db, Queryable } from '../db/index.ts';
 import type { Actor } from './core.ts';
-import { audit, BUSINESS_TIMEZONE, requireRole, withIdempotency, num } from './core.ts';
+import { audit, requireRole, withIdempotency, num } from './core.ts';
 import type { Cents, PaymentMethod } from '@alka/shared';
 import { RuleViolation, planPayments, validateAllocation } from '@alka/shared';
 
@@ -323,12 +323,12 @@ export async function unappliedPayments(db: Db, customerId?: string) {
     payment_date: string; method: string; reference: string | null; notes: string | null;
   }>(
     `SELECT p.id, p.customer_id, c.name AS customer_name, p.amount_cents,
-            to_char(p.payment_date AT TIME ZONE $2, 'YYYY-MM-DD') AS payment_date,
+            business_date(p.payment_date)::text AS payment_date,
             p.method, p.reference, p.notes
      FROM payments p JOIN customers c ON c.id = p.customer_id
      WHERE p.invoice_id IS NULL AND p.status = 'Confirmed' AND NOT p.is_reversal
        AND ($1::uuid IS NULL OR p.customer_id = $1::uuid)
      ORDER BY p.payment_date DESC, c.name`,
-    [customerId ?? null, BUSINESS_TIMEZONE],
+    [customerId ?? null],
   );
 }

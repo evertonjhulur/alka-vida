@@ -378,8 +378,21 @@ export async function getInvoiceDetail(db: Db, invoiceId: string) {
      WHERE ili.invoice_id = $1`, [invoiceId],
   );
   const payments = await db.query(
-    `SELECT id, amount_cents, payment_date, method, status, is_reversal, reference
+    `SELECT id, amount_cents, business_date(payment_date)::text AS payment_date,
+            method, status, is_reversal, reference
      FROM payments WHERE invoice_id = $1 ORDER BY payment_date`, [invoiceId],
   );
-  return { ...header, ...ledger, lines, payments };
+  // Who it is for, and what it came from. Without these the screen showed a
+  // number, some lines and no way to tell whose invoice it was.
+  const customer = await db.one(
+    `SELECT id, name, email, phone, delivery_address, payment_terms, delivery_zone
+     FROM customers WHERE id = $1`, [ledger.customerId],
+  );
+  const orders = await db.query(
+    `SELECT o.id, o.order_number, o.delivery_mode, o.order_date::text AS order_date,
+            o.requested_delivery_date::text AS requested_delivery_date, o.status
+     FROM invoice_orders io JOIN customer_orders o ON o.id = io.order_id
+     WHERE io.invoice_id = $1 ORDER BY o.order_number`, [invoiceId],
+  );
+  return { ...header, ...ledger, lines, payments, customer, orders };
 }

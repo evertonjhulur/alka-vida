@@ -282,7 +282,8 @@ export async function listRawMaterials(db: Db) {
 /** Open FIFO batches for one material, oldest first - the draw order. */
 export async function materialBatches(db: Db, materialId: string) {
   return db.query(
-    `SELECT mb.id, mb.received_date, mb.unit_cost_cents, mb.quantity_received,
+    `SELECT mb.id, business_date(mb.received_date)::text AS received_date,
+            mb.unit_cost_cents, mb.quantity_received,
             mb.quantity_remaining, mb.status, s.name AS supplier_name, po.po_number
      FROM material_batches mb
      LEFT JOIN suppliers s ON s.id = mb.supplier_id

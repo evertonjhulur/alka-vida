@@ -25,6 +25,8 @@ import Suppliers from './pages/Suppliers';
 import Pricing from './pages/Pricing';
 import Bom from './pages/Bom';
 import Payments from './pages/Payments';
+import ErrorBoundary from './components/ErrorBoundary';
+import StaleServerNotice from './components/StaleServerNotice';
 import PurchaseOrders from './pages/PurchaseOrders';
 import Production from './pages/Production';
 import Stock from './pages/Stock';
@@ -102,6 +104,8 @@ function Shell({ session }: { session: Session }) {
       </aside>
 
       <main className="main">
+        <StaleServerNotice />
+        <ErrorBoundary>
         <Routes>
           <Route path="/" element={<HomeFor session={session} />} />
           <Route path="/orders/new" element={<NewOrder />} />
@@ -130,6 +134,7 @@ function Shell({ session }: { session: Session }) {
           <Route path="/portal" element={<Portal session={session} />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
+        </ErrorBoundary>
       </main>
     </div>
   );

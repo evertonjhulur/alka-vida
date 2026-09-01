@@ -509,10 +509,11 @@ export async function listInventoryTransactions(
   opts: { itemType?: string; itemId?: string; limit?: number } = {},
 ) {
   return db.query(
-    `SELECT * FROM inventory_transactions
-     WHERE ($1::text IS NULL OR item_type = $1)
-       AND ($2::uuid IS NULL OR item_id = $2::uuid)
-     ORDER BY txn_date DESC
+    `SELECT t.*, business_date(t.txn_date)::text AS txn_day
+     FROM inventory_transactions t
+     WHERE ($1::text IS NULL OR t.item_type = $1)
+       AND ($2::uuid IS NULL OR t.item_id = $2::uuid)
+     ORDER BY t.txn_date DESC
      LIMIT $3`,
     [opts.itemType ?? null, opts.itemId ?? null, opts.limit ?? 100],
   );

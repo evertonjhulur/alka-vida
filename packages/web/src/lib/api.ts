@@ -90,6 +90,34 @@ export const api = {
   },
 };
 
+/**
+ * Fetch a file from the API and hand it to the browser as a download.
+ *
+ * A plain <a href> cannot carry the bearer token, so the bytes are fetched
+ * and handed over as a blob instead.
+ */
+export async function download(path: string, filename: string): Promise<void> {
+  const token = getToken();
+  const res = await fetch(path, {
+    headers: token ? { authorization: `Bearer ${token}` } : {},
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    let message = `Could not download (${res.status})`;
+    try { message = JSON.parse(text).error ?? message; } catch { /* not JSON */ }
+    throw new ApiError(res.status, message);
+  }
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
 /** A stable key for guarding a double-submitted action. */
 export function idempotencyKey(prefix: string): string {
   return `${prefix}-${crypto.randomUUID()}`;

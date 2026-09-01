@@ -8,12 +8,13 @@
 
 import Fastify from 'fastify';
 import cors from '@fastify/cors';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createDb, type Db } from './db/index.ts';
 import { migrate } from './db/migrate.ts';
 import { loadSigningKey, login, userExists, verifyToken, type Session } from './lib/auth.ts';
+import { loadSettings } from './lib/settings.ts';
 import { ForbiddenError, RuleViolation } from '@alka/shared';
 import { BUSINESS_TIMEZONE, type Actor } from './services/core.ts';
 
@@ -22,6 +23,7 @@ import * as delivery from './services/delivery.ts';
 import * as routing from './services/routing.ts';
 import * as settlement from './services/settlement.ts';
 import * as invoices from './services/invoices.ts';
+import * as documents from './services/documents.ts';
 import * as payments from './services/payments.ts';
 import * as ledger from './services/ledger.ts';
 import * as customers from './services/customers.ts';
@@ -42,6 +44,9 @@ declare module 'fastify' {
 }
 
 export async function buildServer(db: Db) {
+  // Settings the owner edits in Notepad, loaded before anything reads them.
+  loadSettings();
+
   // Tokens are signed with a per-install key kept in this database, so a
   // token minted against a previous one stops verifying. Must happen before
   // any route can sign or check a token.
@@ -118,6 +123,9 @@ export async function buildServer(db: Db) {
     // requiring a token to fetch the login page itself is a deadlock.
     if (!req.url.startsWith('/api/')) return;
     if (req.url.startsWith('/api/auth/login')) return;
+    // Answering this is how the browser learns the server is out of date;
+    // requiring a token would hide the very problem it exists to report.
+    if (req.url.startsWith('/api/version')) return;
     const header = req.headers.authorization;
     const token = header?.startsWith('Bearer ') ? header.slice(7) : null;
     const session = token ? verifyToken(token) : null;
@@ -168,6 +176,26 @@ export async function buildServer(db: Db) {
   const webDist = join(
     dirname(fileURLToPath(import.meta.url)), '..', '..', 'web', 'dist',
   );
+  /**
+   * The frontend build this server came up with.
+   *
+   * The server serves packages/web/dist from disk on every request, so
+   * rebuilding the app changes what the BROWSER gets while this process keeps
+   * running the old API. A new screen then calls endpoints that do not exist
+   * and the page dies - which reads as "the screen goes blank", with nothing
+   * to suggest that closing and reopening the window is the fix.
+   *
+   * Read once, at startup, on purpose: it has to reflect the process, not
+   * whatever is on disk now.
+   */
+  let startedWithBuild: string | null = null;
+  try {
+    const shell = readFileSync(join(webDist, 'index.html'), 'utf8');
+    startedWithBuild = shell.match(/assets\/([A-Za-z0-9._-]+\.js)/)?.[1] ?? null;
+  } catch { /* no build yet: the dev server is serving the frontend */ }
+
+  app.get('/api/version', async () => ({ build: startedWithBuild }));
+
   if (existsSync(join(webDist, 'index.html'))) {
     const fastifyStatic = (await import('@fastify/static')).default;
     await app.register(fastifyStatic, { root: webDist });
@@ -509,6 +537,26 @@ export async function buildServer(db: Db) {
   app.patch('/api/invoices/:id', { preHandler: allow('admin') },
     async (req) => invoices.editInvoice(db, actorOf(req),
       (req.params as { id: string }).id, req.body as never));
+
+  // The invoice as a document: the same figures the screen shows.
+  app.get('/api/invoices/:id/pdf', { preHandler: allow('admin', 'user') },
+    async (req, reply) => {
+      const doc = await documents.renderInvoicePdf(db, (req.params as { id: string }).id);
+      return reply
+        .header('content-type', 'application/pdf')
+        .header('content-disposition', `attachment; filename="${doc.filename}"`)
+        .send(doc.pdf);
+    });
+
+  // Whether a Send button can work at all, so a screen can say so plainly
+  // instead of offering something that will fail.
+  app.get('/api/settings/mail', { preHandler: allow('admin', 'user') },
+    async () => ({ configured: documents.mailConfigured() }));
+
+  app.post('/api/invoices/:id/email', { preHandler: allow('admin', 'user') },
+    async (req) => documents.emailInvoice(db, actorOf(req),
+      (req.params as { id: string }).id,
+      (req.body as { to?: string | null }).to ?? null));
 
   app.post('/api/invoices/:id/sent', { preHandler: allow('admin', 'user') },
     async (req) => {

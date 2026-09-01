@@ -13,7 +13,7 @@ interface Pool {
 interface Txn {
   id: string; item_type: string; item_name: string; quantity: number;
   direction: string; reference: string | null; reference_type: string;
-  txn_date: string; total_cost_cents: number | null; notes: string | null;
+  txn_day: string; total_cost_cents: number | null; notes: string | null;
 }
 
 export default function Stock() {
@@ -122,7 +122,7 @@ export default function Stock() {
           <tbody>
             {txns.map((t) => (
               <tr key={t.id}>
-                <td>{date(t.txn_date)}</td>
+                <td>{date(t.txn_day)}</td>
                 <td>
                   {t.item_name}
                   <div className="muted small">{t.item_type}</div>

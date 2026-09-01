@@ -128,7 +128,8 @@ async function applyDiscountToInvoice(
 /** Everything awaiting an Admin, newest request last. */
 export async function listPendingApprovals(db: Db): Promise<PendingApproval[]> {
   const rows = await db.query<Record<string, unknown>>(
-    `SELECT ar.*, c.name AS customer_name, u.name AS requested_by_name
+    `SELECT ar.*, business_date(ar.requested_date)::text AS requested_on,
+            c.name AS customer_name, u.name AS requested_by_name
      FROM approval_requests ar
      LEFT JOIN customers c ON c.id = ar.customer_id
      LEFT JOIN users u ON u.id = ar.requested_by_id
@@ -148,7 +149,7 @@ export async function listPendingApprovals(db: Db): Promise<PendingApproval[]> {
     discountPercent: r.discount_percent === null ? null : num(r.discount_percent),
     reason: (r.reason as string) ?? null,
     requestedByName: (r.requested_by_name as string) ?? null,
-    requestedDate: String(r.requested_date),
+    requestedDate: String(r.requested_on),
   }));
 }
 

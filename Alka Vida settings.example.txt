@@ -1,0 +1,50 @@
+# Alka Vida settings
+#
+# HOW TO USE THIS FILE
+#   1. Make a copy of it in this same folder.
+#   2. Rename the copy to exactly:   Alka Vida settings.txt
+#   3. Fill in the values below.
+#   4. Close Alka Vida and open it again.
+#
+# The real settings file is ignored by version control, so the password you
+# put in it stays on this machine and is never committed.
+#
+# Everything here is optional. With nothing set, Alka Vida works exactly as it
+# does today - you simply download an invoice PDF and attach it yourself
+# instead of sending it from the app.
+
+
+# ---------------------------------------------------------------------------
+# Sending invoices by email
+# ---------------------------------------------------------------------------
+# The mail account invoices are sent FROM. Use the business address customers
+# should reply to.
+#
+# For Google Workspace or Gmail, SMTP_PASS is NOT your normal password - it is
+# a 16-character "app password" generated at myaccount.google.com under
+# Security. Ordinary passwords are refused by Google for this.
+#
+#   Google      SMTP_HOST=smtp.gmail.com        SMTP_PORT=587
+#   Microsoft   SMTP_HOST=smtp.office365.com    SMTP_PORT=587
+#
+# Ask your email provider if you are not sure.
+
+SMTP_HOST=
+SMTP_PORT=587
+SMTP_USER=
+SMTP_PASS=
+
+# What customers see in the From line. Leave blank to use SMTP_USER.
+MAIL_FROM=
+
+
+# ---------------------------------------------------------------------------
+# Advanced - you almost certainly do not need these
+# ---------------------------------------------------------------------------
+# The timezone every business date is calculated in. Changing this changes
+# what day an invoice is dated.
+# BUSINESS_TIMEZONE=America/Jamaica
+
+# Set this to a long random phrase in a real deployment. Left blank, Alka Vida
+# generates one per installation and keeps it in its own database.
+# JWT_SECRET=
