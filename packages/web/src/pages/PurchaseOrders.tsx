@@ -174,8 +174,8 @@ export default function PurchaseOrders() {
 
             {supplier && supplier.materials.length === 0 && (
               <div className="notice warn">
-                No materials are linked to {supplier.name} yet. Link them on the
-                Raw materials screen so their prices can be applied here.
+                Nothing is recorded for {supplier.name} yet. Add what they sell and
+                what they charge on the Suppliers screen, and their prices apply here.
               </div>
             )}
 
@@ -319,6 +319,23 @@ export default function PurchaseOrders() {
                     <input type="number" min="0" style={{ width: 110 }}
                            value={receipts[l.id] ?? ''}
                            onChange={(e) => setReceipts({ ...receipts, [l.id]: e.target.value })} />
+                    {' '}
+                    {/* The common case is the whole outstanding quantity arriving;
+                        the box stays for a short delivery. */}
+                    <button type="button" className="secondary"
+                            onClick={() => setReceipts({
+                              ...receipts,
+                              [l.id]: String(Math.max(
+                                Number(l.quantity_ordered) - Number(l.quantity_received), 0)),
+                            })}>
+                      All
+                    </button>
+                    {Number(receipts[l.id] ?? 0)
+                      > Number(l.quantity_ordered) - Number(l.quantity_received) && (
+                      <div className="chip warn" style={{ marginTop: 4 }}>
+                        more than ordered
+                      </div>
+                    )}
                   </td>
                 </tr>
               ))}

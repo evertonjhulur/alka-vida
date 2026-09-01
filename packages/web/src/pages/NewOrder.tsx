@@ -28,8 +28,18 @@ export default function NewOrder() {
   const [products, setProducts] = useState<Product[]>([]);
   const [customers, setCustomers] = useState<Customer[]>([]);
   const [customerId, setCustomerId] = useState('');
-  const [deliveryMode, setDeliveryMode] = useState<'Delivery' | 'Pickup'>('Delivery');
-  const [requestedDate, setRequestedDate] = useState(new Date().toISOString().slice(0, 10));
+  const [deliveryMode, setDeliveryMode] =
+    useState<'Delivery' | 'Pickup' | 'Counter'>('Delivery');
+  const [method, setMethod] = useState('Cash');
+  // A walk-in is often not on file yet, and a receipt needs a name to carry.
+  const [quickAdd, setQuickAdd] = useState(false);
+  const [walkIn, setWalkIn] = useState({ name: '', phone: '', email: '' });
+  // toISOString() is UTC: after 7pm in Jamaica it prefills TOMORROW, and the
+  // order lands on the wrong day's delivery sheet. en-CA gives YYYY-MM-DD in
+  // the browser's own timezone, which is where the person typing is.
+  const [requestedDate, setRequestedDate] = useState(
+    new Date().toLocaleDateString('en-CA'),
+  );
   const [discount, setDiscount] = useState('0');
   const [lines, setLines] = useState<Line[]>([{ productId: '', qty: '' }]);
   const [paidNow, setPaidNow] = useState('');
@@ -74,6 +84,22 @@ export default function NewOrder() {
    * Prices come from the customer own tier via /prices, so the figure shown
    * here matches what the server calculates when the order is saved.
    */
+  /** Put a walk-in on file: a receipt has to carry a name, phone and email. */
+  async function addWalkIn() {
+    setBusy(true); setError(null);
+    try {
+      const made = await api.post<{ id: string }>('/api/customers', {
+        name: walkIn.name, phone: walkIn.phone, email: walkIn.email,
+      });
+      setCustomers(await api.get<Customer[]>('/api/customers'));
+      setCustomerId(made.id);
+      setQuickAdd(false);
+      setWalkIn({ name: '', phone: '', email: '' });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not add the customer');
+    } finally { setBusy(false); }
+  }
+
   const totals = useMemo(() => {
     let subtotal = 0;
     for (const l of lines) {
@@ -120,7 +146,7 @@ export default function NewOrder() {
     }
 
     try {
-      if (deliveryMode === 'Pickup') {
+      if (deliveryMode === 'Counter') {
         // A counter sale creates the invoice and payment in one motion.
         const sale = await api.post<{
           invoiceNumber: string; grandTotalCents: number; balanceCents: number;
@@ -129,7 +155,7 @@ export default function NewOrder() {
           lines: payloadLines,
           discountPercent: Number(discount) || 0,
           amountPaidCents: paidNow ? Math.round(Number(paidNow) * 100) : 0,
-          method: 'Cash',
+          method,
           idempotencyKey: idempotencyKey('counter'),
         });
         setResult(
@@ -195,27 +221,83 @@ export default function NewOrder() {
             <div className="field">
               <label htmlFor="mode">Fulfilment</label>
               <select id="mode" value={deliveryMode}
-                      onChange={(e) => setDeliveryMode(e.target.value as 'Delivery' | 'Pickup')}>
+                      onChange={(e) => setDeliveryMode(
+                        e.target.value as 'Delivery' | 'Pickup' | 'Counter')}>
                 <option value="Delivery">Delivery</option>
-                <option value="Pickup">Pickup / counter sale</option>
+                <option value="Pickup">Pickup — collected later</option>
+                <option value="Counter">Counter sale — paying now</option>
               </select>
             </div>
 
-            {deliveryMode === 'Delivery' && (
+            {deliveryMode !== 'Counter' && (
               <div className="field">
-                <label htmlFor="date">Requested date</label>
+                <label htmlFor="date">
+                  {deliveryMode === 'Pickup' ? 'Collection date' : 'Requested date'}
+                </label>
                 <input id="date" type="date" value={requestedDate}
                        onChange={(e) => setRequestedDate(e.target.value)} />
               </div>
             )}
 
-            <div className="field">
-              <label htmlFor="disc">Discount %</label>
-              <input id="disc" type="number" min="0" max="100" step="0.01"
-                     style={{ width: 90 }} value={discount}
-                     onChange={(e) => setDiscount(e.target.value)} />
-            </div>
           </div>
+
+          {deliveryMode === 'Counter' && (
+            <div className="field" style={{ maxWidth: 260 }}>
+              <label htmlFor="meth">Paid by</label>
+              <select id="meth" value={method} onChange={(e) => setMethod(e.target.value)}>
+                <option value="Cash">Cash</option>
+                <option value="Card">Card</option>
+                <option value="Bank Transfer">Bank Transfer</option>
+                <option value="Cheque">Cheque</option>
+                <option value="Other">Other</option>
+              </select>
+            </div>
+          )}
+
+          {deliveryMode === 'Counter' && !quickAdd && (
+            <p className="muted small">
+              Walk-in not on file?{' '}
+              <button type="button" className="secondary"
+                      onClick={() => setQuickAdd(true)}>Add them quickly</button>
+            </p>
+          )}
+
+          {quickAdd && (
+            <div className="panel" style={{ background: '#f9fafb' }}>
+              <strong>New walk-in customer</strong>
+              <p className="muted small" style={{ marginTop: 4 }}>
+                Enough to issue a receipt. Anything else can be filled in later on
+                the customer record.
+              </p>
+              <div className="row" style={{ alignItems: 'flex-end' }}>
+                <div className="field">
+                  <label>Name</label>
+                  <input value={walkIn.name}
+                         onChange={(e) => setWalkIn({ ...walkIn, name: e.target.value })} />
+                </div>
+                <div className="field">
+                  <label>Phone</label>
+                  <input value={walkIn.phone}
+                         onChange={(e) => setWalkIn({ ...walkIn, phone: e.target.value })} />
+                </div>
+                <div className="field">
+                  <label>Email</label>
+                  <input type="email" value={walkIn.email}
+                         onChange={(e) => setWalkIn({ ...walkIn, email: e.target.value })} />
+                </div>
+                <div className="field">
+                  <button type="button"
+                          disabled={busy || !walkIn.name.trim() || !walkIn.phone.trim()
+                                    || !walkIn.email.trim()}
+                          onClick={addWalkIn}>
+                    Add and select
+                  </button>{' '}
+                  <button type="button" className="secondary"
+                          onClick={() => setQuickAdd(false)}>Cancel</button>
+                </div>
+              </div>
+            </div>
+          )}
 
           {deliveryMode === 'Delivery' && customer && !customer.delivery_zone && (
             <div className="notice warn">
@@ -303,7 +385,15 @@ export default function NewOrder() {
         <div className="panel" style={{ maxWidth: 380, marginLeft: 'auto' }}>
           <div className="total-line"><span>Subtotal</span><span>{money(totals.subtotal)}</span></div>
           <div className="total-line">
-            <span>Discount</span><span>-{money(totals.discountAmount)}</span>
+            <span>
+              Discount{' '}
+              <input id="disc" type="number" min="0" max="100" step="0.01"
+                     style={{ width: 70 }} value={discount}
+                     aria-label="Discount percent"
+                     onChange={(e) => setDiscount(e.target.value)} />
+              <span className="muted small"> %</span>
+            </span>
+            <span>-{money(totals.discountAmount)}</span>
           </div>
           {/* GCT is charged on the post-discount figure. */}
           <div className="total-line"><span>GCT 15%</span><span>{money(totals.gct)}</span></div>
@@ -311,7 +401,7 @@ export default function NewOrder() {
             <span>Total due</span><span>{money(totals.grandTotal)}</span>
           </div>
 
-          {deliveryMode === 'Pickup' && (
+          {deliveryMode === 'Counter' && (
             <div className="field" style={{ marginTop: 14 }}>
               <label htmlFor="paid">Cash received now</label>
               <input id="paid" type="number" step="0.01" min="0" value={paidNow}
@@ -321,7 +411,8 @@ export default function NewOrder() {
           )}
 
           <button style={{ width: '100%', marginTop: 14 }} disabled={busy || !customerId}>
-            {busy ? 'Saving…' : deliveryMode === 'Pickup' ? 'Complete counter sale' : 'Create order'}
+            {busy ? 'Saving…'
+              : deliveryMode === 'Counter' ? 'Complete counter sale' : 'Create order'}
           </button>
         </div>
       </form>

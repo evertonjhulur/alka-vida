@@ -6,7 +6,35 @@ interface Approval {
   id: string; requestType: string; entityLabel: string | null;
   customerName: string | null; amountCents: number;
   discountPercent: number | null; reason: string | null;
+  /** For a stop correction, the proposed changes awaiting a decision. */
+  payload: Record<string, number | string> | null;
   requestedByName: string | null; requestedDate: string;
+}
+
+const TYPE_LABEL: Record<string, string> = {
+  Discount: 'Discount',
+  CreditNote: 'Credit note',
+  StopCorrection: 'Stop correction',
+};
+
+const FIELD_LABEL: Record<string, string> = {
+  paymentAmountCents: 'Cash collected',
+  bottlesDeliveredFull: 'Bottles delivered',
+  bottlesEmptiesPickedUp: 'Empties collected',
+  bottlesLostDamaged: 'Lost or damaged',
+  paymentMethod: 'Method',
+};
+
+/** Render a proposed correction as the figures an admin has to judge. */
+function describe(payload: Record<string, number | string> | null): string {
+  if (!payload) return 'no changes recorded';
+  return Object.entries(payload)
+    .map(([k, v]) => {
+      const label = FIELD_LABEL[k] ?? k;
+      const value = k === 'paymentAmountCents' ? money(Number(v)) : String(v);
+      return `${label}: ${value}`;
+    })
+    .join(' · ');
 }
 
 export default function Approvals({ session }: { session: Session }) {
@@ -31,7 +59,8 @@ export default function Approvals({ session }: { session: Session }) {
     <>
       <h1>Approvals</h1>
       <p className="subtitle">
-        Discounts and credit notes raised by office staff. Sales and deliveries are
+        Discounts, credit notes and stop corrections raised by office staff. Sales
+        and deliveries are
         never held up waiting on these — the amount owed simply stays unchanged
         until a decision is made.
       </p>
@@ -54,7 +83,7 @@ export default function Approvals({ session }: { session: Session }) {
           <tbody>
             {rows.map((r) => (
               <tr key={r.id}>
-                <td><span className="chip info">{r.requestType}</span></td>
+                <td><span className="chip info">{TYPE_LABEL[r.requestType] ?? r.requestType}</span></td>
                 <td>{r.customerName ?? '—'}</td>
                 <td className="small">{r.entityLabel ?? '—'}</td>
                 <td className="small">{r.reason ?? '—'}</td>
@@ -62,8 +91,16 @@ export default function Approvals({ session }: { session: Session }) {
                   {r.requestedByName ?? '—'}<br />{date(r.requestedDate)}
                 </td>
                 <td className="num">
-                  {money(r.amountCents)}
-                  {r.discountPercent ? <div className="muted small">{r.discountPercent}%</div> : null}
+                  {/* A correction changes recorded figures, not a value owed,
+                      so show what would actually change rather than a total
+                      that reads like money moving. */}
+                  {r.requestType === 'StopCorrection'
+                    ? <div className="small" style={{ textAlign: 'left' }}>{describe(r.payload)}</div>
+                    : <>
+                        {money(r.amountCents)}
+                        {r.discountPercent
+                          ? <div className="muted small">{r.discountPercent}%</div> : null}
+                      </>}
                 </td>
                 {session.role === 'admin' && (
                   <td className="num" style={{ whiteSpace: 'nowrap' }}>

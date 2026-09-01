@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { api } from '../lib/api';
-import { money, date } from '../lib/format';
+import { money, date, toCents } from '../lib/format';
 
 interface Order {
   id: string; order_number: string; customer_name: string; customer_id: string;
@@ -104,6 +104,34 @@ export default function Orders() {
       await load();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not save the order');
+    } finally { setBusy(false); }
+  }
+
+  /**
+   * Hand a pickup order over: this is the moment it becomes a bill, exactly
+   * as a delivery does when the stop is marked Delivered. Payment is optional
+   * - collecting on account is normal for a corporate customer.
+   */
+  async function collect(o: Order) {
+    const paid = window.prompt(
+      `Collecting ${o.order_number} for ${money(Number(o.grand_total_cents))}.\n\n` +
+      `How much is being paid now? Leave blank or enter 0 to bill it to the account.`,
+      (Number(o.grand_total_cents) / 100).toFixed(2),
+    );
+    if (paid === null) return;
+    setBusy(true); setError(null);
+    try {
+      const out = await api.post<{ invoiceNumber: string; balanceCents: number }>(
+        `/api/orders/${o.id}/collect`,
+        { amountPaidCents: toCents(paid || '0'), method: 'Cash' },
+      );
+      setMsg(
+        `${o.order_number} collected. Invoice ${out.invoiceNumber} raised, ` +
+        `balance ${money(out.balanceCents)}.`,
+      );
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not record the collection');
     } finally { setBusy(false); }
   }
 
@@ -270,6 +298,13 @@ export default function Orders() {
                 <td className="num" style={{ whiteSpace: 'nowrap' }}>
                   {o.status === 'Pending' ? (
                     <>
+                      {/* A pickup is billed when the customer actually takes it,
+                          the same rule a delivery follows at the stop. */}
+                      {o.delivery_mode === 'Pickup' && (
+                        <>
+                          <button disabled={busy} onClick={() => collect(o)}>Collect</button>{' '}
+                        </>
+                      )}
                       <button className="secondary" onClick={() => startEdit(o)}>Edit</button>{' '}
                       <button className="secondary" disabled={busy}
                               onClick={() => cancel(o)}>Cancel</button>

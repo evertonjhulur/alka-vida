@@ -6,6 +6,7 @@ import { money, date } from '../lib/format';
 interface Sheet {
   id: string; delivery_date: string; zone: string; status: string;
   stop_count: number; driver_name: string | null; cash_variance_cents: number | null;
+  started_at: string | null;
 }
 
 export default function DeliverySheets() {
@@ -37,7 +38,10 @@ export default function DeliverySheets() {
               <tr key={s.id}>
                 <td>{date(s.delivery_date)}</td>
                 <td>{s.zone}</td>
-                <td>{s.driver_name ?? '—'}</td>
+                <td>
+                  {s.driver_name ?? <span className="muted">Not assigned</span>}
+                  {s.started_at && <div className="muted small">started</div>}
+                </td>
                 <td>{s.stop_count}</td>
                 <td>
                   <span className={`chip ${s.status === 'Open' ? 'info' : 'ok'}`}>{s.status}</span>
@@ -48,9 +52,16 @@ export default function DeliverySheets() {
                     : <span className="chip warn">{money(Number(s.cash_variance_cents))}</span>}
                 </td>
                 <td className="num">
-                  <Link to={`/delivery/${s.id}/settlement`}>
-                    {s.status === 'Open' ? 'Settle' : 'View'}
-                  </Link>
+                  {/* Opening the route comes first: assigning a driver, adding a
+                      waiting order and reordering stops all live in there.
+                      Settling is the END of a route, not the way into one. */}
+                  <Link to={`/delivery/${s.id}`}>Open route</Link>
+                  {s.status === 'Open' && (
+                    <>
+                      {' · '}
+                      <Link to={`/delivery/${s.id}/settlement`}>Settle</Link>
+                    </>
+                  )}
                 </td>
               </tr>
             ))}

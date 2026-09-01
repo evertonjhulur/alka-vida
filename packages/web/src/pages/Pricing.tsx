@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { Link } from 'react-router-dom';
 import { api, type Session } from '../lib/api';
 import { money, toCents } from '../lib/format';
 
@@ -214,6 +215,9 @@ export default function Pricing({ session }: { session: Session }) {
                   </td>
                   {matrix!.tiers.map((t) => cell(p, t))}
                   <td className="num">
+                    {/* A product with no bill of materials cannot be costed or
+                        produced, so the way in belongs next to the product. */}
+                    <Link to={`/products/${p.id}/bom`}>Materials</Link>{' '}
                     <button className="secondary" disabled={busy}
                             onClick={() => toggleActive(p)}>
                       {p.active ? 'Retire' : 'Restore'}

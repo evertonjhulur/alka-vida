@@ -12,6 +12,13 @@ interface Tier { id: string; name: string }
 
 const DAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'] as const;
 
+// The terms actually offered. Typed free-hand, "Net 30", "net30" and "30 days"
+// all end up in the same column meaning the same thing and none of them sort
+// or group, so this is a fixed list.
+const PAYMENT_TERMS = [
+  'Cash on delivery', 'Net 15', 'Net 30', 'Net 60', 'Net 90',
+] as const;
+
 const BLANK = {
   name: '', phone: '', email: '', contactPerson: '', deliveryAddress: '',
   deliveryZone: '', routeSequence: '0', priceTierId: '', paymentTerms: '',
@@ -204,8 +211,17 @@ export default function Customers({ session }: { session: Session }) {
               </div>
               <div className="field">
                 <label htmlFor="cpt">Payment terms</label>
-                <input id="cpt" value={form.paymentTerms} placeholder="e.g. Net 30"
-                       onChange={(e) => set('paymentTerms', e.target.value)} />
+                <select id="cpt" value={form.paymentTerms}
+                        onChange={(e) => set('paymentTerms', e.target.value)}>
+                  <option value="">Not set</option>
+                  {PAYMENT_TERMS.map((t) => <option key={t} value={t}>{t}</option>)}
+                  {/* A record saved before this became a list keeps whatever it
+                      has, rather than being silently switched to another term
+                      the moment somebody opens it to edit something else. */}
+                  {form.paymentTerms
+                    && !PAYMENT_TERMS.includes(form.paymentTerms as typeof PAYMENT_TERMS[number])
+                    && <option value={form.paymentTerms}>{form.paymentTerms}</option>}
+                </select>
               </div>
               <div className="field" style={{ flex: '1 1 240px' }}>
                 <label htmlFor="cno">Notes</label>

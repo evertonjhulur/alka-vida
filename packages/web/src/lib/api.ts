@@ -51,7 +51,10 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
   const res = await fetch(path, {
     method,
     headers: {
-      'content-type': 'application/json',
+      // Only claim a JSON body when there is one. An action call with no body
+      // but a JSON content-type is rejected by the server's parser before it
+      // ever reaches the route.
+      ...(body === undefined ? {} : { 'content-type': 'application/json' }),
       ...(token ? { authorization: `Bearer ${token}` } : {}),
     },
     body: body === undefined ? undefined : JSON.stringify(body),

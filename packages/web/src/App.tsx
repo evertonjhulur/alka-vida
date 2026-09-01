@@ -10,6 +10,7 @@ import Customers from './pages/Customers';
 import NewOrder from './pages/NewOrder';
 import Orders from './pages/Orders';
 import DeliverySheets from './pages/DeliverySheets';
+import RouteDetail from './pages/RouteDetail';
 import Settlement from './pages/Settlement';
 import Invoices from './pages/Invoices';
 import InvoiceDetail from './pages/InvoiceDetail';
@@ -22,6 +23,8 @@ import Portal from './pages/Portal';
 import RawMaterials from './pages/RawMaterials';
 import Suppliers from './pages/Suppliers';
 import Pricing from './pages/Pricing';
+import Bom from './pages/Bom';
+import Payments from './pages/Payments';
 import PurchaseOrders from './pages/PurchaseOrders';
 import Production from './pages/Production';
 import Stock from './pages/Stock';
@@ -46,6 +49,7 @@ const NAV: NavItem[] = [
   { to: '/pricing', label: 'Products & pricing', roles: ['admin', 'user'], section: 'Sales' },
   { to: '/delivery', label: 'Delivery sheets', roles: ['admin', 'user'], section: 'Sales' },
   { to: '/invoices', label: 'Invoices', roles: ['admin', 'user'], section: 'Sales' },
+  { to: '/payments', label: 'Payments', roles: ['admin', 'user'], section: 'Sales' },
   { to: '/statement', label: 'Statements', roles: ['admin', 'user'], section: 'Sales' },
   { to: '/approvals', label: 'Approvals', roles: ['admin', 'user'], section: 'Sales' },
 
@@ -104,9 +108,12 @@ function Shell({ session }: { session: Session }) {
           <Route path="/orders" element={<Orders />} />
           <Route path="/customers" element={<Customers session={session} />} />
           <Route path="/pricing" element={<Pricing session={session} />} />
+          <Route path="/products/:productId/bom" element={<Bom />} />
           <Route path="/delivery" element={<DeliverySheets />} />
+          <Route path="/delivery/:sheetId" element={<RouteDetail session={session} />} />
           <Route path="/delivery/:sheetId/settlement" element={<Settlement session={session} />} />
           <Route path="/invoices" element={<Invoices />} />
+          <Route path="/payments" element={<Payments />} />
           <Route path="/invoices/:invoiceId" element={<InvoiceDetail session={session} />} />
           <Route path="/statement" element={<Statement />} />
           <Route path="/approvals" element={<Approvals session={session} />} />
@@ -118,7 +125,7 @@ function Shell({ session }: { session: Session }) {
           <Route path="/stock-count" element={<StockCount session={session} />} />
           <Route path="/bottle-pool" element={<BottlePool session={session} />} />
           <Route path="/reports" element={<Reports />} />
-          <Route path="/route" element={<DriverRoute />} />
+          <Route path="/route" element={<DriverRoute session={session} />} />
           <Route path="/route/stop/:stopId" element={<DriverStop />} />
           <Route path="/portal" element={<Portal session={session} />} />
           <Route path="*" element={<Navigate to="/" replace />} />

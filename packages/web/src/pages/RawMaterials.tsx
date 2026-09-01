@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { Fragment, useEffect, useState } from 'react';
 import { api } from '../lib/api';
 import { money, toCents, date } from '../lib/format';
 
@@ -20,6 +20,25 @@ interface Batch {
 
 const CATEGORIES = ['Bottle', 'Cap', 'Handle', 'Label', 'Water'] as const;
 
+/**
+ * The sizes each category is actually stocked in.
+ *
+ * A fixed list rather than free text: "28mm", "28 mm" and "28MM" typed on
+ * three different days become three materials that never group, never total
+ * and never reorder together. A handle and water have one form, so no size.
+ *
+ * Which size fits which product is deliberately NOT recorded here - that
+ * already lives in the bill of materials, and stating it twice guarantees
+ * the two eventually disagree.
+ */
+const SIZES: Record<string, readonly string[]> = {
+  Bottle: ['280ml', '500ml', '1.5L', '5L', '5gal'],
+  Cap: ['28mm', '48mm', '55mm'],
+  Label: ['280ml', '500ml', '1.5L', '5L', '5gal'],
+  Handle: [],
+  Water: [],
+};
+
 export default function RawMaterials() {
   const [materials, setMaterials] = useState<Material[]>([]);
   const [suppliers, setSuppliers] = useState<Array<{ id: string; name: string }>>([]);
@@ -31,6 +50,10 @@ export default function RawMaterials() {
 
   const [showNew, setShowNew] = useState(false);
   const [nm, setNm] = useState({ name: '', category: 'Bottle', sizeSpec: '', unitOfMeasure: 'pcs', reorderPoint: '' });
+
+  // "Used outside production" form, per material.
+  const [useFor, setUseFor] = useState<string | null>(null);
+  const [usage, setUsage] = useState({ quantity: '', reason: '' });
 
   // Supplier link form, per material.
   const [linkFor, setLinkFor] = useState<string | null>(null);
@@ -85,6 +108,27 @@ export default function RawMaterials() {
     } finally { setBusy(false); }
   }
 
+  /**
+   * Material consumed outside a production run - 5gal labels applied to
+   * rotated bottles being the case that needs it. The draw is ordinary FIFO,
+   * so it is costed exactly the way production is.
+   */
+  async function recordUsage(materialId: string, name: string) {
+    setBusy(true); setError(null);
+    try {
+      const out = await api.post<{ quantity: number; totalCostCents: number }>(
+        `/api/raw-materials/${materialId}/issue`,
+        { quantity: Number(usage.quantity), reason: usage.reason || null },
+      );
+      setMsg(`Recorded ${out.quantity} ${name} used, costing ${money(out.totalCostCents)}.`);
+      setUseFor(null);
+      setUsage({ quantity: '', reason: '' });
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not record the usage');
+    } finally { setBusy(false); }
+  }
+
   const lowStock = materials.filter((m) => m.needs_reorder);
 
   return (
@@ -122,14 +166,22 @@ export default function RawMaterials() {
               <div className="field">
                 <label htmlFor="mc">Category</label>
                 <select id="mc" value={nm.category}
-                        onChange={(e) => setNm({ ...nm, category: e.target.value })}>
+                        onChange={(e) => setNm({ ...nm, category: e.target.value, sizeSpec: '' })}>
                   {CATEGORIES.map((c) => <option key={c} value={c}>{c}</option>)}
                 </select>
               </div>
               <div className="field">
-                <label htmlFor="ms">Size / spec</label>
-                <input id="ms" value={nm.sizeSpec}
-                       onChange={(e) => setNm({ ...nm, sizeSpec: e.target.value })} />
+                <label htmlFor="ms">Size</label>
+                {(SIZES[nm.category] ?? []).length > 0 ? (
+                  <select id="ms" value={nm.sizeSpec}
+                          onChange={(e) => setNm({ ...nm, sizeSpec: e.target.value })}>
+                    <option value="">Select a size…</option>
+                    {SIZES[nm.category].map((z) => <option key={z} value={z}>{z}</option>)}
+                  </select>
+                ) : (
+                  <input id="ms" placeholder="no size" value={nm.sizeSpec}
+                         onChange={(e) => setNm({ ...nm, sizeSpec: e.target.value })} />
+                )}
               </div>
               <div className="field">
                 <label htmlFor="mu">Unit</label>
@@ -157,8 +209,10 @@ export default function RawMaterials() {
           </thead>
           <tbody>
             {materials.map((m) => (
-              <>
-                <tr key={m.id}>
+              // The key belongs on the list item itself. A bare fragment cannot
+              // carry one, so React had no key for any of these rows.
+              <Fragment key={m.id}>
+                <tr>
                   <td>
                     <strong>{m.name}</strong>
                     {m.size_spec && <div className="muted small">{m.size_spec}</div>}
@@ -186,12 +240,54 @@ export default function RawMaterials() {
                   <td className="num">
                     <button className="secondary" onClick={() => openBatches(m.id)}>
                       {expanded === m.id ? 'Hide' : `Batches (${Number(m.open_batches)})`}
+                    </button>{' '}
+                    <button className="secondary"
+                            onClick={() => {
+                              setUseFor(useFor === m.id ? null : m.id);
+                              setUsage({ quantity: '', reason: '' });
+                            }}>
+                      {useFor === m.id ? 'Cancel' : 'Record usage'}
                     </button>
                   </td>
                 </tr>
 
+                {useFor === m.id && (
+                  <tr>
+                    <td colSpan={8} style={{ background: '#f9fafb' }}>
+                      <strong>Record {m.name} used outside production</strong>
+                      <p className="muted small" style={{ marginTop: 4 }}>
+                        For material applied by hand — 5gal labels on rotated bottles,
+                        for instance. It is drawn from the oldest batch first and
+                        costed at what was actually paid for it.
+                      </p>
+                      <div className="row" style={{ alignItems: 'flex-end' }}>
+                        <div className="field">
+                          <label>Quantity used ({m.unit_of_measure})</label>
+                          <input type="number" min="1" step="1" style={{ width: 140 }}
+                                 value={usage.quantity}
+                                 onChange={(e) => setUsage({ ...usage, quantity: e.target.value })} />
+                        </div>
+                        <div className="field" style={{ flex: '1 1 280px' }}>
+                          <label>What for</label>
+                          <input style={{ width: '100%' }}
+                                 placeholder="e.g. relabelled returned 5gal bottles"
+                                 value={usage.reason}
+                                 onChange={(e) => setUsage({ ...usage, reason: e.target.value })} />
+                        </div>
+                        <div className="field">
+                          <button type="button"
+                                  disabled={busy || !(Number(usage.quantity) > 0)}
+                                  onClick={() => recordUsage(m.id, m.name)}>
+                            Record usage
+                          </button>
+                        </div>
+                      </div>
+                    </td>
+                  </tr>
+                )}
+
                 {linkFor === m.id && (
-                  <tr key={`${m.id}-link`}>
+                  <tr>
                     <td colSpan={8} style={{ background: '#f9fafb' }}>
                       <strong>Supplier pricing for {m.name}</strong>
                       <p className="muted small" style={{ marginTop: 4 }}>
@@ -254,7 +350,7 @@ export default function RawMaterials() {
                 )}
 
                 {expanded === m.id && (
-                  <tr key={`${m.id}-batches`}>
+                  <tr>
                     <td colSpan={8} style={{ background: '#f9fafb' }}>
                       <strong>FIFO batches — drawn oldest first</strong>
                       <table style={{ marginTop: 8 }}>
@@ -290,7 +386,7 @@ export default function RawMaterials() {
                     </td>
                   </tr>
                 )}
-              </>
+              </Fragment>
             ))}
           </tbody>
         </table>
