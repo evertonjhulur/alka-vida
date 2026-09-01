@@ -7,7 +7,7 @@
 
 import type { Db, Queryable } from '../db/index.ts';
 import type { Actor } from './core.ts';
-import { audit, nextNumber, num, requireRole } from './core.ts';
+import { audit, businessToday, nextNumber, num, requireRole } from './core.ts';
 import type { Cents, DeliveryMode, PaymentMethod, RecurrencePattern } from '@alka/shared';
 import { computeTotals, computeLineTotal, totalBottles, RuleViolation } from '@alka/shared';
 
@@ -160,7 +160,7 @@ export async function createOrder(
           is_recurring, recurrence_pattern, parent_recurring_id, payment_method,
           source, delivery_mode, discount_percent,
           subtotal_cents, discount_amount_cents, gct_cents, grand_total_cents)
-       VALUES ($1,$2,COALESCE($3::date, current_date),$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
+       VALUES ($1,$2,COALESCE($3::date, business_today()),$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
        RETURNING id`,
       [
         orderNumber, input.customerId, input.orderDate ?? null,
@@ -247,7 +247,7 @@ export async function placeOnDeliverySheet(
     return { sheetId: null, stopId: null, warnings };
   }
 
-  const date = requestedDate ?? new Date().toISOString().slice(0, 10);
+  const date = requestedDate ?? businessToday();
 
   // The partial unique index permits only one OPEN sheet per (date, zone), so
   // this either finds the live sheet or creates it.
@@ -281,7 +281,7 @@ export async function placeOnDeliverySheet(
   return { sheetId: sheet.id, stopId: stop.id, warnings };
 }
 
-async function summariseOrderLines(t: Queryable, orderId: string): Promise<string> {
+export async function summariseOrderLines(t: Queryable, orderId: string): Promise<string> {
   const rows = await t.query<{ name: string; cases: number; loose_bottles: number; bpc: number }>(
     `SELECT p.name, oli.cases, oli.loose_bottles, p.bottles_per_case AS bpc
      FROM order_line_items oli JOIN products p ON p.id = oli.product_id

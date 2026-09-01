@@ -13,12 +13,13 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createDb, type Db } from './db/index.ts';
 import { migrate } from './db/migrate.ts';
-import { login, verifyToken, type Session } from './lib/auth.ts';
+import { loadSigningKey, login, userExists, verifyToken, type Session } from './lib/auth.ts';
 import { ForbiddenError, RuleViolation } from '@alka/shared';
-import type { Actor } from './services/core.ts';
+import { BUSINESS_TIMEZONE, type Actor } from './services/core.ts';
 
 import * as orders from './services/orders.ts';
 import * as delivery from './services/delivery.ts';
+import * as routing from './services/routing.ts';
 import * as settlement from './services/settlement.ts';
 import * as invoices from './services/invoices.ts';
 import * as payments from './services/payments.ts';
@@ -32,7 +33,7 @@ import * as catalog from './services/catalog.ts';
 import * as audits from './services/audits.ts';
 import * as bottles from './services/bottles.ts';
 import * as pricing from './services/pricing.ts';
-import { counterSale } from './services/counter.ts';
+import { collectOrder, counterSale } from './services/counter.ts';
 
 declare module 'fastify' {
   interface FastifyRequest {
@@ -41,10 +42,44 @@ declare module 'fastify' {
 }
 
 export async function buildServer(db: Db) {
+  // Tokens are signed with a per-install key kept in this database, so a
+  // token minted against a previous one stops verifying. Must happen before
+  // any route can sign or check a token.
+  await loadSigningKey(db);
+
+  // business_today() resolves dates against this. Keeping it in the database
+  // means SQL defaults and application code cannot disagree about what day
+  // it is - which is exactly how invoices ended up dated a day ahead.
+  await db.query(
+    `INSERT INTO system_settings (key, value) VALUES ('business_timezone', $1)
+     ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`,
+    [BUSINESS_TIMEZONE],
+  );
+
   // Quiet by default: the console window is user-facing, so only problems
   // should appear there. Set LOG_LEVEL=info to see every request.
   const app = Fastify({ logger: { level: process.env.LOG_LEVEL ?? 'warn' } });
   await app.register(cors, { origin: process.env.CORS_ORIGIN ?? true });
+
+  /**
+   * Accept an empty body on a JSON request.
+   *
+   * Plenty of endpoints here are pure actions - start a route, delete a tier,
+   * mark an invoice sent - and carry nothing. Fastify's stock JSON parser
+   * rejects those outright ("Body cannot be empty..."), which surfaces to the
+   * person clicking the button as a 500 with a database-flavoured message for
+   * what is really an empty POST. Treat no body as {}.
+   */
+  app.addContentTypeParser('application/json', { parseAs: 'string' },
+    (_req, body: string, done) => {
+      if (!body || body.trim() === '') return done(null, {});
+      try {
+        done(null, JSON.parse(body));
+      } catch (err) {
+        (err as { statusCode?: number }).statusCode = 400;
+        done(err as Error, undefined);
+      }
+    });
 
   // Business rules surface as 400, permission failures as 403.
   app.setErrorHandler((err, req, reply) => {
@@ -56,6 +91,14 @@ export async function buildServer(db: Db) {
     }
     if (err.name === 'InsufficientStockError') {
       return reply.status(400).send({ error: err.message });
+    }
+
+    // Fastify's own client errors - malformed JSON, a bad route parameter -
+    // already carry the right 4xx. Reporting those as an internal failure
+    // sends the reader hunting a server bug for what is a bad request.
+    const clientStatus = (err as { statusCode?: number }).statusCode;
+    if (clientStatus && clientStatus >= 400 && clientStatus < 500) {
+      return reply.status(clientStatus).send({ error: err.message });
     }
 
     // An unexpected failure. "internal error" alone leaves the person using
@@ -79,6 +122,17 @@ export async function buildServer(db: Db) {
     const token = header?.startsWith('Bearer ') ? header.slice(7) : null;
     const session = token ? verifyToken(token) : null;
     if (!session) return reply.status(401).send({ error: 'authentication required' });
+
+    // A good signature proves the token came from this system - not that the
+    // person it names is still here. Wiping the data reseeds the users with
+    // new ids, leaving a browser "signed in" as somebody who is gone. Left
+    // unchecked that surfaces at the END of the first write, as a raw
+    // audit_log foreign key error, with the order number already burned.
+    if (!(await userExists(db, session.id))) {
+      return reply.status(401).send({
+        error: 'Your session has expired. Please sign in again.',
+      });
+    }
     req.session = session;
   });
 
@@ -315,6 +369,13 @@ export async function buildServer(db: Db) {
     return order;
   });
 
+  // A pickup order being collected: billed now, from what is handed over.
+  app.post('/api/orders/:id/collect', { preHandler: allow('admin', 'user') },
+    async (req) => collectOrder(db, actorOf(req), {
+      ...(req.body as Record<string, unknown>),
+      orderId: (req.params as { id: string }).id,
+    } as never));
+
   app.post('/api/counter-sale', { preHandler: allow('admin', 'user') },
     async (req) => counterSale(db, actorOf(req), req.body as never));
 
@@ -343,15 +404,24 @@ export async function buildServer(db: Db) {
   app.get('/api/delivery-sheets', { preHandler: allow('admin', 'user', 'driver') },
     async (req) => {
       const q = req.query as { date?: string; status?: string };
-      return db.query(
-        `SELECT d.*, COUNT(s.id)::int AS stop_count
-         FROM delivery_sheets d LEFT JOIN delivery_stops s ON s.delivery_sheet_id = d.id
-         WHERE ($1::date IS NULL OR d.delivery_date = $1::date)
-           AND ($2::text IS NULL OR d.status = $2)
-         GROUP BY d.id ORDER BY d.delivery_date DESC, d.zone`,
-        [q.date ?? null, q.status ?? null],
-      );
+      return routing.listSheets(db, actorOf(req), { date: q.date, status: q.status });
     });
+
+  app.get('/api/drivers', { preHandler: allow('admin', 'user') },
+    async () => routing.listDrivers(db));
+
+  app.post('/api/delivery-sheets/:id/assign', { preHandler: allow('admin', 'user', 'driver') },
+    async (req) => routing.assignDriver(db, actorOf(req), (req.params as { id: string }).id,
+      (req.body as { driverId?: string | null }).driverId ?? null));
+
+  app.post('/api/delivery-sheets/:id/start', { preHandler: allow('admin', 'user', 'driver') },
+    async (req) => routing.startRoute(db, actorOf(req), (req.params as { id: string }).id));
+
+  app.get('/api/delivery-sheets/:id/candidates', { preHandler: allow('admin', 'user') },
+    async (req) => routing.deliveryCandidates(db, (req.params as { id: string }).id));
+
+  app.delete('/api/stops/:id', { preHandler: allow('admin', 'user') },
+    async (req) => routing.removeStop(db, actorOf(req), (req.params as { id: string }).id));
 
   app.get('/api/delivery-sheets/:id', { preHandler: allow('admin', 'user', 'driver') },
     async (req) => delivery.getSheet(db, (req.params as { id: string }).id));
@@ -402,12 +472,12 @@ export async function buildServer(db: Db) {
     });
 
   // Correcting the RECORDED DATA is Admin-only, to prevent collusion.
-  app.post('/api/stops/:id/correct', { preHandler: allow('admin') },
+  app.post('/api/stops/:id/correct', { preHandler: allow('admin', 'user') },
     async (req) => {
       const body = req.body as { changes: Record<string, unknown>; reason: string };
-      await settlement.correctStopRecord(db, actorOf(req),
+      // An admin correction applies at once; an office one waits for approval.
+      return settlement.requestStopCorrection(db, actorOf(req),
         (req.params as { id: string }).id, body.changes as never, body.reason);
-      return { ok: true };
     });
 
   app.post('/api/delivery-sheets/:id/settle', { preHandler: allow('admin', 'user') },
@@ -460,6 +530,16 @@ export async function buildServer(db: Db) {
     });
 
   /* ---------------- payments ---------------- */
+
+  // Money received now, applied across whichever invoices it covers. This is
+  // the bank-transfer path: one receipt, several invoices, a remainder on
+  // account if it does not land exactly.
+  app.post('/api/payments/receive', { preHandler: allow('admin', 'user') },
+    async (req) => payments.receivePayment(db, actorOf(req), req.body as never));
+
+  app.get('/api/payments/unapplied', { preHandler: allow('admin', 'user') },
+    async (req) => payments.unappliedPayments(db,
+      (req.query as { customerId?: string }).customerId));
 
   app.post('/api/payments', { preHandler: allow('admin', 'user') },
     async (req) => payments.recordPayment(db, actorOf(req), req.body as never));
@@ -549,6 +629,18 @@ export async function buildServer(db: Db) {
 
   app.get('/api/raw-materials/:id/batches', { preHandler: allow('admin', 'user') },
     async (req) => catalog.materialBatches(db, (req.params as { id: string }).id));
+
+  // Material used outside a production run - 5gal labels applied to rotated
+  // bottles being the case that requires it.
+  app.post('/api/raw-materials/:id/issue', { preHandler: allow('admin', 'user') },
+    async (req) => {
+      const body = req.body as { quantity: number; reason?: string | null };
+      return inventory.issueMaterial(db, actorOf(req), {
+        rawMaterialId: (req.params as { id: string }).id,
+        quantity: Number(body.quantity),
+        reason: body.reason ?? null,
+      });
+    });
 
   /* ---------------- bills of material ---------------- */
 

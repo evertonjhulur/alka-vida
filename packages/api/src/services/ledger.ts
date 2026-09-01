@@ -12,14 +12,14 @@
 
 import type { Db } from '../db/index.ts';
 import type { Cents } from '@alka/shared';
-import { num } from './core.ts';
+import { BUSINESS_TIMEZONE, num } from './core.ts';
 
 /**
  * The business operates in Jamaica. Statement periods are cut on Jamaican
  * calendar days, not UTC ones - otherwise an evening payment would fall into
  * the next day's period and land on the wrong monthly bill.
  */
-export const BUSINESS_TIMEZONE = process.env.BUSINESS_TIMEZONE ?? 'America/Jamaica';
+export { BUSINESS_TIMEZONE };
 
 export type EntryType = 'Invoice' | 'Credit Note' | 'Payment' | 'Reversal' | 'Reassignment';
 

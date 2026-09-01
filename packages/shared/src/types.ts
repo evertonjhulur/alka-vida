@@ -11,7 +11,11 @@ export type Role = (typeof ROLES)[number];
 export const ORDER_STATUSES = ['Pending', 'Partially Delivered', 'Delivered', 'Cancelled'] as const;
 export type OrderStatus = (typeof ORDER_STATUSES)[number];
 
-export const DELIVERY_MODES = ['Delivery', 'Pickup'] as const;
+/**
+ * Counter is a walk-in sale: invoiced and paid on the spot. Pickup is a real
+ * order the customer collects later, invoiced when they actually take it.
+ */
+export const DELIVERY_MODES = ['Delivery', 'Pickup', 'Counter'] as const;
 export type DeliveryMode = (typeof DELIVERY_MODES)[number];
 
 export const STOP_OUTCOMES = [

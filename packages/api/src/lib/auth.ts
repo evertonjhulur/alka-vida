@@ -42,15 +42,72 @@ export interface Session extends Actor {
   exp: number;
 }
 
-function secret(): string {
-  const s = process.env.JWT_SECRET;
-  if (!s || s.length < 16) {
-    if (process.env.NODE_ENV === 'production') {
-      throw new Error('JWT_SECRET must be set to at least 16 characters in production');
-    }
-    return 'dev-only-insecure-secret-change-me';
+/**
+ * The key every token is signed with, loaded once at startup.
+ *
+ * Deliberately NOT a constant. A constant lets a token outlive the database
+ * it was minted against: wiping .data reseeds the users with new ids, and a
+ * browser still holding the old token keeps passing signature verification
+ * as somebody who no longer exists. Keeping the key in the database means
+ * wiping the data wipes the key with it.
+ */
+let signingKey: string | null = null;
+
+/**
+ * Load the signing key, generating and storing one on first run.
+ *
+ * JWT_SECRET wins when it is set - that is the production path, and it lets
+ * several servers share one database. Otherwise the key is per-install and
+ * random, so nobody can forge a token by reading this source.
+ *
+ * Must be called at startup, after migrations. Signing or verifying before
+ * that throws, rather than falling back to anything guessable.
+ */
+export async function loadSigningKey(db: Db): Promise<void> {
+  const configured = process.env.JWT_SECRET;
+  if (configured && configured.length >= 16) {
+    signingKey = configured;
+    return;
   }
-  return s;
+  if (process.env.NODE_ENV === 'production') {
+    throw new Error('JWT_SECRET must be set to at least 16 characters in production');
+  }
+
+  // ON CONFLICT DO NOTHING, then read back: two servers racing on one
+  // database both end up on whichever key won, never on two different ones.
+  await db.query(
+    `INSERT INTO system_settings (key, value) VALUES ('jwt_signing_key', $1)
+     ON CONFLICT (key) DO NOTHING`,
+    [randomBytes(32).toString('hex')],
+  );
+  const row = await db.one<{ value: string }>(
+    `SELECT value FROM system_settings WHERE key = 'jwt_signing_key'`,
+  );
+  signingKey = row.value;
+}
+
+function secret(): string {
+  if (!signingKey) {
+    throw new Error('signing key not loaded - call loadSigningKey(db) at startup');
+  }
+  return signingKey;
+}
+
+/**
+ * Does the person this token names still exist?
+ *
+ * A valid signature only proves the token was minted by this system, not
+ * that its subject survived. Every write ends by inserting an audit_log row
+ * whose user_id references users(id), so a token naming a user who is gone
+ * takes the whole transaction down on a foreign key at the last possible
+ * moment - after document numbers have already been burned off their
+ * sequences. Checking here turns that into an ordinary 401.
+ */
+export async function userExists(db: Db, userId: string): Promise<boolean> {
+  const row = await db.maybeOne<{ id: string }>(
+    `SELECT id FROM users WHERE id = $1`, [userId],
+  );
+  return row != null;
 }
 
 const b64url = (b: Buffer) => b.toString('base64url');

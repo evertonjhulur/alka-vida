@@ -102,7 +102,7 @@ export async function seed(db: Db, opts: { quiet?: boolean } = {}): Promise<void
     const capCo = await supplier('Kingston Closures', 'A. Brown');
     const labelCo = await supplier('Island Labels', 'D. Ellis');
 
-    const material = async (name: string, category: string, spec: string,
+    const material = async (name: string, category: string, spec: string | null,
                             unitCost: number, reorder: number) =>
       (await t.one<{ id: string }>(
         `INSERT INTO raw_materials (name, category, size_spec, unit_cost_cents,
@@ -111,37 +111,103 @@ export async function seed(db: Db, opts: { quiet?: boolean } = {}): Promise<void
         [name, category, spec, unitCost, reorder],
       )).id;
 
-    const preform500 = await material('500ml preform', 'Bottle', '18g PET', 900, 20_000);
-    const cap28 = await material('28mm cap', 'Cap', 'blue HDPE', 400, 30_000);
-    const label500 = await material('500ml label', 'Label', 'BOPP wrap', 250, 25_000);
-    const bottle5gal = await material('5 gallon bottle', 'Bottle', 'polycarbonate', 95_000, 100);
-    const handle5gal = await material('5 gallon handle', 'Handle', 'moulded', 1_200, 200);
-    const water = await material('Purified water', 'Water', 'per litre', 30, 5_000);
+    /**
+     * The real catalogue. Sizes come from the fixed list the materials screen
+     * offers, so the same cap is never entered three different ways.
+     *
+     * Caps: 28mm covers 280ml/500ml/1.5L, 48mm the 5L, 55mm the 5-gallon.
+     * Handles are 5L ONLY. Labels go on everything up to 5gal; 5-gallon
+     * bottles are rotated and relabelled as needed, so they carry no label
+     * line here - that usage is recorded against the material when it happens.
+     */
+    const preform280 = await material('280ml preform', 'Bottle', '280ml', 700, 20_000);
+    const preform500 = await material('500ml preform', 'Bottle', '500ml', 900, 20_000);
+    const preform1500 = await material('1.5L preform', 'Bottle', '1.5L', 1_400, 15_000);
+    const bottle5L = await material('5L bottle', 'Bottle', '5L', 4_800, 3_000);
+    const bottle5gal = await material('5 gallon bottle', 'Bottle', '5gal', 95_000, 100);
 
-    await t.query(
-      `INSERT INTO supplier_materials (supplier_id, raw_material_id, unit_cost_cents)
-       VALUES ($1,$2,900), ($1,$5,95000), ($3,$4,250), ($6,$7,400)`,
-      [preformCo, preform500, labelCo, label500, bottle5gal, capCo, cap28],
-    );
-    // Volume tiers: the more preforms ordered, the cheaper each becomes.
-    await t.query(
-      `INSERT INTO supplier_price_breaks
-         (supplier_id, raw_material_id, min_qty, unit_cost_cents)
-       VALUES ($1,$2,10000,850), ($1,$2,50000,780), ($3,$4,20000,360)`,
-      [preformCo, preform500, capCo, cap28],
-    );
+    const cap28 = await material('28mm cap', 'Cap', '28mm', 400, 30_000);
+    const cap48 = await material('48mm cap', 'Cap', '48mm', 900, 6_000);
+    const cap55 = await material('55mm cap', 'Cap', '55mm', 1_100, 1_500);
+
+    const label280 = await material('280ml label', 'Label', '280ml', 200, 25_000);
+    const label500 = await material('500ml label', 'Label', '500ml', 250, 25_000);
+    const label1500 = await material('1.5L label', 'Label', '1.5L', 320, 15_000);
+    const label5L = await material('5L label', 'Label', '5L', 480, 3_000);
+    const label5gal = await material('5 gallon label', 'Label', '5gal', 900, 800);
+
+    const handle5L = await material('5L handle', 'Handle', null, 1_200, 3_000);
+    const water = await material('Purified water', 'Water', null, 30, 5_000);
+
+    /**
+     * Who sells what, at what price. A purchase order takes the best break
+     * for the quantity ordered and freezes it on the line; what is actually
+     * paid on receipt becomes the cost of that stock.
+     */
+    const sells = async (supplierId: string, materialId: string, unitCost: number,
+                         breaks: Array<[number, number]> = []) => {
+      await t.query(
+        `INSERT INTO supplier_materials (supplier_id, raw_material_id, unit_cost_cents)
+         VALUES ($1,$2,$3)`,
+        [supplierId, materialId, unitCost],
+      );
+      for (const [minQty, cost] of breaks) {
+        await t.query(
+          `INSERT INTO supplier_price_breaks
+             (supplier_id, raw_material_id, min_qty, unit_cost_cents)
+           VALUES ($1,$2,$3,$4)`,
+          [supplierId, materialId, minQty, cost],
+        );
+      }
+    };
+
+    // Bottles and preforms - the more ordered, the cheaper each becomes.
+    await sells(preformCo, preform280, 700, [[10_000, 660], [50_000, 620]]);
+    await sells(preformCo, preform500, 900, [[10_000, 850], [50_000, 780]]);
+    await sells(preformCo, preform1500, 1_400, [[10_000, 1_320]]);
+    await sells(preformCo, bottle5L, 4_800, [[2_000, 4_500]]);
+    await sells(preformCo, bottle5gal, 95_000, [[200, 91_000]]);
+
+    // Closures.
+    await sells(capCo, cap28, 400, [[20_000, 360], [100_000, 330]]);
+    await sells(capCo, cap48, 900, [[5_000, 840]]);
+    await sells(capCo, cap55, 1_100, [[1_000, 1_020]]);
+    await sells(capCo, handle5L, 1_200, [[5_000, 1_100]]);
+
+    // Print.
+    await sells(labelCo, label280, 200, [[20_000, 180]]);
+    await sells(labelCo, label500, 250, [[20_000, 225]]);
+    await sells(labelCo, label1500, 320, [[10_000, 290]]);
+    await sells(labelCo, label5L, 480, [[5_000, 440]]);
+    await sells(labelCo, label5gal, 900, [[500, 820]]);
 
     /* bills of material, per ONE bottle produced */
-    await t.query(
-      `INSERT INTO bom_line_items (product_id, raw_material_id, component_type, quantity)
-       VALUES ($1,$2,'Bottle',1), ($1,$3,'Cap',1), ($1,$4,'Label',1), ($1,$5,'Water',0.5)`,
-      [p500, preform500, cap28, label500, water],
-    );
-    await t.query(
-      `INSERT INTO bom_line_items (product_id, raw_material_id, component_type, quantity)
-       VALUES ($1,$2,'Bottle',1), ($1,$3,'Handle',1), ($1,$4,'Water',18.9)`,
-      [p5gal, bottle5gal, handle5gal, water],
-    );
+    const bom = async (
+      productId: string,
+      lines: Array<[string, string, number]>,
+    ) => {
+      for (const [materialId, componentType, qty] of lines) {
+        await t.query(
+          `INSERT INTO bom_line_items (product_id, raw_material_id, component_type, quantity)
+           VALUES ($1,$2,$3,$4)`,
+          [productId, materialId, componentType, qty],
+        );
+      }
+    };
+
+    await bom(p280, [[preform280, 'Bottle', 1], [cap28, 'Cap', 1],
+                     [label280, 'Label', 1], [water, 'Water', 0.28]]);
+    await bom(p500, [[preform500, 'Bottle', 1], [cap28, 'Cap', 1],
+                     [label500, 'Label', 1], [water, 'Water', 0.5]]);
+    await bom(p1500, [[preform1500, 'Bottle', 1], [cap28, 'Cap', 1],
+                      [label1500, 'Label', 1], [water, 'Water', 1.5]]);
+    // The 5L is the ONLY product that takes a handle.
+    await bom(p5L, [[bottle5L, 'Bottle', 1], [cap48, 'Cap', 1], [label5L, 'Label', 1],
+                    [handle5L, 'Handle', 1], [water, 'Water', 5]]);
+    // No handle and no label on the 5-gallon: bottles are rotated, and a
+    // returning bottle is relabelled only when it needs one.
+    await bom(p5gal, [[bottle5gal, 'Bottle', 1], [cap55, 'Cap', 1],
+                      [water, 'Water', 18.9]]);
 
     /* opening stock
      *
@@ -183,10 +249,22 @@ export async function seed(db: Db, opts: { quiet?: boolean } = {}): Promise<void
     // Older, cheaper preforms first - production draws these before the newer ones.
     await openingStock(preform500, preformCo, 30_000, 850, 45);
     await openingStock(preform500, preformCo, 25_000, 920, 10);
-    await openingStock(cap28, capCo, 40_000, 400, 30);
-    await openingStock(label500, labelCo, 35_000, 250, 30);
+    await openingStock(preform280, preformCo, 20_000, 700, 30);
+    await openingStock(preform1500, preformCo, 12_000, 1_400, 30);
+    await openingStock(bottle5L, preformCo, 2_500, 4_800, 40);
     await openingStock(bottle5gal, preformCo, 300, 95_000, 60);
-    await openingStock(handle5gal, preformCo, 400, 1_200, 60);
+
+    await openingStock(cap28, capCo, 40_000, 400, 30);
+    await openingStock(cap48, capCo, 6_000, 900, 30);
+    await openingStock(cap55, capCo, 1_800, 1_100, 30);
+    await openingStock(handle5L, capCo, 4_000, 1_200, 40);
+
+    await openingStock(label280, labelCo, 22_000, 200, 30);
+    await openingStock(label500, labelCo, 35_000, 250, 30);
+    await openingStock(label1500, labelCo, 14_000, 320, 30);
+    await openingStock(label5L, labelCo, 4_000, 480, 30);
+    await openingStock(label5gal, labelCo, 900, 900, 30);
+
     await openingStock(water, null, 50_000, 30, 5);
 
     await t.query(
@@ -231,7 +309,7 @@ export async function seed(db: Db, opts: { quiet?: boolean } = {}): Promise<void
 
     await t.query(
       `INSERT INTO delivery_sheets (delivery_date, zone, driver_name, assigned_driver_id, vehicle)
-       VALUES (current_date, 'Kingston', 'Route Driver', $1, 'Truck 1')`,
+       VALUES (business_today(), 'Kingston', 'Route Driver', $1, 'Truck 1')`,
       [driverId],
     );
   });

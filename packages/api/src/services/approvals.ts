@@ -17,8 +17,11 @@ import type { Actor } from './core.ts';
 import { audit, requireRole, num } from './core.ts';
 import type { Cents } from '@alka/shared';
 import { computeTotals, RuleViolation } from '@alka/shared';
+import { applyStopCorrection, type StopCorrection } from './settlement.ts';
 
 export interface PendingApproval {
+  /** For a StopCorrection, the proposed changes awaiting approval. */
+  payload?: Record<string, unknown> | null;
   id: string;
   requestType: 'Discount' | 'CreditNote';
   entityType: string;
@@ -134,7 +137,8 @@ export async function listPendingApprovals(db: Db): Promise<PendingApproval[]> {
   );
   return rows.map((r) => ({
     id: r.id as string,
-    requestType: r.request_type as 'Discount' | 'CreditNote',
+    requestType: r.request_type as 'Discount' | 'CreditNote' | 'StopCorrection',
+    payload: (r.payload as Record<string, unknown>) ?? null,
     entityType: r.entity_type as string,
     entityId: r.entity_id as string,
     entityLabel: (r.entity_label as string) ?? null,
@@ -168,8 +172,10 @@ export async function reviewApproval(
     const req = await t.one<{
       id: string; request_type: string; entity_id: string; status: string;
       discount_percent: number | null; amount_cents: number;
+      payload: StopCorrection | null; reason: string | null;
     }>(
-      `SELECT id, request_type, entity_id, status, discount_percent, amount_cents
+      `SELECT id, request_type, entity_id, status, discount_percent, amount_cents,
+              payload, reason
        FROM approval_requests WHERE id = $1 FOR UPDATE`, [requestId],
     );
     if (req.status !== 'Pending') {
@@ -177,7 +183,12 @@ export async function reviewApproval(
     }
 
     if (decision === 'Approved') {
-      if (req.request_type === 'Discount') {
+      if (req.request_type === 'StopCorrection') {
+        // Applied by the same code path an admin correcting directly uses,
+        // and attributed to the admin who approved it.
+        await applyStopCorrection(t, actor, req.entity_id, req.payload ?? {},
+          req.reason ?? 'approved correction');
+      } else if (req.request_type === 'Discount') {
         await applyDiscountToInvoice(t, req.entity_id, num(req.discount_percent));
       } else {
         // A credit note becomes live: its value posts to the ledger.
@@ -189,6 +200,8 @@ export async function reviewApproval(
           [req.entity_id, num(req.amount_cents)],
         );
       }
+    } else if (req.request_type === 'StopCorrection') {
+      // Rejected: the stop keeps exactly what the driver recorded.
     } else if (req.request_type === 'Discount') {
       // Rejected: the invoice reverts to no discount, unchanged in value.
       await t.query(

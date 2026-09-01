@@ -4,7 +4,7 @@
 
 import type { Db } from '../db/index.ts';
 import type { Actor } from './core.ts';
-import { audit, requireRole } from './core.ts';
+import { audit, businessToday, requireRole } from './core.ts';
 import { RuleViolation } from '@alka/shared';
 
 /**
@@ -59,7 +59,7 @@ export async function mergeCustomers(
            notes = COALESCE(notes,'') || $3
        WHERE id = $1`,
       [args.mergedId, args.survivorId,
-       `\n[merged into ${survivor.name} on ${new Date().toISOString().slice(0, 10)}]`],
+       `\n[merged into ${survivor.name} on ${businessToday()}]`],
     );
 
     await audit(t, actor, 'update', 'Customer', args.mergedId, merged.name, {

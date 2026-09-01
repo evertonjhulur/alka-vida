@@ -171,7 +171,7 @@ export async function receivePurchaseOrder(
     );
     const status = num(outstanding.c) === 0 ? 'Received' : 'Partially Received';
     await t.query(
-      `UPDATE purchase_orders SET status = $2, receiving_date = current_date WHERE id = $1`,
+      `UPDATE purchase_orders SET status = $2, receiving_date = business_today() WHERE id = $1`,
       [poId, status],
     );
 
@@ -250,6 +250,54 @@ export async function consumeMaterial(
     batchIds: draw.slices.map((s) => s.batchId),
     effectiveUnitCostCents: draw.effectiveUnitCostCents,
   };
+}
+
+/**
+ * Issue material outside a production run.
+ *
+ * The 5-gallon line is why this exists: bottles are rotated, so labels are
+ * applied when a returned bottle needs one rather than once per bottle
+ * filled. Putting a nominal figure in the BOM would consume a label for
+ * every bottle produced, including the ones that came back already
+ * labelled, and 5gal cost would drift from reality.
+ *
+ * The draw is ordinary FIFO at true cost, so an issue is costed exactly the
+ * way production is and shows up in the same transaction history.
+ */
+export async function issueMaterial(
+  db: Db,
+  actor: Actor,
+  input: { rawMaterialId: string; quantity: number; reason?: string | null },
+): Promise<{ quantity: number; totalCostCents: Cents; effectiveUnitCostCents: Cents }> {
+  requireRole(actor, 'admin', 'user');
+  if (!(input.quantity > 0)) throw new RuleViolation('the quantity used must be more than zero');
+
+  return db.tx(async (t) => {
+    const material = await t.maybeOne<{ name: string; unit_of_measure: string }>(
+      `SELECT name, unit_of_measure FROM raw_materials WHERE id = $1`,
+      [input.rawMaterialId],
+    );
+    if (!material) throw new RuleViolation('that material no longer exists');
+
+    const used = await consumeMaterial(t, actor, {
+      rawMaterialId: input.rawMaterialId,
+      quantity: input.quantity,
+      reference: input.reason?.trim() || 'Used outside production',
+      referenceType: 'Manual',
+    });
+
+    await audit(t, actor, 'adjust', 'RawMaterial', input.rawMaterialId, material.name, {
+      quantity: input.quantity,
+      reason: input.reason ?? null,
+      totalCostCents: used.totalCostCents,
+    });
+
+    return {
+      quantity: input.quantity,
+      totalCostCents: used.totalCostCents,
+      effectiveUnitCostCents: used.effectiveUnitCostCents,
+    };
+  });
 }
 
 /**

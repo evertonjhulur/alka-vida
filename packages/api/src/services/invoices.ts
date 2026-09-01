@@ -121,7 +121,7 @@ export async function createInvoice(
        (invoice_number, customer_id, invoice_date, due_date, subtotal_cents,
         discount_percent, discount_amount_cents, discount_status,
         gct_cents, grand_total_cents, notes)
-     VALUES ($1,$2,COALESCE($3::date,current_date),$4,$5,$6,$7,$8,$9,$10,$11)
+     VALUES ($1,$2,COALESCE($3::date,business_today()),$4,$5,$6,$7,$8,$9,$10,$11)
      RETURNING id`,
     [invoiceNumber, args.customerId, args.invoiceDate ?? null, args.dueDate ?? null,
      totals.subtotal, args.discountPercent ?? 0, totals.discountAmount, discountStatus,
@@ -263,7 +263,7 @@ export async function editInvoice(
            (invoice_number, customer_id, invoice_date, subtotal_cents,
             discount_amount_cents, gct_cents, grand_total_cents,
             is_credit_note, credit_status, linked_invoice_id, notes)
-         VALUES ($1,$2,current_date,$3,0,0,$4,true,'Approved',$5,$6)
+         VALUES ($1,$2,business_today(),$3,0,0,$4,true,'Approved',$5,$6)
          RETURNING id`,
         [creditNumber, existing.customer_id, -difference, -difference, invoiceId,
          `Automatic credit note from admin edit of ${before.invoiceNumber}`],
@@ -326,7 +326,7 @@ export async function createCreditNote(
          (invoice_number, customer_id, invoice_date, subtotal_cents,
           gct_cents, grand_total_cents, is_credit_note, credit_status,
           linked_invoice_id, notes)
-       VALUES ($1,$2,current_date,$3,0,$4,true,$5,$6,$7)
+       VALUES ($1,$2,business_today(),$3,0,$4,true,$5,$6,$7)
        RETURNING id`,
       [number, target.customer_id, effective, effective, creditStatus,
        args.invoiceId, args.reason],
@@ -361,7 +361,7 @@ export async function markInvoiceSent(db: Db, actor: Actor, invoiceId: string): 
   requireRole(actor, 'admin', 'user');
   await db.tx(async (t) => {
     await t.query(
-      `UPDATE invoices SET lifecycle = 'Sent', sent_date = current_date
+      `UPDATE invoices SET lifecycle = 'Sent', sent_date = business_today()
        WHERE id = $1 AND lifecycle = 'Open'`, [invoiceId],
     );
     await audit(t, actor, 'update', 'Invoice', invoiceId, invoiceId, { lifecycle: 'Sent' });

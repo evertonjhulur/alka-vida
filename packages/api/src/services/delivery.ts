@@ -18,7 +18,7 @@ import { audit, num, requireRole } from './core.ts';
 import type { Cents, PaymentMethod, StopOutcome } from '@alka/shared';
 import { RuleViolation, validateAllocation, assertQuantityShape, totalBottles } from '@alka/shared';
 import { createInvoice, openInvoicesForCustomer } from './invoices.ts';
-import { refreshOrderStatus } from './orders.ts';
+import { refreshOrderStatus, summariseOrderLines } from './orders.ts';
 import { applyDeliveryMovement } from './bottles.ts';
 
 export interface DeliveredLineInput {
@@ -361,9 +361,30 @@ export async function addOrderToSheet(
     if (sheet.status !== 'Open') {
       throw new RuleViolation('orders can only be added to an Open delivery sheet');
     }
-    const order = await t.one<{ customer_id: string; order_number: string }>(
-      `SELECT customer_id, order_number FROM customer_orders WHERE id = $1`, [orderId],
+    const order = await t.one<{ customer_id: string; order_number: string; status: string }>(
+      `SELECT customer_id, order_number, status FROM customer_orders WHERE id = $1`, [orderId],
     );
+    if (order.status === 'Delivered' || order.status === 'Cancelled') {
+      throw new RuleViolation(
+        `${order.order_number} is ${order.status.toLowerCase()} and cannot be added to a route`,
+      );
+    }
+
+    // The same order sitting on two open sheets gets delivered twice and
+    // invoiced twice. The table's UNIQUE (sheet, order) only stops that
+    // within ONE sheet, so the cross-sheet check has to happen here.
+    const elsewhere = await t.maybeOne<{ zone: string; delivery_date: string }>(
+      `SELECT ds.zone, ds.delivery_date::text AS delivery_date
+       FROM delivery_stops st JOIN delivery_sheets ds ON ds.id = st.delivery_sheet_id
+       WHERE st.order_id = $1 AND st.delivery_sheet_id <> $2 AND ds.status = 'Open'`,
+      [orderId, sheetId],
+    );
+    if (elsewhere) {
+      throw new RuleViolation(
+        `${order.order_number} is already on the ${elsewhere.zone} route for ` +
+        `${elsewhere.delivery_date}. Take it off that route first.`,
+      );
+    }
     const customer = await t.one<{
       delivery_address: string | null; phone: string | null; route_sequence: number;
     }>(
@@ -371,14 +392,18 @@ export async function addOrderToSheet(
       [order.customer_id],
     );
 
+    // Without this the driver gets a stop with no idea what to put on the
+    // van - the auto-routed path has always filled it, the manual one did not.
+    const summary = await summariseOrderLines(t, orderId);
+
     const stop = await t.one<{ id: string }>(
       `INSERT INTO delivery_stops
          (delivery_sheet_id, customer_id, order_id, delivery_address,
-          contact_phone, order_ref, sequence_no)
-       VALUES ($1,$2,$3,$4,$5,$6,$7)
+          contact_phone, order_ref, line_items_summary, sequence_no)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
        RETURNING id`,
       [sheetId, order.customer_id, orderId, customer.delivery_address,
-       customer.phone, order.order_number, customer.route_sequence],
+       customer.phone, order.order_number, summary, customer.route_sequence],
     );
     await audit(t, actor, 'update', 'DeliverySheet', sheetId, sheetId, {
       addedOrderId: orderId, manual: true,

@@ -23,6 +23,7 @@ import type { Cents } from '@alka/shared';
 import { planPayments, validateAllocation, RuleViolation } from '@alka/shared';
 import { insertPayment } from './payments.ts';
 import { amountOwedForStop } from './delivery.ts';
+import { openInvoicesForCustomer } from './invoices.ts';
 
 export interface SettlementStopRow {
   stopId: string;
@@ -31,6 +32,9 @@ export interface SettlementStopRow {
   orderRef: string | null;
   deliveredSummary: string;
   paymentMethod: string | null;
+  bottlesDeliveredFull: number;
+  bottlesEmptiesPickedUp: number;
+  bottlesLostDamaged: number;
   /** What the driver recorded collecting. */
   collectedCents: Cents;
   /** Tax-inclusive amount that was owed for this stop. */
@@ -38,6 +42,11 @@ export interface SettlementStopRow {
   /** expected - collected, per stop, so a discrepancy traces to one stop. */
   varianceCents: Cents;
   allocations: Array<{ invoiceId: string | null; invoiceNumber: string | null; amountCents: Cents }>;
+  /** Everything this customer still owes, so the cash can be applied here. */
+  openInvoices: Array<{
+    invoiceId: string; invoiceNumber: string; balanceCents: Cents;
+    grandTotalCents: Cents; invoiceDate: string; status: string;
+  }>;
   settled: boolean;
 }
 
@@ -61,11 +70,15 @@ export async function getSettlementReview(
   );
 
   const stops = await db.query<{
-    id: string; customer_name: string; stop_outcome: string; order_ref: string | null;
-    payment_method: string | null; payment_amount_cents: number; settled_at: string | null;
+    id: string; customer_id: string; customer_name: string; stop_outcome: string;
+    order_ref: string | null; payment_method: string | null;
+    payment_amount_cents: number; settled_at: string | null;
+    bottles_delivered_full: number; bottles_empties_picked_up: number;
+    bottles_lost_damaged: number;
   }>(
-    `SELECT s.id, c.name AS customer_name, s.stop_outcome, s.order_ref,
-            s.payment_method, s.payment_amount_cents, s.settled_at
+    `SELECT s.id, s.customer_id, c.name AS customer_name, s.stop_outcome, s.order_ref,
+            s.payment_method, s.payment_amount_cents, s.settled_at,
+            s.bottles_delivered_full, s.bottles_empties_picked_up, s.bottles_lost_damaged
      FROM delivery_stops s JOIN customers c ON c.id = s.customer_id
      WHERE s.delivery_sheet_id = $1
      ORDER BY s.sequence_no, c.name`,
@@ -111,6 +124,17 @@ export async function getSettlementReview(
         invoiceNumber: a.invoice_number,
         amountCents: num(a.amount_cents),
       })),
+      openInvoices: (await openInvoicesForCustomer(db, s.customer_id)).map((i) => ({
+        invoiceId: i.invoiceId,
+        invoiceNumber: i.invoiceNumber,
+        balanceCents: i.balanceCents,
+        grandTotalCents: i.grandTotalCents,
+        invoiceDate: String(i.invoiceDate).slice(0, 10),
+        status: i.status,
+      })),
+      bottlesDeliveredFull: num(s.bottles_delivered_full),
+      bottlesEmptiesPickedUp: num(s.bottles_empties_picked_up),
+      bottlesLostDamaged: num(s.bottles_lost_damaged),
       settled: !!s.settled_at,
     });
   }
@@ -125,74 +149,148 @@ export async function getSettlementReview(
 }
 
 /**
- * Admin-only correction of a stop's underlying recorded data before the route
- * closes. Deliberately more restrictive than adjusting the allocation, to
- * prevent driver/office collusion on a fabricated correction. A reason is
- * REQUIRED here (unlike a reversal, where it is optional).
+ * A correction to what a stop recorded. Every field is optional; only what is
+ * supplied is changed.
  */
-export async function correctStopRecord(
+export interface StopCorrection {
+  paymentMethod?: string;
+  paymentAmountCents?: Cents;
+  bottlesDeliveredFull?: number;
+  bottlesEmptiesPickedUp?: number;
+  bottlesLostDamaged?: number;
+  deliveredLines?: Array<{ orderLineId: string; cases: number; looseBottles: number }>;
+}
+
+/**
+ * Apply a correction inside an existing transaction.
+ *
+ * Shared by an admin correcting directly and by an admin approving one an
+ * office user raised, so an approved correction is applied by exactly the
+ * same code as a direct one - never a re-derivation that could drift.
+ */
+export async function applyStopCorrection(
+  t: Queryable,
+  actor: Actor,
+  stopId: string,
+  changes: StopCorrection,
+  reason: string,
+): Promise<void> {
+  const before = await t.one<Record<string, unknown>>(
+    `SELECT s.payment_method, s.payment_amount_cents, s.bottles_delivered_full,
+            s.bottles_empties_picked_up, s.bottles_lost_damaged, s.settled_at,
+            d.status AS sheet_status
+     FROM delivery_stops s JOIN delivery_sheets d ON d.id = s.delivery_sheet_id
+     WHERE s.id = $1`,
+    [stopId],
+  );
+  // Re-checked here as well as at the entry point: an approval can be granted
+  // minutes after it was raised, and the route may have closed in between.
+  if (before.sheet_status === 'Completed') {
+    throw new RuleViolation(
+      'this route is closed; corrections now go through payment reversal, ' +
+      'reassignment or invoice editing',
+    );
+  }
+
+  await t.query(
+    `UPDATE delivery_stops
+     SET payment_method = COALESCE($2, payment_method),
+         payment_amount_cents = COALESCE($3, payment_amount_cents),
+         bottles_delivered_full = COALESCE($4, bottles_delivered_full),
+         bottles_empties_picked_up = COALESCE($5, bottles_empties_picked_up),
+         bottles_lost_damaged = COALESCE($6, bottles_lost_damaged)
+     WHERE id = $1`,
+    [stopId, changes.paymentMethod ?? null, changes.paymentAmountCents ?? null,
+     changes.bottlesDeliveredFull ?? null, changes.bottlesEmptiesPickedUp ?? null,
+     changes.bottlesLostDamaged ?? null],
+  );
+
+  for (const l of changes.deliveredLines ?? []) {
+    await t.query(
+      `UPDATE order_line_items
+       SET delivered_cases = $2, delivered_loose = $3,
+           delivered_total = $2 * (SELECT bottles_per_case FROM products p
+                                   WHERE p.id = order_line_items.product_id) + $3
+       WHERE id = $1`,
+      [l.orderLineId, l.cases, l.looseBottles],
+    );
+  }
+
+  await audit(t, actor, 'adjust', 'DeliveryStop', stopId, stopId, {
+    reason, before, changes, correctedBy: actor.name,
+  });
+}
+
+/**
+ * Correct what a stop recorded, or ask an admin to.
+ *
+ * A correction rewrites what the driver recorded collecting, delivering and
+ * picking up - precisely the record someone would alter to cover a shortfall.
+ * So an admin applies it directly, while an office user, who is the one
+ * holding the paperwork, may only RAISE it: the proposed change waits in the
+ * approvals queue until an admin approves it.
+ */
+export async function requestStopCorrection(
   db: Db,
   actor: Actor,
   stopId: string,
-  changes: {
-    paymentMethod?: string;
-    paymentAmountCents?: Cents;
-    bottlesDeliveredFull?: number;
-    bottlesEmptiesPickedUp?: number;
-    bottlesLostDamaged?: number;
-    deliveredLines?: Array<{ orderLineId: string; cases: number; looseBottles: number }>;
-  },
+  changes: StopCorrection,
   reason: string,
-): Promise<void> {
-  requireRole(actor, 'admin');
+): Promise<{ applied: boolean; requestId: string | null }> {
+  requireRole(actor, 'admin', 'user');
   if (!reason || !reason.trim()) {
     throw new RuleViolation('a reason is required when correcting a stop record');
   }
 
-  await db.tx(async (t) => {
-    const before = await t.one<Record<string, unknown>>(
-      `SELECT s.payment_method, s.payment_amount_cents, s.bottles_delivered_full,
-              s.bottles_empties_picked_up, s.bottles_lost_damaged, s.settled_at,
-              d.status AS sheet_status
+  return db.tx(async (t) => {
+    const stop = await t.maybeOne<{
+      order_ref: string | null; customer_id: string; settled_at: string | null;
+      sheet_status: string;
+    }>(
+      `SELECT s.order_ref, s.customer_id, s.settled_at, d.status AS sheet_status
        FROM delivery_stops s JOIN delivery_sheets d ON d.id = s.delivery_sheet_id
        WHERE s.id = $1`,
       [stopId],
     );
-    if (before.sheet_status === 'Completed') {
+    if (!stop) throw new RuleViolation('that stop no longer exists');
+    if (stop.sheet_status === 'Completed') {
       throw new RuleViolation(
         'this route is closed; corrections now go through payment reversal, ' +
         'reassignment or invoice editing',
       );
     }
 
-    await t.query(
-      `UPDATE delivery_stops
-       SET payment_method = COALESCE($2, payment_method),
-           payment_amount_cents = COALESCE($3, payment_amount_cents),
-           bottles_delivered_full = COALESCE($4, bottles_delivered_full),
-           bottles_empties_picked_up = COALESCE($5, bottles_empties_picked_up),
-           bottles_lost_damaged = COALESCE($6, bottles_lost_damaged)
-       WHERE id = $1`,
-      [stopId, changes.paymentMethod ?? null, changes.paymentAmountCents ?? null,
-       changes.bottlesDeliveredFull ?? null, changes.bottlesEmptiesPickedUp ?? null,
-       changes.bottlesLostDamaged ?? null],
-    );
-
-    for (const l of changes.deliveredLines ?? []) {
-      await t.query(
-        `UPDATE order_line_items
-         SET delivered_cases = $2, delivered_loose = $3,
-             delivered_total = $2 * (SELECT bottles_per_case FROM products p
-                                     WHERE p.id = order_line_items.product_id) + $3
-         WHERE id = $1`,
-        [l.orderLineId, l.cases, l.looseBottles],
-      );
+    if (actor.role === 'admin') {
+      await applyStopCorrection(t, actor, stopId, changes, reason);
+      return { applied: true, requestId: null };
     }
 
-    await audit(t, actor, 'adjust', 'DeliveryStop', stopId, stopId, {
-      reason, before, changes, correctedBy: actor.name,
+    const req = await t.one<{ id: string }>(
+      `INSERT INTO approval_requests
+         (request_type, entity_type, entity_id, entity_label, customer_id,
+          amount_cents, reason, requested_by_id, payload)
+       VALUES ('StopCorrection','DeliveryStop',$1,$2,$3,$4,$5,$6,$7::jsonb)
+       RETURNING id`,
+      [stopId, stop.order_ref ?? stopId, stop.customer_id,
+       changes.paymentAmountCents ?? 0, reason, actor.id, JSON.stringify(changes)],
+    );
+    await audit(t, actor, 'update', 'ApprovalRequest', req.id, 'StopCorrection', {
+      stopId, changes, reason, note: 'awaiting admin approval',
     });
+    return { applied: false, requestId: req.id };
   });
+}
+
+/** Kept for direct admin use and for the tests that pin admin-only behaviour. */
+export async function correctStopRecord(
+  db: Db,
+  actor: Actor,
+  stopId: string,
+  changes: StopCorrection,
+  reason: string,
+): Promise<void> {
+  requireRole(actor, 'admin');
+  await requestStopCorrection(db, actor, stopId, changes, reason);
 }
 
 /** Adjust a driver's suggested allocation. Admin AND office User may do this. */

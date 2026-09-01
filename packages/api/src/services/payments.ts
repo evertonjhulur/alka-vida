@@ -9,9 +9,9 @@
 
 import type { Db, Queryable } from '../db/index.ts';
 import type { Actor } from './core.ts';
-import { audit, requireRole, withIdempotency, num } from './core.ts';
+import { audit, BUSINESS_TIMEZONE, requireRole, withIdempotency, num } from './core.ts';
 import type { Cents, PaymentMethod } from '@alka/shared';
-import { RuleViolation } from '@alka/shared';
+import { RuleViolation, planPayments, validateAllocation } from '@alka/shared';
 
 export interface RecordPaymentInput {
   customerId: string;
@@ -219,4 +219,116 @@ export async function getCustomerBalance(
     paidCents: num(row?.paid_cents),
     balanceCents: num(row?.balance_cents),
   };
+}
+
+/**
+ * Record money received and put it against invoices in one motion.
+ *
+ * This is the bank-transfer path: a customer pays a lump sum covering several
+ * invoices, or pays now against nothing in particular. It creates ONE payment
+ * row per invoice it covers, plus a final unattached one for any remainder -
+ * the same uniform shape route settlement produces, via the same planPayments
+ * function, so nothing downstream has to tell the two apart.
+ *
+ * There is deliberately no "credit balance" concept: an unattached payment is
+ * simply a payment, and it reduces what the customer owes overall.
+ */
+export async function receivePayment(
+  db: Db,
+  actor: Actor,
+  input: {
+    customerId: string;
+    amountCents: Cents;
+    method: PaymentMethod;
+    paymentDate?: string | null;
+    reference?: string | null;
+    notes?: string | null;
+    /** Optional: which invoices this covers, in the order to apply them. */
+    allocations?: ReadonlyArray<{ invoiceId: string; amountCents: Cents }>;
+    idempotencyKey?: string | null;
+  },
+): Promise<{ paymentIds: string[]; allocatedCents: Cents; unappliedCents: Cents }> {
+  requireRole(actor, 'admin', 'user');
+  if (!(input.amountCents > 0)) throw new RuleViolation('a payment must be more than zero');
+
+  const check = validateAllocation(input.amountCents, input.allocations ?? []);
+  if (!check.ok) throw new RuleViolation(check.error);
+
+  return db.tx(async (t) => {
+    const customer = await t.maybeOne<{ name: string }>(
+      `SELECT name FROM customers WHERE id = $1`, [input.customerId],
+    );
+    if (!customer) throw new RuleViolation('that customer no longer exists');
+
+    // Every invoice named must belong to this customer, or the money lands on
+    // somebody else's account.
+    for (const a of input.allocations ?? []) {
+      const inv = await t.maybeOne<{ customer_id: string; invoice_number: string }>(
+        `SELECT customer_id, invoice_number FROM invoices WHERE id = $1`, [a.invoiceId],
+      );
+      if (!inv) throw new RuleViolation('one of those invoices no longer exists');
+      if (inv.customer_id !== input.customerId) {
+        throw new RuleViolation(
+          `${inv.invoice_number} belongs to a different customer`,
+        );
+      }
+    }
+
+    const run = async () => {
+      const planned = planPayments(input.amountCents, input.allocations ?? []);
+      const ids: string[] = [];
+      for (const plan of planned) {
+        const row = await insertPayment(t, actor, {
+          customerId: input.customerId,
+          invoiceId: plan.invoiceId,
+          amountCents: plan.amountCents,
+          method: input.method,
+          paymentDate: input.paymentDate ?? null,
+          reference: input.reference ?? null,
+          notes: input.notes ?? null,
+          status: 'Confirmed',
+        });
+        ids.push(row.id);
+      }
+      await audit(t, actor, 'pay', 'Customer', input.customerId, customer.name, {
+        amountCents: input.amountCents,
+        method: input.method,
+        reference: input.reference ?? null,
+        allocations: input.allocations ?? [],
+      });
+      // withIdempotency needs a single id to remember the operation by.
+      return { id: ids[0] ?? '', ids };
+    };
+
+    const outcome = await withIdempotency(t, input.idempotencyKey, 'receivePayment', run);
+    const ids = (outcome.result as { ids?: string[] } | null)?.ids ?? [];
+    const allocated = (input.allocations ?? []).reduce((sum, a) => sum + a.amountCents, 0);
+    return {
+      paymentIds: ids,
+      allocatedCents: Math.min(allocated, input.amountCents),
+      unappliedCents: Math.max(input.amountCents - allocated, 0),
+    };
+  });
+}
+
+/**
+ * Payments that are not against any invoice yet.
+ *
+ * These are what reconciling a bank statement produces: money that arrived
+ * before the invoice it belongs to, or a lump sum still to be spread.
+ */
+export async function unappliedPayments(db: Db, customerId?: string) {
+  return db.query<{
+    id: string; customer_id: string; customer_name: string; amount_cents: number;
+    payment_date: string; method: string; reference: string | null; notes: string | null;
+  }>(
+    `SELECT p.id, p.customer_id, c.name AS customer_name, p.amount_cents,
+            to_char(p.payment_date AT TIME ZONE $2, 'YYYY-MM-DD') AS payment_date,
+            p.method, p.reference, p.notes
+     FROM payments p JOIN customers c ON c.id = p.customer_id
+     WHERE p.invoice_id IS NULL AND p.status = 'Confirmed' AND NOT p.is_reversal
+       AND ($1::uuid IS NULL OR p.customer_id = $1::uuid)
+     ORDER BY p.payment_date DESC, c.name`,
+    [customerId ?? null, BUSINESS_TIMEZONE],
+  );
 }

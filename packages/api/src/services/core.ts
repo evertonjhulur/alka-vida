@@ -38,6 +38,24 @@ export async function audit(
   );
 }
 
+/** The business timezone. Jamaica does not observe daylight saving. */
+export const BUSINESS_TIMEZONE = process.env.BUSINESS_TIMEZONE ?? 'America/Jamaica';
+
+/**
+ * Today's date in the business timezone, as YYYY-MM-DD.
+ *
+ * NOT `new Date().toISOString().slice(0, 10)`. That is the UTC date, which
+ * from 7pm Jamaica time until midnight is already tomorrow - so an order
+ * taken at half past seven in the evening was routed onto tomorrow's
+ * delivery sheet. The SQL side of this is business_today() in migration 004.
+ */
+export function businessToday(): string {
+  // en-CA formats as YYYY-MM-DD, which is what every date column expects.
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: BUSINESS_TIMEZONE, year: 'numeric', month: '2-digit', day: '2-digit',
+  }).format(new Date());
+}
+
 /** Throw unless the actor holds one of the given roles. */
 export function requireRole(actor: Actor, ...roles: Role[]): void {
   if (!roles.includes(actor.role)) {
