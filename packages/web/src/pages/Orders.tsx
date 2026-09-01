@@ -135,6 +135,42 @@ export default function Orders() {
     } finally { setBusy(false); }
   }
 
+  /**
+   * Turn this order into a standing order. It stays exactly as it is and
+   * becomes the first delivery of the series; Alka Vida raises the ones after
+   * it automatically.
+   */
+  async function makeStanding(o: Order) {
+    const answer = window.prompt(
+      `Repeat this order for ${o.customer_name}?\n\n` +
+      `Type how often:  weekly, biweekly, or monthly`,
+      'weekly',
+    );
+    if (!answer) return;
+    const pattern = { weekly: 'Weekly', biweekly: 'Biweekly', monthly: 'Monthly' }[
+      answer.trim().toLowerCase()
+    ];
+    if (!pattern) {
+      setError(`"${answer}" is not one of weekly, biweekly or monthly.`);
+      return;
+    }
+
+    setBusy(true); setError(null);
+    try {
+      const r = await api.post<{ nextDeliveryDate: string }>(
+        `/api/orders/${o.id}/recurring`, { pattern },
+      );
+      setMsg(
+        `${o.customer_name} now repeats ${pattern.toLowerCase()}. ` +
+        `The next delivery is scheduled for ${r.nextDeliveryDate} and will be ` +
+        `raised automatically. See Standing orders.`,
+      );
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not set up the repeat');
+    } finally { setBusy(false); }
+  }
+
   async function cancel(o: Order) {
     if (!window.confirm(`Cancel ${o.order_number}? It will be removed from its route.`)) return;
     setBusy(true); setError(null);
@@ -307,7 +343,11 @@ export default function Orders() {
                       )}
                       <button className="secondary" onClick={() => startEdit(o)}>Edit</button>{' '}
                       <button className="secondary" disabled={busy}
-                              onClick={() => cancel(o)}>Cancel</button>
+                              onClick={() => cancel(o)}>Cancel</button>{' '}
+                      {/* Turning this into a standing order keeps THIS order as
+                          the first delivery and schedules the ones after it. */}
+                      <button className="secondary" disabled={busy}
+                              onClick={() => makeStanding(o)}>Repeat…</button>
                     </>
                   ) : (
                     <span className="muted small">

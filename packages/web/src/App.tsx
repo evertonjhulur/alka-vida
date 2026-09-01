@@ -9,6 +9,7 @@ import Dashboard from './pages/Dashboard';
 import Customers from './pages/Customers';
 import NewOrder from './pages/NewOrder';
 import Orders from './pages/Orders';
+import Recurring from './pages/Recurring';
 import DeliverySheets from './pages/DeliverySheets';
 import RouteDetail from './pages/RouteDetail';
 import Settlement from './pages/Settlement';
@@ -47,6 +48,7 @@ const NAV: NavItem[] = [
 
   { to: '/orders/new', label: 'New order', roles: ['admin', 'user'], section: 'Sales' },
   { to: '/orders', label: 'Orders', roles: ['admin', 'user'], section: 'Sales' },
+  { to: '/recurring', label: 'Standing orders', roles: ['admin', 'user'], section: 'Sales' },
   { to: '/customers', label: 'Customers', roles: ['admin', 'user'], section: 'Sales' },
   { to: '/pricing', label: 'Products & pricing', roles: ['admin', 'user'], section: 'Sales' },
   { to: '/delivery', label: 'Delivery sheets', roles: ['admin', 'user'], section: 'Sales' },
@@ -110,6 +112,7 @@ function Shell({ session }: { session: Session }) {
           <Route path="/" element={<HomeFor session={session} />} />
           <Route path="/orders/new" element={<NewOrder />} />
           <Route path="/orders" element={<Orders />} />
+          <Route path="/recurring" element={<Recurring />} />
           <Route path="/customers" element={<Customers session={session} />} />
           <Route path="/pricing" element={<Pricing session={session} />} />
           <Route path="/products/:productId/bom" element={<Bom />} />

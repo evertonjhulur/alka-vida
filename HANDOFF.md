@@ -4,7 +4,7 @@ State of the Alka Vida rebuild. Read `README.md` first for what the system
 does and the rules behind it; this file covers where things stand, what is
 left, and what will bite you.
 
-Last updated at commit `daed8df`, on branch `operations-fixes`.
+Last updated after standing orders landed, on branch `operations-fixes`.
 
 ---
 
@@ -30,11 +30,12 @@ Working and verified end to end, in the browser as well as in tests:
 | Production | BOM explosion, feasibility check, FIFO consumption. |
 | Stock | Finished goods, movement ledger, physical counts + reconcile. |
 | 5-gallon bottle pool | Full cycle incl. washing, holdings, movement history. |
+| Standing orders | Complete. Schedule per series; occurrences raised automatically on open and hourly. |
 | Route composition & assignment | `routing.ts` — who owns a round, which orders, in what order. |
 | Payments screen | Record, reverse, reassign from one place. |
 | Auth & roles | 4 roles, enforced at route AND service layer. Per-install signing key. |
 
-**Tests: 240 passing** — 42 pure domain (`packages/shared`), 198 API
+**Tests: 281 passing** — 64 pure domain (`packages/shared`), 217 API
 (`packages/api`, against real PostgreSQL via PGlite).
 
 ```bash
@@ -54,7 +55,8 @@ packages/
 
 **API services** (`packages/api/src/services/`): approvals, audits, bottles,
 catalog, core, counter, customers, delivery, documents, inventory, invoices,
-ledger, orders, payments, pricing, quotations, reports, routing, settlement.
+ledger, orders, payments, pricing, quotations, recurring, reports, routing,
+settlement.
 
 `packages/api/src/lib/`: `auth.ts`, `settings.ts`.
 
@@ -71,16 +73,12 @@ decision behind them:
 | 006 | counter sale as its own fulfilment type |
 | 007 | customer name on the invoice ledger; stop calling invoices overdue a day early |
 | 008 | `business_date(ts)` applied where 004 missed |
+| 009 | standing orders — pause/end, and the unique index that stops an occurrence being raised twice |
 
 ---
 
 ## Not built yet
 
-- **Recurring orders don't auto-generate.** The fields exist
-  (`is_recurring`, `recurrence_pattern`, `next_delivery_date`,
-  `parent_recurring_id`) and each delivery invoices correctly, but nothing
-  creates the next occurrence — they are entered by hand. This is the most
-  valuable remaining piece for a business built on standing weekly orders.
 - **Quotations have full service + tests but no screen.** Low priority; the
   spec calls them optional and low-frequency.
 - **Excel export is CSV.** It opens in Excel and carries the columns an

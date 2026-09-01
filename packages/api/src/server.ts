@@ -35,6 +35,7 @@ import * as catalog from './services/catalog.ts';
 import * as audits from './services/audits.ts';
 import * as bottles from './services/bottles.ts';
 import * as pricing from './services/pricing.ts';
+import * as recurring from './services/recurring.ts';
 import { collectOrder, counterSale } from './services/counter.ts';
 
 declare module 'fastify' {
@@ -746,6 +747,38 @@ export async function buildServer(db: Db) {
       });
     });
 
+  /* ---------------- standing orders ---------------- */
+
+  app.get('/api/recurring', { preHandler: allow('admin', 'user') },
+    async () => recurring.listSchedules(db));
+
+  /** Raise every occurrence now due. Safe to call repeatedly. */
+  app.post('/api/recurring/generate', { preHandler: allow('admin', 'user') },
+    async (req) => recurring.generateDueOrders(db, actorOf(req)));
+
+  /** Turn an existing order into the start of a standing order. */
+  app.post('/api/orders/:id/recurring', { preHandler: allow('admin', 'user') },
+    async (req) => recurring.startSchedule(db, actorOf(req),
+      (req.params as { id: string }).id, req.body as never));
+
+  app.patch('/api/recurring/:id', { preHandler: allow('admin', 'user') },
+    async (req) => {
+      await recurring.updateSchedule(db, actorOf(req),
+        (req.params as { id: string }).id, req.body as never);
+      return { ok: true };
+    });
+
+  app.post('/api/recurring/:id/pause', { preHandler: allow('admin', 'user') },
+    async (req) => recurring.setSchedulePaused(db, actorOf(req),
+      (req.params as { id: string }).id, (req.body as { paused: boolean }).paused));
+
+  app.post('/api/recurring/:id/end', { preHandler: allow('admin', 'user') },
+    async (req) => {
+      await recurring.endSchedule(db, actorOf(req), (req.params as { id: string }).id,
+        (req.body as { reason?: string })?.reason);
+      return { ok: true };
+    });
+
   /* ---------------- 5-gallon bottle pool ---------------- */
 
   app.get('/api/bottle-pool', { preHandler: allow('admin', 'user', 'driver') },
@@ -810,6 +843,60 @@ if (import.meta.filename === process.argv[1]) {
   // usable immediately. seed() is idempotent and skips once data exists.
   const { seed } = await import('./db/seed.ts');
   await seed(db, { quiet: true });
+
+  /**
+   * Raise standing orders that have come due.
+   *
+   * Runs at startup and then once an hour. This app is opened and closed like
+   * a desktop program rather than left running on a server, so waiting for a
+   * nightly moment would mean a machine that is off overnight never generates
+   * anything. Opening it is the reliable trigger; the timer covers a machine
+   * left on for days.
+   *
+   * The work is idempotent - a unique index makes a duplicate occurrence
+   * impossible - so running it often costs nothing and missing a run only
+   * delays, never loses.
+   */
+  // Work the system does on its own still has to be attributable, and the
+  // audit log's user_id is a real foreign key. So it gets its own account
+  // rather than borrowing a person's - nobody should appear in the log
+  // raising orders at 3am. It cannot be signed into: the password hash is
+  // deliberately not a valid one.
+  const systemUser = await db.one<{ id: string }>(
+    `INSERT INTO users (email, name, password_hash, role, active)
+     VALUES ('system@alkavida.local', 'Alka Vida (automatic)', 'x-not-a-login', 'admin', false)
+     ON CONFLICT (email) DO UPDATE SET name = EXCLUDED.name
+     RETURNING id`,
+  );
+  const generator: Actor = {
+    id: systemUser.id, name: 'Alka Vida (automatic)', role: 'admin',
+  };
+  const runStandingOrders = async (why: string) => {
+    try {
+      const { generateDueOrders } = await import('./services/recurring.ts');
+      const r = await generateDueOrders(db, generator);
+      if (r.created.length) {
+        console.log(`  ${r.created.length} standing order(s) raised (${why}).`);
+      }
+      if (r.skipped.length) {
+        console.log(
+          `  ${r.skipped.length} standing order date(s) were too far past to raise. ` +
+          `See Standing orders for which.`,
+        );
+      }
+      for (const p of r.problems) {
+        console.log(`  Standing order for ${p.customerName} needs attention: ${p.reason}`);
+      }
+    } catch (err) {
+      // Never let this stop the app starting - the office can still work,
+      // and the button on the Standing orders screen retries it.
+      console.error(`  Could not raise standing orders: ${(err as Error).message}`);
+    }
+  };
+
+  await runStandingOrders('on startup');
+  const timer = setInterval(() => { void runStandingOrders('hourly check'); }, 60 * 60 * 1000);
+  timer.unref();
 
   const app = await buildServer(db);
   const port = Number(process.env.PORT ?? 3001);
