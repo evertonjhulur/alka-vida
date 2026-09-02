@@ -94,7 +94,7 @@ function secret(): string {
 }
 
 /**
- * Does the person this token names still exist?
+ * Is the person this token names still here, and still allowed in?
  *
  * A valid signature only proves the token was minted by this system, not
  * that its subject survived. Every write ends by inserting an audit_log row
@@ -102,12 +102,21 @@ function secret(): string {
  * takes the whole transaction down on a foreign key at the last possible
  * moment - after document numbers have already been burned off their
  * sequences. Checking here turns that into an ordinary 401.
+ *
+ * `active` is checked here too, not only at login. Withdrawing access is the
+ * entire point of being able to deactivate somebody, and if it were checked
+ * at login alone a driver dismissed at nine in the morning would keep
+ * working access until their token expired that evening. Checked per
+ * request, the next thing they touch is refused.
  */
-export async function userExists(db: Db, userId: string): Promise<boolean> {
-  const row = await db.maybeOne<{ id: string }>(
-    `SELECT id FROM users WHERE id = $1`, [userId],
+export async function userAccess(
+  db: Db, userId: string,
+): Promise<'ok' | 'gone' | 'disabled'> {
+  const row = await db.maybeOne<{ active: boolean }>(
+    `SELECT active FROM users WHERE id = $1`, [userId],
   );
-  return row != null;
+  if (row == null) return 'gone';
+  return row.active ? 'ok' : 'disabled';
 }
 
 const b64url = (b: Buffer) => b.toString('base64url');
@@ -157,6 +166,10 @@ export async function login(
   const customer = await db.maybeOne<{ id: string }>(
     `SELECT id FROM customers WHERE user_id = $1 AND active LIMIT 1`, [user.id],
   );
+
+  // So an administrator reviewing access can tell a live account from one
+  // nobody has touched since it was created.
+  await db.query(`UPDATE users SET last_login_at = now() WHERE id = $1`, [user.id]);
 
   const session = {
     id: user.id, name: user.name, role: user.role,

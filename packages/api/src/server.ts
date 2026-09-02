@@ -13,7 +13,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createDb, type Db } from './db/index.ts';
 import { migrate } from './db/migrate.ts';
-import { loadSigningKey, login, userExists, verifyToken, type Session } from './lib/auth.ts';
+import { loadSigningKey, login, userAccess, verifyToken, type Session } from './lib/auth.ts';
 import { loadSettings } from './lib/settings.ts';
 import { ForbiddenError, RuleViolation } from '@alka/shared';
 import { BUSINESS_TIMEZONE, type Actor } from './services/core.ts';
@@ -36,6 +36,7 @@ import * as audits from './services/audits.ts';
 import * as bottles from './services/bottles.ts';
 import * as pricing from './services/pricing.ts';
 import * as recurring from './services/recurring.ts';
+import * as users from './services/users.ts';
 import { collectOrder, counterSale } from './services/counter.ts';
 
 declare module 'fastify' {
@@ -137,9 +138,17 @@ export async function buildServer(db: Db) {
     // new ids, leaving a browser "signed in" as somebody who is gone. Left
     // unchecked that surfaces at the END of the first write, as a raw
     // audit_log foreign key error, with the order number already burned.
-    if (!(await userExists(db, session.id))) {
+    const access = await userAccess(db, session.id);
+    if (access === 'gone') {
       return reply.status(401).send({
         error: 'Your session has expired. Please sign in again.',
+      });
+    }
+    // Checked per request, not only at login, so withdrawing access takes
+    // effect on the very next thing they touch.
+    if (access === 'disabled') {
+      return reply.status(401).send({
+        error: 'This login has been deactivated. Speak to an administrator.',
       });
     }
     req.session = session;
@@ -245,6 +254,47 @@ export async function buildServer(db: Db) {
   });
 
   app.get('/api/auth/me', async (req) => req.session);
+
+  // Anybody may change their OWN password - the one thing in user
+  // administration that is not restricted to an administrator.
+  app.post('/api/auth/change-password', async (req) => {
+    const body = req.body as { currentPassword: string; newPassword: string };
+    await users.changeOwnPassword(db, actorOf(req), body.currentPassword, body.newPassword);
+    return { ok: true };
+  });
+
+  /* ---------------- user administration ---------------- */
+
+  app.get('/api/users', { preHandler: allow('admin') },
+    async (req) => users.listUsers(db, actorOf(req)));
+
+  app.post('/api/users', { preHandler: allow('admin') },
+    async (req) => users.createUser(db, actorOf(req), req.body as never));
+
+  app.patch('/api/users/:id', { preHandler: allow('admin') },
+    async (req) => {
+      await users.updateUser(db, actorOf(req),
+        (req.params as { id: string }).id, req.body as never);
+      return { ok: true };
+    });
+
+  // Withdrawing access, rather than deleting: audit_log rows reference a
+  // user, so a person is never removed.
+  app.post('/api/users/:id/active', { preHandler: allow('admin') },
+    async (req) => {
+      const body = req.body as { active: boolean };
+      await users.setUserActive(db, actorOf(req),
+        (req.params as { id: string }).id, body.active === true);
+      return { ok: true };
+    });
+
+  app.post('/api/users/:id/password', { preHandler: allow('admin') },
+    async (req) => {
+      const body = req.body as { password: string };
+      await users.resetPassword(db, actorOf(req),
+        (req.params as { id: string }).id, body.password);
+      return { ok: true };
+    });
 
   /* ---------------- customers ---------------- */
 

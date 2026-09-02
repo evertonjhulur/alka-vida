@@ -33,6 +33,8 @@ import Production from './pages/Production';
 import Stock from './pages/Stock';
 import StockCount from './pages/StockCount';
 import BottlePool from './pages/BottlePool';
+import Users from './pages/Users';
+import MyAccount from './pages/MyAccount';
 
 interface NavItem {
   to: string;
@@ -69,6 +71,11 @@ const NAV: NavItem[] = [
 
   { to: '/route', label: 'My route', roles: ['driver'] },
   { to: '/portal', label: 'My account', roles: ['customer'] },
+
+  // Administration. Logins are the administrator's alone; changing your own
+  // password belongs to everybody, which is why it is not in that section.
+  { to: '/users', label: 'Logins', roles: ['admin'], section: 'Administration' },
+  { to: '/my-account', label: 'My password', roles: ['admin', 'user', 'driver'] },
 ];
 
 function Shell({ session }: { session: Session }) {
@@ -135,6 +142,8 @@ function Shell({ session }: { session: Session }) {
           <Route path="/route" element={<DriverRoute session={session} />} />
           <Route path="/route/stop/:stopId" element={<DriverStop />} />
           <Route path="/portal" element={<Portal session={session} />} />
+          <Route path="/users" element={<Users session={session} />} />
+          <Route path="/my-account" element={<MyAccount session={session} />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
         </ErrorBoundary>
