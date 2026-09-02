@@ -35,6 +35,9 @@ import StockCount from './pages/StockCount';
 import BottlePool from './pages/BottlePool';
 import Users from './pages/Users';
 import MyAccount from './pages/MyAccount';
+import Register from './pages/Register';
+import SetPassword from './pages/SetPassword';
+import Applications from './pages/Applications';
 
 interface NavItem {
   to: string;
@@ -74,6 +77,7 @@ const NAV: NavItem[] = [
 
   // Administration. Logins are the administrator's alone; changing your own
   // password belongs to everybody, which is why it is not in that section.
+  { to: '/applications', label: 'Account requests', roles: ['admin', 'user'], section: 'Administration' },
   { to: '/users', label: 'Logins', roles: ['admin'], section: 'Administration' },
   { to: '/my-account', label: 'My password', roles: ['admin', 'user', 'driver'] },
 ];
@@ -143,6 +147,7 @@ function Shell({ session }: { session: Session }) {
           <Route path="/route/stop/:stopId" element={<DriverStop />} />
           <Route path="/portal" element={<Portal session={session} />} />
           <Route path="/users" element={<Users session={session} />} />
+          <Route path="/applications" element={<Applications session={session} />} />
           <Route path="/my-account" element={<MyAccount session={session} />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
@@ -159,21 +164,46 @@ function HomeFor({ session }: { session: Session }) {
   return <Dashboard />;
 }
 
+/**
+ * The two screens that belong to nobody: asking for an account, and choosing
+ * a password from an invitation.
+ *
+ * They must render whether or not somebody is signed in. An invitation link
+ * lands in a browser that may well already hold a session - the office
+ * checking a link before sending it, or a customer opening it on the machine
+ * where somebody else is signed in - and routing them to a dashboard instead
+ * would strand them with no obvious way to the page the link was for.
+ */
+const PUBLIC_ROUTES = ['/register', '/set-password'];
+
+const publicRouteInHash = () => {
+  const path = window.location.hash.replace(/^#/, '').split('?')[0];
+  return PUBLIC_ROUTES.includes(path);
+};
+
 export default function App() {
   const [session, setSession] = useState<Session | null>(getSession());
+  const [onPublicRoute, setOnPublicRoute] = useState(publicRouteInHash);
 
   useEffect(() => {
     const onStorage = () => setSession(getSession());
+    const onHash = () => setOnPublicRoute(publicRouteInHash());
     window.addEventListener('storage', onStorage);
-    return () => window.removeEventListener('storage', onStorage);
+    window.addEventListener('hashchange', onHash);
+    return () => {
+      window.removeEventListener('storage', onStorage);
+      window.removeEventListener('hashchange', onHash);
+    };
   }, []);
 
   return (
     <HashRouter>
-      {session
+      {session && !onPublicRoute
         ? <Shell session={session} />
         : (
           <Routes>
+            <Route path="/register" element={<Register />} />
+            <Route path="/set-password" element={<SetPassword />} />
             <Route path="*" element={<Login onSignedIn={setSession} />} />
           </Routes>
         )}

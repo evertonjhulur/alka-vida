@@ -23,6 +23,7 @@ import type { Db } from '../db/index.ts';
 import type { Actor } from './core.ts';
 import { audit, requireRole } from './core.ts';
 import { hashPassword, verifyPassword } from '../lib/auth.ts';
+import { UNUSABLE_PASSWORD } from './invitations.ts';
 import { ROLES, type Role, RuleViolation } from '@alka/shared';
 
 /** Short enough to be typed by hand, long enough not to be guessed at once. */
@@ -58,7 +59,14 @@ export interface UserInput {
   email: string;
   name: string;
   role: Role;
+  /** Ignored, and not required, when `byInvitation` is set. */
   password: string;
+  /**
+   * Create the account with a password nobody can use, to be set by the
+   * person themselves from an invitation link. Preferable to typing one for
+   * them: the office never learns a password that can place credit orders.
+   */
+  byInvitation?: boolean;
   /** Required for a portal login, refused for any other role. */
   customerId?: string | null;
 }
@@ -135,7 +143,7 @@ export async function createUser(
   if (!email) throw new RuleViolation('a login needs an email address');
   if (!name) throw new RuleViolation('a login needs a name');
   assertRole(input.role);
-  assertPassword(input.password);
+  if (!input.byInvitation) assertPassword(input.password);
   await assertEmailFree(db, email);
 
   // A portal login that is not attached to a customer can sign in and then
@@ -148,7 +156,12 @@ export async function createUser(
     throw new RuleViolation('only a customer login can be attached to a customer');
   }
 
-  const hash = await hashPassword(input.password);
+  // An invited account gets a hash that cannot match any password, so it
+  // exists but nobody - the office included - can sign into it until the
+  // invitation is accepted.
+  const hash = input.byInvitation
+    ? UNUSABLE_PASSWORD
+    : await hashPassword(input.password);
 
   return db.tx(async (t) => {
     if (input.customerId) {

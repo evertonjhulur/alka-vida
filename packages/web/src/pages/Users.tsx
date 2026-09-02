@@ -30,6 +30,8 @@ const STAFF_ROLES: Role[] = ['admin', 'user', 'driver'];
 
 const BLANK_NEW = {
   name: '', email: '', role: 'user' as Role, password: '', customerId: '',
+  // Preferred: the office never learns a password that can place orders.
+  byInvitation: true,
 };
 
 export default function Users({ session }: { session: Session }) {
@@ -47,6 +49,11 @@ export default function Users({ session }: { session: Session }) {
 
   const [pwFor, setPwFor] = useState<string | null>(null);
   const [pw, setPw] = useState('');
+
+  /** The link from the most recent invitation, to pass on by hand. */
+  const [invite, setInvite] = useState<
+    { name: string; link: string; sent: boolean; reason?: string } | null
+  >(null);
 
   async function load() {
     setUsers(await api.get<User[]>('/api/users'));
@@ -69,14 +76,44 @@ export default function Users({ session }: { session: Session }) {
   async function create(e: React.FormEvent) {
     e.preventDefault();
     await run(async () => {
-      await api.post('/api/users', {
-        name: nw.name, email: nw.email, role: nw.role, password: nw.password,
+      const made = await api.post<{ id: string }>('/api/users', {
+        name: nw.name, email: nw.email, role: nw.role,
+        password: nw.password, byInvitation: nw.byInvitation,
         customerId: nw.role === 'customer' ? nw.customerId : undefined,
       });
-      say(`${nw.name} can now sign in as ${ROLE_LABEL[nw.role].toLowerCase()}.`);
+      if (nw.byInvitation) {
+        const inv = await api.post<{ link: string; sent: boolean; reason?: string }>(
+          `/api/users/${made.id}/invite`, {},
+        );
+        setInvite({ name: nw.name, ...inv });
+        say(inv.sent
+          ? `${nw.name} has been emailed a link to choose their password.`
+          : `${nw.name} is set up. Send them the link below to choose a password.`);
+      } else {
+        say(`${nw.name} can now sign in as ${ROLE_LABEL[nw.role].toLowerCase()}.`);
+      }
       setNw({ ...BLANK_NEW });
       setShowNew(false);
     }, 'Could not add the login');
+  }
+
+  /**
+   * Send (or re-send) an invitation to an existing login.
+   *
+   * Better than resetting a password for somebody: the office never learns
+   * what they choose, and any earlier link stops working the moment this one
+   * is issued.
+   */
+  async function sendInvite(u: User) {
+    await run(async () => {
+      const inv = await api.post<{ link: string; sent: boolean; reason?: string }>(
+        `/api/users/${u.id}/invite`, {},
+      );
+      setInvite({ name: u.name, ...inv });
+      say(inv.sent
+        ? `A link has been emailed to ${u.email}.`
+        : `Send ${u.name} the link below. Any earlier link has stopped working.`);
+    }, 'Could not send an invitation');
   }
 
   async function saveEdit(u: User) {
@@ -145,6 +182,10 @@ export default function Users({ session }: { session: Session }) {
                     if (next) setEd({ name: u.name, email: u.email, role: u.role });
                   }}>
             {editFor === u.id ? 'Cancel' : 'Edit'}
+          </button>{' '}
+          <button className="secondary" disabled={busy || !u.active}
+                  onClick={() => sendInvite(u)}>
+            Send invitation
           </button>{' '}
           <button className="secondary" disabled={busy}
                   onClick={() => {
@@ -249,6 +290,25 @@ export default function Users({ session }: { session: Session }) {
       {error && <div className="notice error">{error}</div>}
       {msg && <div className="notice ok">{msg}</div>}
 
+      {invite && (
+        <div className="notice info">
+          <strong>Link for {invite.name} to choose their password</strong>
+          <p className="small" style={{ margin: '6px 0' }}>
+            {invite.sent
+              ? 'This has been emailed to them. Here it is as well, in case.'
+              : `Email is not set up on this machine${invite.reason ? '' : ''}, so pass this `
+                + 'on yourself — read it out, or send it on WhatsApp.'}
+            {' '}It works once and expires in 7 days.
+          </p>
+          <input readOnly value={invite.link} style={{ width: '100%' }}
+                 onFocus={(e) => e.currentTarget.select()} />
+          <button className="secondary" style={{ marginTop: 8 }}
+                  onClick={() => setInvite(null)}>
+            Done
+          </button>
+        </div>
+      )}
+
       <div className="panel">
         <div className="row" style={{ justifyContent: 'space-between' }}>
           <h2 style={{ marginTop: 0 }}>Active</h2>
@@ -291,21 +351,39 @@ export default function Users({ session }: { session: Session }) {
                 </div>
               )}
               <div className="field">
-                <label htmlFor="up">Password</label>
-                <input id="up" type="text" required value={nw.password}
-                       placeholder="at least 8 characters"
-                       onChange={(e) => setNw({ ...nw, password: e.target.value })} />
+                <label htmlFor="uh">How do they get in?</label>
+                <select id="uh" value={nw.byInvitation ? 'invite' : 'password'}
+                        onChange={(e) => setNw({
+                          ...nw, byInvitation: e.target.value === 'invite', password: '',
+                        })}>
+                  <option value="invite">Send them a link (recommended)</option>
+                  <option value="password">I will set a password</option>
+                </select>
               </div>
+              {!nw.byInvitation && (
+                <div className="field">
+                  <label htmlFor="up">Password</label>
+                  <input id="up" type="text" required value={nw.password}
+                         placeholder="at least 8 characters"
+                         onChange={(e) => setNw({ ...nw, password: e.target.value })} />
+                </div>
+              )}
               <div className="field">
-                <button disabled={busy || nw.password.length < 8
+                <button disabled={busy
+                  || (!nw.byInvitation && nw.password.length < 8)
                   || (nw.role === 'customer' && !nw.customerId)}>
                   Create
                 </button>
               </div>
             </div>
             <p className="muted small" style={{ margin: 0 }}>
-              {ROLE_NOTE[nw.role]} You are typing the password, so tell them what it is
-              and have them change it themselves afterwards.
+              {ROLE_NOTE[nw.role]}{' '}
+              {nw.byInvitation
+                ? 'They choose their own password from a one-time link, so nobody here '
+                  + 'ever knows it. The link is shown to you as well, in case email is not '
+                  + 'set up on this machine.'
+                : 'You are typing the password, so you will know it — tell them what it is '
+                  + 'and have them change it under My password straight away.'}
             </p>
           </form>
         )}

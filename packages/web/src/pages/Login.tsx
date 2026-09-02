@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { Link } from 'react-router-dom';
 import { api, type Session } from '../lib/api';
 
 export default function Login({ onSignedIn }: { onSignedIn: (s: Session) => void }) {
@@ -39,6 +40,9 @@ export default function Login({ onSignedIn }: { onSignedIn: (s: Session) => void
                  onChange={(e) => setPassword(e.target.value)} />
         </div>
         <button disabled={busy}>{busy ? 'Signing in…' : 'Sign in'}</button>
+        <p className="small" style={{ marginTop: 12 }}>
+          New customer? <Link to="/register">Open an account</Link>
+        </p>
         <div className="login-hint">
           Seeded accounts:<br />
           admin@alkavida.jm / admin1234<br />

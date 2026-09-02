@@ -276,6 +276,49 @@ export async function createPortalOrder(
 }
 
 /**
+ * A customer cancelling their own order from the portal.
+ *
+ * Two things separate this from the office's cancelOrder: it proves the order
+ * belongs to the person asking, and it says so in the words a customer needs.
+ * The rule underneath is the same and is not relaxed - only a Pending order
+ * can be cancelled. Once the water has gone out it has been invoiced, and
+ * unwinding that is a credit note, which is the office's to raise.
+ */
+export async function cancelOwnOrder(
+  db: Db, actor: Actor, customerId: string, orderId: string, reason?: string,
+): Promise<void> {
+  const order = await db.maybeOne<{ customer_id: string; status: string; order_number: string }>(
+    `SELECT customer_id, status, order_number FROM customer_orders WHERE id = $1`, [orderId],
+  );
+  // Says the same thing for an order that is not theirs as for one that does
+  // not exist: a customer must not be able to discover other people's orders
+  // by trying ids.
+  if (!order || order.customer_id !== customerId) {
+    throw new RuleViolation('that order could not be found on your account');
+  }
+  if (order.status !== 'Pending') {
+    throw new RuleViolation(
+      order.status === 'Delivered'
+        ? `order ${order.order_number} has already been delivered, so it cannot be `
+          + 'cancelled. Please call us and we will put it right.'
+        : `order ${order.order_number} is ${order.status.toLowerCase()} and can no `
+          + 'longer be cancelled.',
+    );
+  }
+
+  await db.tx(async (t) => {
+    await t.query(`UPDATE customer_orders SET status = 'Cancelled' WHERE id = $1`, [orderId]);
+    await t.query(
+      `DELETE FROM delivery_stops WHERE order_id = $1 AND stop_outcome = 'Pending'`,
+      [orderId],
+    );
+    await audit(t, actor, 'update', 'CustomerOrder', orderId, order.order_number, {
+      status: 'Cancelled', cancelledByCustomer: true, reason: reason ?? null,
+    });
+  });
+}
+
+/**
  * Place an order as a stop on the delivery sheet matching the customer's zone
  * and the requested date, creating that sheet if it does not exist.
  *

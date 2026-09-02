@@ -422,3 +422,86 @@ export async function listSchedules(db: Db): Promise<Schedule[]> {
     lineSummary: (r.line_summary as string) ?? '',
   }));
 }
+
+/* ------------------------------------------------------------------ */
+/* The portal's view: a customer's own standing orders                 */
+/* ------------------------------------------------------------------ */
+
+/**
+ * A customer's own schedules.
+ *
+ * Nothing new underneath - the same rows the office sees, narrowed to one
+ * customer. Keeping it a filter rather than a second query is what stops the
+ * two views ever disagreeing about what a standing order is.
+ */
+export async function listSchedulesForCustomer(
+  db: Db, customerId: string,
+): Promise<Schedule[]> {
+  return (await listSchedules(db)).filter((s) => s.customerId === customerId);
+}
+
+/** Prove a schedule belongs to the customer asking before touching it. */
+async function assertOwnSchedule(
+  db: Db, customerId: string, scheduleId: string,
+): Promise<void> {
+  const row = await db.maybeOne<{ customer_id: string }>(
+    `SELECT customer_id FROM customer_orders
+     WHERE id = $1 AND is_recurring AND parent_recurring_id IS NULL`,
+    [scheduleId],
+  );
+  // The same answer for somebody else's schedule as for one that is not
+  // there: trying ids must not reveal that a schedule exists.
+  if (!row || row.customer_id !== customerId) {
+    throw new RuleViolation('that standing order could not be found on your account');
+  }
+}
+
+/**
+ * A customer turning one of their own orders into a standing order.
+ *
+ * The order must be theirs and must still be Pending: a standing order is an
+ * arrangement made when placing an order, not something applied afterwards to
+ * a delivery that has already happened.
+ */
+export async function startOwnSchedule(
+  db: Db, actor: Actor, customerId: string, orderId: string,
+  args: { pattern: RecurrencePattern; endsOn?: string | null },
+): Promise<{ nextDeliveryDate: string }> {
+  const order = await db.maybeOne<{ customer_id: string; status: string }>(
+    `SELECT customer_id, status FROM customer_orders WHERE id = $1`, [orderId],
+  );
+  if (!order || order.customer_id !== customerId) {
+    throw new RuleViolation('that order could not be found on your account');
+  }
+  if (order.status !== 'Pending') {
+    throw new RuleViolation(
+      'a repeat can only be set up on an order that has not gone out yet. '
+      + 'Place a new order and make that one repeat.',
+    );
+  }
+  return startSchedule(db, actor, orderId, args);
+}
+
+/** A customer pausing or resuming their own standing order. */
+export async function setOwnSchedulePaused(
+  db: Db, actor: Actor, customerId: string, scheduleId: string, paused: boolean,
+): Promise<void> {
+  await assertOwnSchedule(db, customerId, scheduleId);
+  await setSchedulePaused(db, actor, scheduleId, paused);
+}
+
+/**
+ * A customer stopping their own standing order for good.
+ *
+ * Everything already delivered stays exactly as it is, and the arrangement
+ * itself is kept on record rather than deleted - endSchedule only stops it
+ * producing work. Occurrences already raised but not yet delivered are
+ * ordinary pending orders, and the customer cancels those individually if
+ * they do not want them.
+ */
+export async function endOwnSchedule(
+  db: Db, actor: Actor, customerId: string, scheduleId: string, reason?: string,
+): Promise<void> {
+  await assertOwnSchedule(db, customerId, scheduleId);
+  await endSchedule(db, actor, scheduleId, reason ?? 'cancelled by the customer');
+}

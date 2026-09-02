@@ -15,7 +15,7 @@ import { createDb, type Db } from './db/index.ts';
 import { migrate } from './db/migrate.ts';
 import { loadSigningKey, login, userAccess, verifyToken, type Session } from './lib/auth.ts';
 import { loadSettings } from './lib/settings.ts';
-import { ForbiddenError, RuleViolation } from '@alka/shared';
+import { ForbiddenError, RuleViolation, type RecurrencePattern } from '@alka/shared';
 import { BUSINESS_TIMEZONE, type Actor } from './services/core.ts';
 
 import * as orders from './services/orders.ts';
@@ -37,6 +37,8 @@ import * as bottles from './services/bottles.ts';
 import * as pricing from './services/pricing.ts';
 import * as recurring from './services/recurring.ts';
 import * as users from './services/users.ts';
+import * as invitations from './services/invitations.ts';
+import * as registration from './services/registration.ts';
 import { collectOrder, counterSale } from './services/counter.ts';
 
 declare module 'fastify' {
@@ -128,6 +130,11 @@ export async function buildServer(db: Db) {
     // Answering this is how the browser learns the server is out of date;
     // requiring a token would hide the very problem it exists to report.
     if (req.url.startsWith('/api/version')) return;
+    // Asking for an account, and setting a password from an invitation, are
+    // both done by people who by definition have no way in yet. Each is
+    // written to give nothing away to somebody who is only probing.
+    if (req.url.startsWith('/api/register')) return;
+    if (req.url.startsWith('/api/invitations/')) return;
     const header = req.headers.authorization;
     const token = header?.startsWith('Bearer ') ? header.slice(7) : null;
     const session = token ? verifyToken(token) : null;
@@ -262,6 +269,105 @@ export async function buildServer(db: Db) {
     await users.changeOwnPassword(db, actorOf(req), body.currentPassword, body.newPassword);
     return { ok: true };
   });
+
+  /* ---------------- the portal's own actions ---------------- */
+
+  /** The customer this portal session belongs to, or a refusal. */
+  const portalCustomer = (req: { session?: Session }): string => {
+    const s = req.session!;
+    if (s.role !== 'customer' || !s.customerId) {
+      throw new ForbiddenError('this is only for a customer portal login');
+    }
+    return s.customerId;
+  };
+
+  app.post('/api/portal/orders/:id/cancel', { preHandler: allow('customer') },
+    async (req) => {
+      const body = (req.body ?? {}) as { reason?: string };
+      await orders.cancelOwnOrder(db, actorOf(req), portalCustomer(req),
+        (req.params as { id: string }).id, body.reason);
+      return { ok: true };
+    });
+
+  app.get('/api/portal/recurring', { preHandler: allow('customer') },
+    async (req) => recurring.listSchedulesForCustomer(db, portalCustomer(req)));
+
+  // Turn one of their own pending orders into a repeat.
+  app.post('/api/portal/orders/:id/repeat', { preHandler: allow('customer') },
+    async (req) => {
+      const body = req.body as { pattern: RecurrencePattern; endsOn?: string | null };
+      return recurring.startOwnSchedule(db, actorOf(req), portalCustomer(req),
+        (req.params as { id: string }).id,
+        { pattern: body.pattern, endsOn: body.endsOn ?? null });
+    });
+
+  app.post('/api/portal/recurring/:id/pause', { preHandler: allow('customer') },
+    async (req) => {
+      const body = req.body as { paused: boolean };
+      await recurring.setOwnSchedulePaused(db, actorOf(req), portalCustomer(req),
+        (req.params as { id: string }).id, body.paused === true);
+      return { ok: true };
+    });
+
+  app.post('/api/portal/recurring/:id/cancel', { preHandler: allow('customer') },
+    async (req) => {
+      const body = (req.body ?? {}) as { reason?: string };
+      await recurring.endOwnSchedule(db, actorOf(req), portalCustomer(req),
+        (req.params as { id: string }).id, body.reason);
+      return { ok: true };
+    });
+
+  /* ---------------- registration and invitations ---------------- */
+
+  // PUBLIC. A prospect asking for a trading account. It creates a request,
+  // never an account: the price tier, delivery zone and terms are the
+  // office's to set, and until they do there is nothing to sign in to.
+  app.post('/api/register', async (req) =>
+    registration.submitApplication(db, req.body as never));
+
+  // PUBLIC. Who an invitation is for, so the page can greet them. Returns
+  // null for anything that is not a live invitation - never why, because the
+  // difference between "expired", "used" and "invented" only helps somebody
+  // working through tokens.
+  app.get('/api/invitations/:token', async (req) => {
+    const { token } = req.params as { token: string };
+    return { invitee: await invitations.inviteeFor(db, token) };
+  });
+
+  // PUBLIC. Setting a password from an invitation - the one way into an
+  // account nobody has ever signed into.
+  app.post('/api/invitations/:token/accept', async (req) => {
+    const { token } = req.params as { token: string };
+    const body = req.body as { password: string };
+    return invitations.acceptInvitation(db, token, body?.password);
+  });
+
+  app.get('/api/applications', { preHandler: allow('admin', 'user') },
+    async (req) => registration.listApplications(db, actorOf(req),
+      (req.query as { status?: string }).status));
+
+  app.post('/api/applications/:id/approve', { preHandler: allow('admin') },
+    async (req) => registration.approveApplication(db, actorOf(req),
+      (req.params as { id: string }).id, req.body as never));
+
+  app.post('/api/applications/:id/decline', { preHandler: allow('admin') },
+    async (req) => {
+      const body = req.body as { reason?: string };
+      await registration.declineApplication(db, actorOf(req),
+        (req.params as { id: string }).id, body?.reason);
+      return { ok: true };
+    });
+
+  // Issue (or re-issue) an invitation for an existing login. The link comes
+  // back either way: with no mail account set up, the office reads it out or
+  // sends it on, which is how this will be used on day one.
+  app.post('/api/users/:id/invite', { preHandler: allow('admin') },
+    async (req) => {
+      const inv = await invitations.createInvitation(db, actorOf(req),
+        (req.params as { id: string }).id);
+      const mail = await invitations.emailInvitation(inv.email, inv.name, inv.link);
+      return { link: inv.link, expiresAt: inv.expiresAt, to: inv.email, ...mail };
+    });
 
   /* ---------------- user administration ---------------- */
 

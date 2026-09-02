@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { Fragment, useEffect, useMemo, useState } from 'react';
 import { api, type Session } from '../lib/api';
 import { money, date, statusTone } from '../lib/format';
 import { StatementView } from './Statement';
@@ -23,10 +23,18 @@ interface MyOrder {
 
 interface Line { productId: string; qty: string }
 
+/** One of the customer's own standing orders. */
+interface Schedule {
+  id: string; orderNumber: string; pattern: string;
+  nextDeliveryDate: string | null; paused: boolean;
+  occurrencesRaised: number; lineSummary: string;
+}
+
 const GCT_RATE = 0.15;
 const BLANK_LINE: Line = { productId: '', qty: '' };
+const PATTERNS = ['Weekly', 'Biweekly', 'Monthly'] as const;
 
-type Tab = 'order' | 'orders' | 'account';
+type Tab = 'order' | 'orders' | 'repeats' | 'account';
 
 export default function Portal({ session }: { session: Session }) {
   const [tab, setTab] = useState<Tab>('order');
@@ -35,6 +43,8 @@ export default function Portal({ session }: { session: Session }) {
   const [balance, setBalance] = useState<number | null>(null);
   const [prices, setPrices] = useState<Priced[]>([]);
   const [myOrders, setMyOrders] = useState<MyOrder[]>([]);
+  const [schedules, setSchedules] = useState<Schedule[]>([]);
+  const [repeatFor, setRepeatFor] = useState<string | null>(null);
 
   const [lines, setLines] = useState<Line[]>([{ ...BLANK_LINE }]);
   const [mode, setMode] = useState<'Delivery' | 'Pickup'>('Delivery');
@@ -51,9 +61,65 @@ export default function Portal({ session }: { session: Session }) {
     if (!customerId) return;
     setRows(await api.get<Row[]>('/api/invoices'));
     setMyOrders(await api.get<MyOrder[]>('/api/orders'));
+    setSchedules(await api.get<Schedule[]>('/api/portal/recurring'));
     const b = await api.get<{ balanceCents: number }>(`/api/customers/${customerId}/balance`);
     setBalance(b.balanceCents);
     setPrices(await api.get<Priced[]>(`/api/customers/${customerId}/prices`));
+  }
+
+  async function act(what: () => Promise<void>, fallback: string) {
+    setBusy(true); setError(null); setPlaced(null);
+    try {
+      await what();
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : fallback);
+    } finally { setBusy(false); }
+  }
+
+  /** Cancel an order that has not gone out yet. */
+  async function cancelOrder(o: MyOrder) {
+    if (!window.confirm(
+      `Cancel order ${o.order_number}?\n\nIt will not be delivered.`,
+    )) return;
+    await act(async () => {
+      await api.post(`/api/portal/orders/${o.id}/cancel`, {});
+      setPlaced(`Order ${o.order_number} has been cancelled.`);
+    }, 'Could not cancel the order');
+  }
+
+  /** Turn a pending order into a repeat. */
+  async function makeRepeat(o: MyOrder, pattern: string) {
+    await act(async () => {
+      await api.post(`/api/portal/orders/${o.id}/repeat`, { pattern });
+      setPlaced(
+        `${o.order_number} will now repeat ${pattern.toLowerCase()}. `
+        + 'We raise each one for you a week before it is due.',
+      );
+      setRepeatFor(null);
+      setTab('repeats');
+    }, 'Could not set up the repeat');
+  }
+
+  async function pauseRepeat(s: Schedule) {
+    await act(async () => {
+      await api.post(`/api/portal/recurring/${s.id}/pause`, { paused: !s.paused });
+      setPlaced(s.paused
+        ? 'Your repeat order has started again.'
+        : 'Your repeat order is paused. Nothing will be sent until you start it again.');
+    }, 'Could not change the repeat');
+  }
+
+  async function stopRepeat(s: Schedule) {
+    if (!window.confirm(
+      'Stop this repeat order for good?\n\n'
+      + 'Anything already delivered is unaffected. To pause it for a while instead, '
+      + 'use Pause.',
+    )) return;
+    await act(async () => {
+      await api.post(`/api/portal/recurring/${s.id}/cancel`, {});
+      setPlaced('Your repeat order has been stopped.');
+    }, 'Could not stop the repeat');
   }
 
   useEffect(() => { load().catch((e) => setError(e.message)); }, [customerId]);
@@ -203,6 +269,7 @@ export default function Portal({ session }: { session: Session }) {
       <div className="row" style={{ marginBottom: 16 }}>
         {tabButton('order', 'Place an order')}{' '}
         {tabButton('orders', `My orders${myOrders.length ? ` (${myOrders.length})` : ''}`)}{' '}
+        {tabButton('repeats', `Repeat orders${schedules.length ? ` (${schedules.length})` : ''}`)}{' '}
         {tabButton('account', 'Invoices & statement')}
       </div>
 
@@ -274,24 +341,67 @@ export default function Portal({ session }: { session: Session }) {
             <thead>
               <tr>
                 <th>Order</th><th>Placed</th><th>Wanted</th>
-                <th>How</th><th className="num">Total</th><th>Status</th>
+                <th>How</th><th className="num">Total</th><th>Status</th><th />
               </tr>
             </thead>
             <tbody>
               {myOrders.map((o) => (
-                <tr key={o.id}>
-                  <td>
-                    {o.order_number}
-                    {o.source === 'Portal' && <div className="muted small">placed by you</div>}
-                  </td>
-                  <td>{date(o.order_date)}</td>
-                  <td>{o.requested_delivery_date ? date(o.requested_delivery_date) : '—'}</td>
-                  <td className="small">
-                    {o.delivery_mode === 'Pickup' ? 'Collection' : 'Delivery'}
-                  </td>
-                  <td className="num">{money(Number(o.grand_total_cents))}</td>
-                  <td><span className={`chip ${statusTone(o.status)}`}>{o.status}</span></td>
-                </tr>
+                <Fragment key={o.id}>
+                  <tr>
+                    <td>
+                      {o.order_number}
+                      {o.source === 'Portal' && <div className="muted small">placed by you</div>}
+                    </td>
+                    <td>{date(o.order_date)}</td>
+                    <td>{o.requested_delivery_date ? date(o.requested_delivery_date) : '—'}</td>
+                    <td className="small">
+                      {o.delivery_mode === 'Pickup' ? 'Collection' : 'Delivery'}
+                    </td>
+                    <td className="num">{money(Number(o.grand_total_cents))}</td>
+                    <td><span className={`chip ${statusTone(o.status)}`}>{o.status}</span></td>
+                    <td className="num">
+                      {/* Only an order that has not gone out can be changed.
+                          Once it is delivered it has been invoiced. */}
+                      {o.status === 'Pending' ? (
+                        <>
+                          <button className="secondary" disabled={busy}
+                                  onClick={() => setRepeatFor(repeatFor === o.id ? null : o.id)}>
+                            {repeatFor === o.id ? 'Cancel' : 'Repeat this'}
+                          </button>{' '}
+                          <button className="secondary" disabled={busy}
+                                  onClick={() => cancelOrder(o)}>
+                            Cancel order
+                          </button>
+                        </>
+                      ) : (
+                        <span className="muted small">
+                          {o.status === 'Delivered' ? 'delivered' : ''}
+                        </span>
+                      )}
+                    </td>
+                  </tr>
+                  {repeatFor === o.id && (
+                    <tr>
+                      <td colSpan={7} style={{ background: '#f9fafb' }}>
+                        <strong>Get this order again, regularly</strong>
+                        <p className="muted small" style={{ marginTop: 4 }}>
+                          We will raise the same order for you each time, about a week
+                          before it is due, at whatever your prices are on the day. You
+                          can pause or stop it whenever you like.
+                        </p>
+                        {PATTERNS.map((p) => (
+                          <span key={p}>
+                            <button type="button" disabled={busy}
+                                    onClick={() => makeRepeat(o, p)}>
+                              {p === 'Weekly' ? 'Every week'
+                                : p === 'Biweekly' ? 'Every two weeks' : 'Every month'}
+                            </button>{' '}
+                          </span>
+                        ))}
+                      </td>
+                    </tr>
+                  )}
+                </Fragment>
               ))}
             </tbody>
           </table>
@@ -303,6 +413,66 @@ export default function Portal({ session }: { session: Session }) {
           <p className="muted small">
             The total shown is what we expect. The invoice is raised when the water is
             actually delivered, from the quantity delivered on the day.
+          </p>
+        </div>
+      )}
+
+      {tab === 'repeats' && (
+        <div className="panel">
+          <h2 style={{ marginTop: 0 }}>Repeat orders</h2>
+          <p className="muted small">
+            An order we send you regularly without you having to ask. Set one up from
+            <strong> My orders</strong> — place the order you want, then choose
+            “Repeat this”.
+          </p>
+          <table>
+            <thead>
+              <tr>
+                <th>What</th><th>How often</th><th>Next one</th>
+                <th className="num">Sent so far</th><th>Status</th><th />
+              </tr>
+            </thead>
+            <tbody>
+              {schedules.map((s) => (
+                <tr key={s.id}>
+                  <td>
+                    {s.lineSummary || s.orderNumber}
+                    <div className="muted small">from {s.orderNumber}</div>
+                  </td>
+                  <td>
+                    {s.pattern === 'Weekly' ? 'Every week'
+                      : s.pattern === 'Biweekly' ? 'Every two weeks' : 'Every month'}
+                  </td>
+                  <td>{s.nextDeliveryDate ? date(s.nextDeliveryDate) : '—'}</td>
+                  <td className="num">{s.occurrencesRaised}</td>
+                  <td>
+                    <span className={`chip ${s.paused ? 'warn' : 'ok'}`}>
+                      {s.paused ? 'Paused' : 'Running'}
+                    </span>
+                  </td>
+                  <td className="num">
+                    <button className="secondary" disabled={busy}
+                            onClick={() => pauseRepeat(s)}>
+                      {s.paused ? 'Start again' : 'Pause'}
+                    </button>{' '}
+                    <button className="secondary" disabled={busy}
+                            onClick={() => stopRepeat(s)}>
+                      Stop for good
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          {schedules.length === 0 && (
+            <p className="muted">
+              You have no repeat orders. Place an order, then choose “Repeat this”
+              against it in My orders.
+            </p>
+          )}
+          <p className="muted small">
+            Pausing keeps the arrangement but sends nothing until you start it again.
+            Missed weeks are not made up afterwards.
           </p>
         </div>
       )}
