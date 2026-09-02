@@ -214,6 +214,67 @@ export async function createOrder(
   });
 }
 
+/** The only things a customer ordering through the portal actually chooses. */
+export interface PortalOrderInput {
+  lines: Array<{ productId: string; cases?: number; looseBottles?: number }>;
+  deliveryMode?: 'Delivery' | 'Pickup';
+  requestedDeliveryDate?: string | null;
+  notes?: string | null;
+}
+
+/**
+ * An order placed by a customer through the portal.
+ *
+ * Deliberately NOT `createOrder` with the customer's id attached. Order entry
+ * accepts several things only the office may decide - a price for a line, a
+ * discount, a standing-order schedule, a back-dated order date - and a line
+ * price BEATS the customer's tier rate by design, because that is how the
+ * office overrides a rate for a single order (see resolveLines). Handing a
+ * request body from a browser straight to it would let a customer name their
+ * own price and hand themselves a hundred percent discount.
+ *
+ * So this is an allowlist rather than a filter: quantities, delivery or
+ * pickup, when they want it, and a note. Everything else is set here, not
+ * taken from the request. Extra fields are ignored rather than rejected - the
+ * caller is a browser we wrote, and a field it never sends should not be the
+ * reason a customer's order fails.
+ */
+export async function createPortalOrder(
+  db: Db, actor: Actor, customerId: string, input: PortalOrderInput,
+): Promise<CreateOrderResult> {
+  // Counter is a sale paid for at the counter, which is an office action.
+  // Anything that is not an explicit Pickup is an ordinary delivery.
+  const deliveryMode: DeliveryMode = input.deliveryMode === 'Pickup' ? 'Pickup' : 'Delivery';
+
+  const requested = input.requestedDeliveryDate?.trim() || null;
+  if (requested && requested < businessToday()) {
+    throw new RuleViolation('a delivery cannot be requested for a date that has passed');
+  }
+
+  return createOrder(db, actor, {
+    customerId,
+    // Quantities ONLY. A price on a line outranks the customer's tier rate,
+    // so it must not survive the trip from a browser.
+    lines: (input.lines ?? []).map((l) => ({
+      productId: l.productId,
+      cases: l.cases,
+      looseBottles: l.looseBottles,
+    })),
+    deliveryMode,
+    requestedDeliveryDate: requested,
+    notes: input.notes?.trim() || null,
+    source: 'Portal',
+    // Not the customer's to decide. A discount is the office's to give, a
+    // standing order is an arrangement rather than an order, how it will be
+    // paid is settled at delivery, and the order date is today.
+    discountPercent: 0,
+    paymentMethod: null,
+    isRecurring: false,
+    recurrencePattern: null,
+    parentRecurringId: null,
+  });
+}
+
 /**
  * Place an order as a stop on the delivery sheet matching the customer's zone
  * and the requested date, creating that sheet if it does not exist.

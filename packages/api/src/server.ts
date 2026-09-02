@@ -413,21 +413,27 @@ export async function buildServer(db: Db) {
 
   app.post('/api/orders', { preHandler: allow('admin', 'user', 'customer') },
     async (req) => {
-      const body = req.body as orders.CreateOrderInput;
       const s = req.session!;
-      // A portal order is always for the logged-in customer and marked Portal.
+      // A portal order goes through its own narrow entry point rather than
+      // the office one. Spreading the request body into createOrder let a
+      // customer set a line price - which outranks their tier rate - and a
+      // discount. createPortalOrder takes quantities and nothing else.
       if (s.role === 'customer') {
         if (!s.customerId) throw new ForbiddenError('this login is not linked to a customer');
-        return orders.createOrder(db, actorOf(req),
-          { ...body, customerId: s.customerId, source: 'Portal' });
+        return orders.createPortalOrder(db, actorOf(req), s.customerId,
+          req.body as orders.PortalOrderInput);
       }
-      return orders.createOrder(db, actorOf(req), body);
+      return orders.createOrder(db, actorOf(req), req.body as orders.CreateOrderInput);
     });
 
-  app.get('/api/orders', { preHandler: allow('admin', 'user') },
+  app.get('/api/orders', { preHandler: allow('admin', 'user', 'customer') },
     async (req) => {
       const q = req.query as { status?: string; customerId?: string };
-      return orders.listOrders(db, { status: q.status, customerId: q.customerId });
+      const s = req.session!;
+      // A customer sees their own orders and no one else's, whatever they ask
+      // for - the same rule the invoice list follows.
+      const customerId = s.role === 'customer' ? s.customerId ?? undefined : q.customerId;
+      return orders.listOrders(db, { status: q.status, customerId });
     });
 
   app.patch('/api/orders/:id', { preHandler: allow('admin', 'user') },
