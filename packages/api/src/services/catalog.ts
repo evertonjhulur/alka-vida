@@ -44,21 +44,47 @@ export async function createSupplier(
   });
 }
 
+/**
+ * Change a supplier's details.
+ *
+ * Only the fields actually supplied are written. This was built out of
+ * COALESCE, which meant a detail could be changed but never CLEARED - an
+ * email address that had stopped working, or the phone number of a rep who
+ * had left, could only ever be replaced, never emptied. Every field here bar
+ * the name is optional contact detail, so clearing one is an ordinary thing
+ * to want. Testing that the key is present, rather than that the value is
+ * non-null, separates "leave it alone" from "empty it".
+ */
 export async function updateSupplier(
   db: Db, actor: Actor, supplierId: string, input: Partial<SupplierInput>,
 ): Promise<void> {
   requireRole(actor, 'admin', 'user');
+
+  const sets: string[] = [];
+  const args: unknown[] = [supplierId];
+  const set = (col: string, value: unknown) => {
+    args.push(value);
+    sets.push(`${col} = $${args.length}`);
+  };
+
+  if ('name' in input) {
+    if (!input.name?.trim()) throw new RuleViolation('a supplier needs a name');
+    set('name', input.name.trim());
+  }
+  if ('contactPerson' in input) set('contact_person', input.contactPerson?.trim() || null);
+  if ('phone' in input) set('phone', input.phone?.trim() || null);
+  if ('email' in input) set('email', input.email?.trim() || null);
+  if ('address' in input) set('address', input.address?.trim() || null);
+  if ('notes' in input) set('notes', input.notes?.trim() || null);
+
+  if (sets.length === 0) return;
+
   await db.tx(async (t) => {
-    await t.query(
-      `UPDATE suppliers
-       SET name = COALESCE($2, name), contact_person = COALESCE($3, contact_person),
-           phone = COALESCE($4, phone), email = COALESCE($5, email),
-           address = COALESCE($6, address), notes = COALESCE($7, notes)
-       WHERE id = $1`,
-      [supplierId, input.name ?? null, input.contactPerson ?? null, input.phone ?? null,
-       input.email ?? null, input.address ?? null, input.notes ?? null],
+    const before = await t.one<{ name: string }>(
+      `SELECT name FROM suppliers WHERE id = $1`, [supplierId],
     );
-    await audit(t, actor, 'update', 'Supplier', supplierId, input.name ?? supplierId, input);
+    await t.query(`UPDATE suppliers SET ${sets.join(', ')} WHERE id = $1`, args);
+    await audit(t, actor, 'update', 'Supplier', supplierId, input.name ?? before.name, input);
   });
 }
 

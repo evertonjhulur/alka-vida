@@ -4,15 +4,17 @@ import { test, describe, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { setupFixture, type Fixture } from './helpers.ts';
 import {
-  createSupplier, setSupplierMaterial, listSuppliers,
+  createSupplier, updateSupplier, setSupplierMaterial, listSuppliers,
   createRawMaterial, listRawMaterials, setBom, getBom, materialBatches,
 } from '../src/services/catalog.ts';
 import {
   createPurchaseOrder, receivePurchaseOrder, completeProduction,
   productionFeasibility, listPurchaseOrders, getPurchaseOrder,
-  finishedGoods, listInventoryTransactions, lookupSupplierPrice,
+  finishedGoods, listInventoryTransactions, lookupSupplierPrice, issueMaterial,
 } from '../src/services/inventory.ts';
-import { recordCount, reconcileCount, listAudits } from '../src/services/audits.ts';
+import {
+  recordCount, reconcileCount, movementsSinceCount, listAudits,
+} from '../src/services/audits.ts';
 
 let f: Fixture;
 let supplierId: string;
@@ -87,6 +89,77 @@ describe('Supplier pricing', () => {
         { minQty: 50_000, unitCostCents: 780 },
       ],
     });
+  });
+});
+
+describe('Supplier details can be corrected', () => {
+  const detailsOf = async (id: string) => f.db.one<{
+    name: string; contact_person: string | null; phone: string | null;
+    email: string | null; address: string | null; notes: string | null;
+  }>(`SELECT name, contact_person, phone, email, address, notes
+      FROM suppliers WHERE id = $1`, [id]);
+
+  test('one detail changes without disturbing the rest', async () => {
+    const id = (await createSupplier(f.db, f.office, {
+      name: 'Blue Hills Plastics', contactPerson: 'R. Service',
+      phone: '876-555-0199', email: 'sales@bluehills.jm', address: 'Spanish Town',
+    })).id;
+
+    await updateSupplier(f.db, f.office, id, { phone: '876-555-0200' });
+
+    const after = await detailsOf(id);
+    assert.equal(after.phone, '876-555-0200');
+    assert.equal(after.name, 'Blue Hills Plastics', 'a field nobody touched must not move');
+    assert.equal(after.contact_person, 'R. Service');
+    assert.equal(after.email, 'sales@bluehills.jm');
+    assert.equal(after.address, 'Spanish Town');
+  });
+
+  /**
+   * The COALESCE version of this update could change a detail but never
+   * remove one, so an email that had stopped working or the number of a rep
+   * who had left could only be replaced, never emptied.
+   */
+  test('a detail can be CLEARED, not only replaced', async () => {
+    const id = (await createSupplier(f.db, f.office, {
+      name: 'Rep Left Ltd', contactPerson: 'D. Gone',
+      phone: '876-555-0111', email: 'd.gone@repleft.jm',
+    })).id;
+
+    await updateSupplier(f.db, f.office, id, { contactPerson: '', email: '' });
+
+    const after = await detailsOf(id);
+    assert.equal(after.contact_person, null, 'an emptied contact must actually clear');
+    assert.equal(after.email, null, 'and so must an emptied email');
+    assert.equal(after.phone, '876-555-0111', 'without disturbing what was left alone');
+  });
+
+  test('a supplier cannot be renamed to nothing', async () => {
+    const id = (await createSupplier(f.db, f.office, { name: 'Nameless Test Ltd' })).id;
+    await assert.rejects(
+      () => updateSupplier(f.db, f.office, id, { name: '   ' }),
+      /needs a name/,
+    );
+    assert.equal((await detailsOf(id)).name, 'Nameless Test Ltd');
+  });
+
+  test('editing details leaves what the supplier sells alone', async () => {
+    await updateSupplier(f.db, f.office, supplierId, {
+      notes: 'delivers Tuesdays, 30 day terms',
+    });
+
+    const s = (await listSuppliers(f.db)).find((x) => (x as { id: string }).id === supplierId) as
+      { name: string; notes: string; materials: unknown[] };
+    assert.equal(s.notes, 'delivers Tuesdays, 30 day terms');
+    assert.ok(s.materials.length > 0,
+      'a supplier price list is not contact detail and must survive an edit');
+  });
+
+  test('a driver cannot edit a supplier', async () => {
+    await assert.rejects(
+      () => updateSupplier(f.db, f.driver, supplierId, { phone: '876-000-0000' }),
+      /role|permitted/i,
+    );
   });
 });
 
@@ -327,6 +400,77 @@ describe('Stock counts (InventoryAudit)', () => {
     await reconcileCount(f.db, f.admin, count.id);
     const fg = await finishedGoods(f.db) as Array<Record<string, unknown>>;
     assert.equal(Number(fg.find((p) => p.product_id === productId)!.bottles_on_hand), 480);
+  });
+
+  /**
+   * Confirming writes the counted figure outright rather than applying a
+   * difference, so a count confirmed after stock has moved puts the moved
+   * stock back. These pin the refusal, and the deliberate way past it.
+   */
+  test('stock moving after a count blocks the confirm, naming what moved', async () => {
+    const count = await recordCount(f.db, f.office, {
+      itemType: 'RawMaterial', itemId: capId, countedQty: 900,
+    });
+
+    await issueMaterial(f.db, f.office, {
+      rawMaterialId: capId, quantity: 100, reason: 'went out after the count',
+    });
+
+    await assert.rejects(
+      () => reconcileCount(f.db, f.admin, count.id),
+      /moved since this count.*100 went out/s,
+      'a stale count must not silently overwrite a real movement',
+    );
+
+    const still = await f.db.one<{ status: string }>(
+      `SELECT status FROM inventory_audits WHERE id = $1`, [count.id],
+    );
+    assert.equal(still.status, 'Open', 'a refused confirm leaves the count open');
+  });
+
+  test('what moved since the count can be listed before deciding', async () => {
+    const count = await recordCount(f.db, f.office, {
+      itemType: 'RawMaterial', itemId: capId, countedQty: 800,
+    });
+    await issueMaterial(f.db, f.office, { rawMaterialId: capId, quantity: 40 });
+
+    const m = await movementsSinceCount(f.db, count.id);
+    assert.equal(m.movements.length, 1);
+    assert.equal(m.movements[0].direction, 'out');
+    assert.equal(m.movements[0].quantity, 40);
+    assert.equal(m.netChange, -40, 'the office sees the net effect before choosing');
+  });
+
+  test('the count can be applied over later movements, deliberately', async () => {
+    const count = await recordCount(f.db, f.office, {
+      itemType: 'RawMaterial', itemId: capId, countedQty: 700,
+    });
+    await issueMaterial(f.db, f.office, { rawMaterialId: capId, quantity: 50 });
+
+    const r = await reconcileCount(f.db, f.admin, count.id, 'counted after the issue',
+      { evenThoughStockMoved: true });
+
+    assert.equal(r.overrodeMovements, true);
+    const after = await f.db.one<{ q: number; notes: string }>(
+      `SELECT rm.quantity_on_hand q, ia.notes
+       FROM raw_materials rm, inventory_audits ia
+       WHERE rm.id = $1 AND ia.id = $2`, [capId, count.id],
+    );
+    assert.equal(Number(after.q), 700, 'the counted figure is what stock becomes');
+    assert.match(after.notes, /Confirmed over 1 movement/,
+      'the override is on the count itself, not only in the audit log');
+  });
+
+  test('a count with nothing moving after it confirms without complaint', async () => {
+    const count = await recordCount(f.db, f.office, {
+      itemType: 'RawMaterial', itemId: capId, countedQty: 650,
+    });
+    const r = await reconcileCount(f.db, f.admin, count.id);
+    assert.equal(r.overrodeMovements, false);
+    const after = await f.db.one<{ q: number }>(
+      `SELECT quantity_on_hand q FROM raw_materials WHERE id = $1`, [capId],
+    );
+    assert.equal(Number(after.q), 650);
   });
 
   test('only an admin may reconcile, and never twice', async () => {

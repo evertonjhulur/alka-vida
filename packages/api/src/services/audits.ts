@@ -69,32 +69,111 @@ export async function recordCount(
 }
 
 /**
+ * What has moved for this item since the count was taken.
+ *
+ * Confirming a count sets stock to the counted figure outright, so anything
+ * that moved in between is about to be overwritten. This is what lets the
+ * office see that before it happens rather than after.
+ */
+export async function movementsSinceCount(db: Db, auditId: string): Promise<{
+  countedAt: string;
+  movements: Array<{ at: string; direction: string; quantity: number; what: string }>;
+  netChange: number;
+}> {
+  const a = await db.one<{ item_type: string; item_id: string; counted_at: string }>(
+    `SELECT item_type, item_id, counted_at FROM inventory_audits WHERE id = $1`, [auditId],
+  );
+  const rows = await db.query<{
+    txn_date: string; direction: string; quantity: string; reference_type: string;
+    reference: string | null;
+  }>(
+    `SELECT txn_date, direction, quantity, reference_type, reference
+     FROM inventory_transactions
+     WHERE item_type = $1 AND item_id = $2 AND txn_date > $3
+     ORDER BY txn_date`,
+    [a.item_type, a.item_id, a.counted_at],
+  );
+
+  let netChange = 0;
+  const movements = rows.map((r) => {
+    const qty = num(r.quantity);
+    netChange += r.direction === 'out' ? -qty : qty;
+    return {
+      at: r.txn_date,
+      direction: r.direction,
+      quantity: qty,
+      what: r.reference ? `${r.reference_type} (${r.reference})` : r.reference_type,
+    };
+  });
+  return { countedAt: a.counted_at, movements, netChange };
+}
+
+/**
  * Apply a count to stock. Admin only - this writes off real value.
  *
  * A shortage draws FIFO from the oldest open batches, so the write-off is
  * valued at what the missing stock actually cost. An overage is added as a
  * new batch priced at the current blended average, which is an estimate and
  * is labelled as one on the transaction.
+ *
+ * REFUSED IF STOCK MOVED SINCE THE COUNT WAS TAKEN. Because the counted
+ * figure is written outright rather than added to, a count confirmed after a
+ * delivery has gone out would put the delivered stock back - the movement
+ * keeps its history, but the quantity ends as though it never happened. The
+ * fix for a stale count is to count again, so that is the default. Passing
+ * `evenThoughStockMoved` overrides it for the case where the counter really
+ * did see the floor after those movements; the override is recorded on the
+ * count and in the audit trail, because it means a deliberate overwrite.
  */
 export async function reconcileCount(
   db: Db,
   actor: Actor,
   auditId: string,
   notes?: string,
-): Promise<{ adjusted: number; valueCents: number }> {
+  opts: { evenThoughStockMoved?: boolean } = {},
+): Promise<{ adjusted: number; valueCents: number; overrodeMovements: boolean }> {
   requireRole(actor, 'admin');
 
   return db.tx(async (t) => {
     const a = await t.one<{
       id: string; item_type: 'RawMaterial' | 'FinishedGoods'; item_id: string;
       item_name: string; counted_qty: number; damaged_qty: number; status: string;
+      counted_at: string;
     }>(
-      `SELECT id, item_type, item_id, item_name, counted_qty, damaged_qty, status
+      `SELECT id, item_type, item_id, item_name, counted_qty, damaged_qty, status,
+              counted_at
        FROM inventory_audits WHERE id = $1 FOR UPDATE`, [auditId],
     );
     if (a.status === 'Reconciled') {
       throw new RuleViolation('this count has already been reconciled');
     }
+
+    const moved = await t.query<{ direction: string; quantity: string; reference_type: string }>(
+      `SELECT direction, quantity, reference_type
+       FROM inventory_transactions
+       WHERE item_type = $1 AND item_id = $2 AND txn_date > $3
+       ORDER BY txn_date`,
+      [a.item_type, a.item_id, a.counted_at],
+    );
+
+    if (moved.length > 0 && !opts.evenThoughStockMoved) {
+      const inQty = moved.filter((m) => m.direction !== 'out')
+        .reduce((s, m) => s + num(m.quantity), 0);
+      const outQty = moved.filter((m) => m.direction === 'out')
+        .reduce((s, m) => s + num(m.quantity), 0);
+      const kinds = [...new Set(moved.map((m) => m.reference_type))].join(', ');
+      const parts = [
+        outQty > 0 ? `${outQty} went out` : null,
+        inQty > 0 ? `${inQty} came in` : null,
+      ].filter(Boolean).join(' and ');
+
+      throw new RuleViolation(
+        `${a.item_name} has moved since this count was taken — ${parts} (${kinds}). ` +
+        'Confirming would set stock to the counted figure and overwrite those movements. ' +
+        'Count again, or confirm anyway if you counted after they happened.',
+      );
+    }
+    const overrodeMovements = moved.length > 0;
 
     // Re-read stock now rather than trusting the figure captured at count
     // time: deliveries and production may have moved it in between.
@@ -127,20 +206,31 @@ export async function reconcileCount(
       );
     }
 
+    // An override is written onto the count itself, not just the audit log:
+    // whoever reads this count later needs to see that it was applied over
+    // movements rather than to a settled figure.
+    const trail = [
+      notes ? `\n${notes}` : '',
+      overrodeMovements
+        ? `\nConfirmed over ${moved.length} movement(s) made after the count was taken.`
+        : '',
+    ].join('');
+
     await t.query(
       `UPDATE inventory_audits
        SET status = 'Reconciled', system_qty = $2, discrepancy = $3,
            notes = COALESCE(notes,'') || $4
        WHERE id = $1`,
-      [auditId, systemQty, delta, notes ? `\n${notes}` : ''],
+      [auditId, systemQty, delta, trail],
     );
 
     await writeAudit(t, actor, 'adjust', 'InventoryAudit', auditId, a.item_name, {
       itemType: a.item_type, systemQty, usableCounted: usable,
       adjustment: delta, valueCents, notes: notes ?? null,
+      overrodeMovements, movementsOverwritten: moved.length,
     });
 
-    return { adjusted: delta, valueCents };
+    return { adjusted: delta, valueCents, overrodeMovements };
   });
 }
 

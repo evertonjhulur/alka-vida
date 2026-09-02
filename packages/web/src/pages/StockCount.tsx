@@ -14,6 +14,19 @@ interface Audit {
   discrepancy: number; status: string; notes: string | null;
 }
 
+interface Movements {
+  countedAt: string;
+  netChange: number;
+  movements: Array<{ at: string; direction: string; quantity: number; what: string }>;
+}
+
+/** A confirm the server refused because the count had gone stale. */
+interface Blocked {
+  auditId: string;
+  message: string;
+  movements: Movements | null;
+}
+
 export default function StockCount({ session }: { session: Session }) {
   const [materials, setMaterials] = useState<Material[]>([]);
   const [goods, setGoods] = useState<FinishedGood[]>([]);
@@ -26,6 +39,7 @@ export default function StockCount({ session }: { session: Session }) {
   const [error, setError] = useState<string | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [blocked, setBlocked] = useState<Blocked | null>(null);
 
   async function load() {
     // A material withdrawn from use drops off the count UNLESS stock of it is
@@ -63,22 +77,43 @@ export default function StockCount({ session }: { session: Session }) {
     } finally { setBusy(false); }
   }
 
-  async function reconcile(id: string) {
+  /**
+   * Confirm a count.
+   *
+   * Refused by the server when stock moved after the count was taken, because
+   * confirming writes the counted figure outright and would undo those
+   * movements. That is not a dead end: the movements are shown, and the count
+   * can be applied over them deliberately if the floor really was counted
+   * after they happened.
+   */
+  async function reconcile(id: string, evenThoughStockMoved = false) {
     const why = window.prompt('Note for this adjustment (optional)') ?? undefined;
-    setBusy(true); setError(null);
+    setBusy(true); setError(null); setBlocked(null);
     try {
-      const r = await api.post<{ adjusted: number; valueCents: number }>(
-        `/api/audits/${id}/reconcile`, { notes: why },
-      );
+      const r = await api.post<{
+        adjusted: number; valueCents: number; overrodeMovements: boolean;
+      }>(`/api/audits/${id}/reconcile`, { notes: why, evenThoughStockMoved });
       setMsg(
-        r.adjusted === 0
+        (r.adjusted === 0
           ? 'Count matched the system. Nothing to adjust.'
           : `Stock adjusted by ${r.adjusted > 0 ? '+' : ''}${r.adjusted}, ` +
-            `valued at ${money(r.valueCents)}.`,
+            `valued at ${money(r.valueCents)}.`)
+        + (r.overrodeMovements ? ' Applied over later movements, as instructed.' : ''),
       );
       await load();
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Could not reconcile');
+      const message = err instanceof Error ? err.message : 'Could not reconcile';
+      // Only a stale count offers the override; every other refusal is final.
+      if (/moved since this count/.test(message)) {
+        try {
+          const m = await api.get<Movements>(`/api/audits/${id}/movements`);
+          setBlocked({ auditId: id, message, movements: m });
+        } catch {
+          setBlocked({ auditId: id, message, movements: null });
+        }
+      } else {
+        setError(message);
+      }
     } finally { setBusy(false); }
   }
 
@@ -92,6 +127,58 @@ export default function StockCount({ session }: { session: Session }) {
 
       {error && <div className="notice error">{error}</div>}
       {msg && <div className="notice ok">{msg}</div>}
+
+      {blocked && (
+        <div className="notice warn">
+          <strong>This count is out of date.</strong>
+          <p style={{ margin: '6px 0' }}>{blocked.message}</p>
+
+          {blocked.movements && blocked.movements.movements.length > 0 && (
+            <>
+              <div className="small muted">
+                Counted {date(blocked.movements.countedAt)}. Since then:
+              </div>
+              <table style={{ marginTop: 6, marginBottom: 8 }}>
+                <thead>
+                  <tr><th>When</th><th>Movement</th><th className="num">Quantity</th></tr>
+                </thead>
+                <tbody>
+                  {blocked.movements.movements.map((m, i) => (
+                    <tr key={i}>
+                      <td className="small">{date(m.at)}</td>
+                      <td className="small">{m.what}</td>
+                      <td className="num">
+                        {m.direction === 'out' ? '−' : '+'}{m.quantity}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              <p className="small muted" style={{ marginTop: 0 }}>
+                Net change since the count: {blocked.movements.netChange > 0 ? '+' : ''}
+                {blocked.movements.netChange}. Confirming anyway sets stock to what
+                was counted, as though these had not happened.
+              </p>
+            </>
+          )}
+
+          <button className="secondary" disabled={busy}
+                  onClick={() => { setBlocked(null); setMsg('Count again to get a fresh figure.'); }}>
+            Leave it — I will count again
+          </button>{' '}
+          <button disabled={busy}
+                  onClick={() => {
+                    if (!window.confirm(
+                      'Confirm this count over the later movements?\n\n'
+                      + 'Stock will be set to what was counted. Do this only if the '
+                      + 'floor was counted AFTER those movements happened.',
+                    )) return;
+                    reconcile(blocked.auditId, true);
+                  }}>
+            Confirm anyway
+          </button>
+        </div>
+      )}
 
       <div className="panel">
         <h2 style={{ marginTop: 0 }}>Record a count</h2>

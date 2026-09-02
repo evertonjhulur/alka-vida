@@ -846,10 +846,20 @@ export async function buildServer(db: Db) {
   app.post('/api/audits', { preHandler: allow('admin', 'user') },
     async (req) => audits.recordCount(db, actorOf(req), req.body as never));
 
-  // Reconciling writes off real value, so it is admin-only.
+  // What moved for this item since the count was taken - what confirming
+  // would overwrite.
+  app.get('/api/audits/:id/movements', { preHandler: allow('admin', 'user') },
+    async (req) => audits.movementsSinceCount(db, (req.params as { id: string }).id));
+
+  // Reconciling writes off real value, so it is admin-only. It is refused
+  // when stock moved after the count was taken, unless the caller says
+  // explicitly that it should be applied over those movements anyway.
   app.post('/api/audits/:id/reconcile', { preHandler: allow('admin') },
-    async (req) => audits.reconcileCount(db, actorOf(req),
-      (req.params as { id: string }).id, (req.body as { notes?: string })?.notes));
+    async (req) => {
+      const body = (req.body ?? {}) as { notes?: string; evenThoughStockMoved?: boolean };
+      return audits.reconcileCount(db, actorOf(req), (req.params as { id: string }).id,
+        body.notes, { evenThoughStockMoved: body.evenThoughStockMoved === true });
+    });
 
   /* ---------------- reports ---------------- */
 

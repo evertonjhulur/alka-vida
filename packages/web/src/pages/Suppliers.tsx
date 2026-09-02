@@ -29,6 +29,25 @@ interface PriceForm {
 
 const BLANK_PRICE: PriceForm = { rawMaterialId: '', cost: '', breaks: [{ minQty: '', cost: '' }] };
 
+/** A supplier's own details, as the add and edit forms hold them. */
+interface Details {
+  name: string; contactPerson: string; phone: string;
+  email: string; address: string; notes: string;
+}
+
+const BLANK_DETAILS: Details = {
+  name: '', contactPerson: '', phone: '', email: '', address: '', notes: '',
+};
+
+const detailsOf = (s: Supplier): Details => ({
+  name: s.name,
+  contactPerson: s.contact_person ?? '',
+  phone: s.phone ?? '',
+  email: s.email ?? '',
+  address: s.address ?? '',
+  notes: s.notes ?? '',
+});
+
 export default function Suppliers() {
   const [suppliers, setSuppliers] = useState<Supplier[]>([]);
   const [materials, setMaterials] = useState<Material[]>([]);
@@ -36,13 +55,15 @@ export default function Suppliers() {
   const [msg, setMsg] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [showNew, setShowNew] = useState(false);
-  const [form, setForm] = useState({
-    name: '', contactPerson: '', phone: '', email: '', address: '',
-  });
+  const [form, setForm] = useState({ ...BLANK_DETAILS });
 
   /** Which supplier's price form is open, and what is in it. */
   const [pricingFor, setPricingFor] = useState<string | null>(null);
   const [price, setPrice] = useState<PriceForm>({ ...BLANK_PRICE });
+
+  /** Which supplier's details are being corrected, and what is in the form. */
+  const [editFor, setEditFor] = useState<string | null>(null);
+  const [ed, setEd] = useState<Details>({ ...BLANK_DETAILS });
 
   async function load() {
     setSuppliers(await api.get<Supplier[]>('/api/suppliers'));
@@ -59,11 +80,37 @@ export default function Suppliers() {
     try {
       await api.post('/api/suppliers', form);
       setMsg(`Added ${form.name}.`);
-      setForm({ name: '', contactPerson: '', phone: '', email: '', address: '' });
+      setForm({ ...BLANK_DETAILS });
       setShowNew(false);
       await load();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not add the supplier');
+    } finally { setBusy(false); }
+  }
+
+  /**
+   * Save only what actually changed, so an empty box means "clear this" and
+   * an untouched one is not sent at all.
+   */
+  async function saveDetails(s: Supplier) {
+    const was = detailsOf(s);
+    const patch: Record<string, unknown> = {};
+    (Object.keys(was) as Array<keyof Details>).forEach((k) => {
+      if (ed[k] !== was[k]) patch[k] = ed[k];
+    });
+
+    if (Object.keys(patch).length === 0) {
+      setEditFor(null); setMsg('Nothing was changed.');
+      return;
+    }
+    setBusy(true); setError(null); setMsg(null);
+    try {
+      await api.patch(`/api/suppliers/${s.id}`, patch);
+      setMsg(`${ed.name} saved.`);
+      setEditFor(null);
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not save the supplier');
     } finally { setBusy(false); }
   }
 
@@ -117,6 +164,53 @@ export default function Suppliers() {
 
   const materialLabel = (m: Material) =>
     m.size_spec ? `${m.name} (${m.size_spec})` : m.name;
+
+  /**
+   * The six fields a supplier has, shared by the add form and the edit form
+   * so the two cannot drift apart.
+   *
+   * A plain function returning JSX, NOT a nested component, and the ids are
+   * prefixed per form so two of them can be open at once without colliding.
+   */
+  const detailFields = (idPrefix: string, v: Details, set: (d: Details) => void) => (
+    <>
+      <div className="row">
+        <div className="field">
+          <label htmlFor={`${idPrefix}-name`}>Name</label>
+          <input id={`${idPrefix}-name`} required value={v.name}
+                 onChange={(e) => set({ ...v, name: e.target.value })} />
+        </div>
+        <div className="field">
+          <label htmlFor={`${idPrefix}-contact`}>Contact person</label>
+          <input id={`${idPrefix}-contact`} value={v.contactPerson}
+                 onChange={(e) => set({ ...v, contactPerson: e.target.value })} />
+        </div>
+        <div className="field">
+          <label htmlFor={`${idPrefix}-phone`}>Phone</label>
+          <input id={`${idPrefix}-phone`} value={v.phone}
+                 onChange={(e) => set({ ...v, phone: e.target.value })} />
+        </div>
+        <div className="field">
+          <label htmlFor={`${idPrefix}-email`}>Email</label>
+          <input id={`${idPrefix}-email`} type="email" value={v.email}
+                 onChange={(e) => set({ ...v, email: e.target.value })} />
+        </div>
+      </div>
+      <div className="row">
+        <div className="field" style={{ flex: '1 1 320px' }}>
+          <label htmlFor={`${idPrefix}-address`}>Address</label>
+          <input id={`${idPrefix}-address`} style={{ width: '100%' }} value={v.address}
+                 onChange={(e) => set({ ...v, address: e.target.value })} />
+        </div>
+        <div className="field" style={{ flex: '1 1 320px' }}>
+          <label htmlFor={`${idPrefix}-notes`}>Notes</label>
+          <input id={`${idPrefix}-notes`} style={{ width: '100%' }} value={v.notes}
+                 placeholder="delivery days, minimum order, payment terms…"
+                 onChange={(e) => set({ ...v, notes: e.target.value })} />
+        </div>
+      </div>
+    </>
+  );
 
   /**
    * A plain function returning JSX, NOT a nested component: a component
@@ -234,32 +328,8 @@ export default function Suppliers() {
 
         {showNew && (
           <form onSubmit={create} style={{ marginBottom: 16 }}>
+            {detailFields('new', form, setForm)}
             <div className="row">
-              <div className="field">
-                <label htmlFor="sn">Name</label>
-                <input id="sn" required value={form.name}
-                       onChange={(e) => setForm({ ...form, name: e.target.value })} />
-              </div>
-              <div className="field">
-                <label htmlFor="sc">Contact person</label>
-                <input id="sc" value={form.contactPerson}
-                       onChange={(e) => setForm({ ...form, contactPerson: e.target.value })} />
-              </div>
-              <div className="field">
-                <label htmlFor="sp">Phone</label>
-                <input id="sp" value={form.phone}
-                       onChange={(e) => setForm({ ...form, phone: e.target.value })} />
-              </div>
-              <div className="field">
-                <label htmlFor="se">Email</label>
-                <input id="se" type="email" value={form.email}
-                       onChange={(e) => setForm({ ...form, email: e.target.value })} />
-              </div>
-              <div className="field">
-                <label htmlFor="sa">Address</label>
-                <input id="sa" value={form.address}
-                       onChange={(e) => setForm({ ...form, address: e.target.value })} />
-              </div>
               <div className="field"><button disabled={busy}>Save</button></div>
             </div>
           </form>
@@ -275,12 +345,43 @@ export default function Suppliers() {
                 {[s.contact_person, s.phone, s.email, s.address].filter(Boolean).join(' · ')
                   || 'No contact details'}
               </p>
+              {s.notes && <p className="muted small" style={{ margin: '2px 0 0' }}>{s.notes}</p>}
             </div>
-            <button className="secondary" disabled={busy}
-                    onClick={() => openPricing(s.id)}>
-              {pricingFor === s.id ? 'Close' : 'Add a material'}
-            </button>
+            <div>
+              <button className="secondary" disabled={busy}
+                      onClick={() => {
+                        const next = editFor === s.id ? null : s.id;
+                        setEditFor(next);
+                        if (next) setEd(detailsOf(s));
+                      }}>
+                {editFor === s.id ? 'Cancel' : 'Edit details'}
+              </button>{' '}
+              <button className="secondary" disabled={busy}
+                      onClick={() => openPricing(s.id)}>
+                {pricingFor === s.id ? 'Close' : 'Add a material'}
+              </button>
+            </div>
           </div>
+
+          {editFor === s.id && (
+            <div className="panel" style={{ background: '#f9fafb', marginTop: 12 }}>
+              <strong>Edit {s.name}</strong>
+              <p className="muted small" style={{ marginTop: 4 }}>
+                Emptying a box clears that detail. What this supplier sells, and
+                at what price, is the table below — changing it here is not
+                possible and never affects a purchase order already raised.
+              </p>
+              {detailFields(`e-${s.id}`, ed, setEd)}
+              <div className="row">
+                <div className="field">
+                  <button type="button" disabled={busy || !ed.name.trim()}
+                          onClick={() => saveDetails(s)}>
+                    Save changes
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
 
           <table style={{ marginTop: 12 }}>
             <thead>
