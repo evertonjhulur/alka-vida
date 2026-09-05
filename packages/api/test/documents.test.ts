@@ -8,10 +8,13 @@
 
 import { test, describe, before, after } from 'node:test';
 import assert from 'node:assert/strict';
+import { existsSync } from 'node:fs';
 import { setupFixture, type Fixture } from './helpers.ts';
 import { createOrder } from '../src/services/orders.ts';
 import { collectOrder } from '../src/services/counter.ts';
-import { renderInvoicePdf, emailInvoice, mailConfigured } from '../src/services/documents.ts';
+import {
+  renderInvoicePdf, renderStatementPdf, logoPath, emailInvoice, mailConfigured,
+} from '../src/services/documents.ts';
 
 let f: Fixture;
 let invoiceId: string;
@@ -51,6 +54,49 @@ describe('The invoice PDF', () => {
       () => renderInvoicePdf(f.db, '00000000-0000-0000-0000-000000000000'),
       /no longer exists/,
     );
+  });
+});
+
+describe('The statement PDF', () => {
+  test('is a real PDF, named after the customer', async () => {
+    const doc = await renderStatementPdf(f.db, f.customerId);
+    assert.equal(doc.pdf.subarray(0, 5).toString('latin1'), '%PDF-');
+    assert.match(doc.filename, /^Statement-Blue-Mountain-Offices/);
+    assert.ok(doc.pdf.length > 800, 'a page with content, not an empty shell');
+    assert.equal(doc.customerName, 'Blue Mountain Offices');
+  });
+
+  test('renders for an account with no activity at all', async () => {
+    const quiet = await f.db.one<{ id: string }>(
+      `INSERT INTO customers (name, phone, email)
+       VALUES ('Never Ordered','876-555-0001','quiet@example.jm') RETURNING id`,
+    );
+    const doc = await renderStatementPdf(f.db, quiet.id);
+    assert.equal(doc.pdf.subarray(0, 5).toString('latin1'), '%PDF-',
+      'an empty statement is a valid document, not a crash');
+  });
+
+  test('a date range narrows it without breaking the document', async () => {
+    const doc = await renderStatementPdf(f.db, f.customerId,
+      { from: '2020-01-01', to: '2020-01-31' });
+    assert.equal(doc.pdf.subarray(0, 5).toString('latin1'), '%PDF-');
+  });
+
+  /**
+   * The logo is the owner's own file, kept beside the launcher and out of the
+   * repository, so it is present on some machines and not others. The
+   * document has to build either way — which is the thing worth asserting.
+   * An earlier version of this test asserted `logoPath() === null` and went
+   * red the moment a real logo was installed.
+   */
+  test('builds whether or not a logo is installed on this machine', async () => {
+    const found = logoPath();
+    if (found !== null) {
+      assert.ok(existsSync(found), 'logoPath must only ever name a file that is there');
+    }
+    const doc = await renderStatementPdf(f.db, f.customerId);
+    assert.equal(doc.pdf.subarray(0, 5).toString('latin1'), '%PDF-');
+    assert.ok(doc.pdf.length > 800);
   });
 });
 

@@ -35,6 +35,7 @@ export function StatementView(
   const [filter, setFilter] = useState<(typeof FILTERS)[number]>('All');
   const [data, setData] = useState<StatementData | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
 
   useEffect(() => {
     if (showPicker) api.get<Customer[]>('/api/customers').then(setCustomers).catch(() => {});
@@ -49,6 +50,34 @@ export function StatementView(
       .then((d) => { setData(d); setError(null); })
       .catch((e) => setError(e.message));
   }, [selected, from, to, filter]);
+
+  /**
+   * The statement as a document, built on the server.
+   *
+   * Fetched rather than linked, because the PDF route needs the session token
+   * and a plain <a href> carries no Authorization header.
+   */
+  async function downloadPdf() {
+    if (!selected) return;
+    setBusy(true);
+    try {
+      const params = new URLSearchParams();
+      if (from) params.set('from', from);
+      if (to) params.set('to', to);
+      if (filter !== 'All') params.set('filter', filter);
+      const blob = await api.getBlob(
+        `/api/customers/${selected}/statement.pdf?${params.toString()}`,
+      );
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `statement-${(data?.customerName ?? 'account').replace(/\W+/g, '-')}.pdf`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Could not build the statement');
+    } finally { setBusy(false); }
+  }
 
   function exportCsv() {
     if (!data) return;
@@ -107,8 +136,16 @@ export function StatementView(
             </button>
           </div>
           <div className="field">
+            {/* The real document: letterhead, age analysis, the lot. Browser
+                print is kept beside it because it costs nothing and someone
+                always wants the screen exactly as it looks. */}
+            <button disabled={!data || busy} onClick={downloadPdf}>
+              {busy ? 'Building…' : 'Statement PDF'}
+            </button>
+          </div>
+          <div className="field">
             <button className="secondary" disabled={!data} onClick={() => window.print()}>
-              Print / save as PDF
+              Print this screen
             </button>
           </div>
         </div>

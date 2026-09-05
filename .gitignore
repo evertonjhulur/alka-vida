@@ -8,3 +8,11 @@ dist/
 
 # Local settings: holds the mail account password.
 Alka Vida settings.txt
+
+# The company logo, if the owner has supplied one. Deliberately NOT tracked:
+# it is the business's property, it changes without the software changing, and
+# a placeholder committed here would eventually go out on a real customer's
+# statement. Documents fall back to the wordmark in type when it is absent.
+Alka Vida logo.png
+Alka Vida logo.jpg
+logo.png

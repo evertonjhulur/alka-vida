@@ -74,8 +74,37 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
   return data as T;
 }
 
+/**
+ * A file from the API, rather than JSON.
+ *
+ * Needed because a plain `<a href>` to a PDF route carries no Authorization
+ * header: the server would refuse it and the browser would show its own error
+ * page instead of ours.
+ */
+async function requestBlob(path: string): Promise<Blob> {
+  const token = getToken();
+  const res = await fetch(path, {
+    headers: token ? { authorization: `Bearer ${token}` } : {},
+  });
+
+  if (res.status === 401) {
+    clearSession();
+    window.location.hash = '#/login';
+    throw new ApiError(401, 'Your session has expired. Please sign in again.');
+  }
+  if (!res.ok) {
+    // A failure comes back as JSON even from a route that normally sends a file.
+    const text = await res.text();
+    let message = `Request failed (${res.status})`;
+    try { message = JSON.parse(text)?.error ?? message; } catch { /* not JSON */ }
+    throw new ApiError(res.status, message);
+  }
+  return res.blob();
+}
+
 export const api = {
   get: <T>(path: string) => request<T>('GET', path),
+  getBlob: (path: string) => requestBlob(path),
   post: <T>(path: string, body?: unknown) => request<T>('POST', path, body),
   patch: <T>(path: string, body?: unknown) => request<T>('PATCH', path, body),
   put: <T>(path: string, body?: unknown) => request<T>('PUT', path, body),

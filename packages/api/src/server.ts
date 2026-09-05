@@ -501,6 +501,20 @@ export async function buildServer(db: Db) {
     return ledger.getStatement(db, id, { from: q.from, to: q.to, filter: q.filter });
   });
 
+  // The statement as a document. A customer may download their own, the same
+  // rule the JSON above follows.
+  app.get('/api/customers/:id/statement.pdf', async (req, reply) => {
+    const { id } = req.params as { id: string };
+    assertOwnCustomer(req, id);
+    const q = req.query as { from?: string; to?: string; filter?: ledger.StatementFilter };
+    const doc = await documents.renderStatementPdf(db, id,
+      { from: q.from, to: q.to, filter: q.filter });
+    return reply
+      .header('content-type', 'application/pdf')
+      .header('content-disposition', `attachment; filename="${doc.filename}"`)
+      .send(doc.pdf);
+  });
+
   /* ---------------- catalogue ---------------- */
 
   app.get('/api/products', async () =>

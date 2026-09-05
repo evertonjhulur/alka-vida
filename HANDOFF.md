@@ -17,7 +17,8 @@ Working and verified end to end, in the browser as well as in tests:
 | Order → delivery → invoice → settlement | Complete. All 8 Section 12 scenarios pass. |
 | Corrections (reversal, reassignment, invoice edit, credit notes) | Complete. |
 | Stop corrections raised by the office | Complete — routed to an admin for approval (migration 005). |
-| Customer ledger & statement | Complete. CSV export, and a real invoice PDF. |
+| Customer ledger & statement | Complete. CSV export, and a real PDF for both the invoice and the statement. The statement carries an age analysis the screen does not. |
+| Company logo on documents | Optional file beside the launcher (`Alka Vida logo.png`), deliberately NOT in git. Absent, documents fall back to the wordmark in type. |
 | Invoice PDF + emailing | Complete (`documents.ts`, pdfkit). Mail account set in the settings file. |
 | Approval queue (discounts / credit notes) | Complete. |
 | Customers | Create, edit, merge. |
@@ -248,11 +249,13 @@ materials, suppliers and PO pricing, production, stock counts, the bottle pool,
 products and pricing, and — as of this week — registration, approval,
 invitation, first sign-in, portal ordering, repeat orders and cancellation.
 
-**Never walked:** the money path end to end — order → delivery → invoice →
-payment → statement — and the correction paths behind it (reversal,
-reassignment, invoice edit, credit notes). This is the largest untested stretch
-in the system and the one where a mistake is expensive and quiet. It is the
-obvious next thing to test.
+**The money path has been walked** — order → delivery → invoice → payment —
+as of 2026-09-05.
+
+**Still to test: the statement.** It now has a real PDF document
+(`renderStatementPdf`) with a letterhead, the running ledger and an age
+analysis. The letterhead uses a logo file if one is present beside the
+launcher; with none it falls back to the wordmark in type.
 
 ---
 
