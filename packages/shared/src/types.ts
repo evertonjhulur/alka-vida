@@ -71,3 +71,47 @@ export class RuleViolation extends Error {
     this.name = 'RuleViolation';
   }
 }
+
+/**
+ * Jamaica's fourteen parishes. A fixed list because it IS fixed - the last
+ * change was in 1867 - and because a delivery address that groups by parish
+ * is only useful if everybody spells them the same way.
+ */
+export const PARISHES = [
+  'Kingston', 'St Andrew', 'St Thomas', 'Portland', 'St Mary', 'St Ann',
+  'Trelawny', 'St James', 'Hanover', 'Westmoreland', 'St Elizabeth',
+  'Manchester', 'Clarendon', 'St Catherine',
+] as const;
+export type Parish = (typeof PARISHES)[number];
+
+/**
+ * What the office may agree with a customer. Free text on the column, so an
+ * older value keeps working, but these are what the screen offers.
+ */
+export const PAYMENT_TERMS = ['Cash on delivery', 'Net 15', 'Net 30'] as const;
+export type PaymentTerms = (typeof PAYMENT_TERMS)[number];
+
+/** The parts of a delivery address, as the forms collect them. */
+export interface AddressParts {
+  addressLine1?: string | null;
+  addressLine2?: string | null;
+  city?: string | null;
+  parish?: string | null;
+}
+
+/**
+ * The whole address on one line.
+ *
+ * Everything downstream - the delivery stop the driver reads, the invoice PDF
+ * - takes a single string, and did so long before the parts existed. Composing
+ * it in one place is what stops the parts and the whole from disagreeing.
+ * Returns null when there is nothing to compose, so an address left blank
+ * stays blank rather than becoming a string of commas.
+ */
+export function composeAddress(a: AddressParts): string | null {
+  const line = [a.addressLine1, a.addressLine2, a.city, a.parish]
+    .map((p) => (p ?? '').trim())
+    .filter(Boolean)
+    .join(', ');
+  return line || null;
+}

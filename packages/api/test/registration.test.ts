@@ -18,6 +18,7 @@ import {
   createInvitation, inviteeFor, acceptInvitation, UNUSABLE_PASSWORD,
 } from '../src/services/invitations.ts';
 import { createUser } from '../src/services/users.ts';
+import { createZone, updateZone, deleteZone } from '../src/services/zones.ts';
 import { loadSigningKey, login } from '../src/lib/auth.ts';
 import { createPortalOrder, cancelOwnOrder } from '../src/services/orders.ts';
 import {
@@ -46,7 +47,9 @@ after(async () => { await db.close(); });
 const corporate = (email: string) => ({
   accountType: 'Corporate' as const,
   businessName: 'Runaway Bay Hotel', contactPerson: 'P. Grant',
-  email, phone: '876-555-0300', deliveryAddress: '5 Main Street, Runaway Bay',
+  email, phone: '876-555-0300',
+  addressLine1: '5 Main Street', addressLine2: 'Block B',
+  city: 'Runaway Bay', parish: 'St Ann',
 });
 
 describe('Asking for an account', () => {
@@ -137,6 +140,22 @@ describe('Approving an application', () => {
     assert.notEqual(out.invitation, null, 'approval carries them in');
   });
 
+  test('the address arrives in parts AND as the one line everything else reads', async () => {
+    const c = await db.one<{
+      address_line1: string; address_line2: string; city: string; parish: string;
+      delivery_address: string;
+    }>(
+      `SELECT address_line1, address_line2, city, parish, delivery_address
+       FROM customers WHERE lower(email) = 'hotel@runaway.jm'`,
+    );
+    assert.equal(c.address_line1, '5 Main Street');
+    assert.equal(c.address_line2, 'Block B');
+    assert.equal(c.city, 'Runaway Bay');
+    assert.equal(c.parish, 'St Ann');
+    assert.equal(c.delivery_address, '5 Main Street, Block B, Runaway Bay, St Ann',
+      'the delivery stop and the invoice PDF both read this one line');
+  });
+
   test('the login it creates cannot be signed into until the invitation is used',
     async () => {
       const u = await db.one<{ password_hash: string }>(
@@ -173,6 +192,65 @@ describe('Approving an application', () => {
   test('the office can see what is waiting', async () => {
     const pending = await listApplications(db, office, 'Pending');
     assert.equal(pending.every((a) => (a as { status: string }).status === 'Pending'), true);
+  });
+});
+
+describe('Delivery zones are a list, not a spelling', () => {
+  test('a zone that does not exist cannot be given to a customer', async () => {
+    const id = (await submitApplication(db, corporate('zonetest@runaway.jm'))).id;
+    await assert.rejects(
+      () => approveApplication(db, admin, id, { deliveryZone: 'Narnia' }),
+      /no delivery zone called/,
+      'a mistyped zone is worse than none - it creates a round nobody drives',
+    );
+    // and the application is untouched, so it can be approved properly after
+    const row = await db.one<{ status: string }>(
+      `SELECT status FROM customer_applications WHERE id = $1`, [id]);
+    assert.equal(row.status, 'Pending');
+  });
+
+  test('renaming a zone carries every customer and round with it', async () => {
+    const z = await createZone(db, admin, { name: 'Old Harbour', covers: 'St Catherine' });
+    const app = (await submitApplication(db, corporate('harbour@runaway.jm'))).id;
+    const out = await approveApplication(db, admin, app, { deliveryZone: 'Old Harbour' });
+
+    await updateZone(db, admin, z.id, { name: 'Old Harbour Bay' });
+
+    const c = await db.one<{ delivery_zone: string }>(
+      `SELECT delivery_zone FROM customers WHERE id = $1`, [out.customerId]);
+    assert.equal(c.delivery_zone, 'Old Harbour Bay',
+      'a customer left on the old spelling silently stops grouping onto a round');
+  });
+
+  test('a zone with customers on it is retired, not deleted', async () => {
+    const z = await db.one<{ id: string }>(
+      `SELECT id FROM delivery_zones WHERE name = 'Old Harbour Bay'`);
+    const r = await deleteZone(db, admin, z.id);
+    assert.equal(r.deleted, false);
+    assert.equal(r.retired, true);
+    assert.ok(r.customerCount > 0);
+
+    const waiting = (await submitApplication(db, corporate('retired@runaway.jm'))).id;
+    await assert.rejects(
+      () => approveApplication(db, admin, waiting, { deliveryZone: 'Old Harbour Bay' }),
+      /has been retired/,
+    );
+  });
+
+  test('an unused zone is deleted outright', async () => {
+    const z = await createZone(db, admin, { name: 'Nobody Lives Here' });
+    const r = await deleteZone(db, admin, z.id);
+    assert.equal(r.deleted, true);
+    assert.equal(
+      (await db.query(`SELECT id FROM delivery_zones WHERE id = $1`, [z.id])).length, 0);
+  });
+
+  test('two zones cannot share a name, whatever the capitals', async () => {
+    await assert.rejects(
+      () => createZone(db, admin, { name: 'kingston' }),
+      /already a zone called/,
+      '"Kingston" and "kingston" would be two half-empty trucks',
+    );
   });
 });
 
@@ -222,6 +300,34 @@ describe('Invitations', () => {
     await acceptInvitation(db, token, 'chosenbyme1');
     const signedIn = await login(db, 'invited@alkavida.jm', 'chosenbyme1');
     assert.ok(signedIn, 'they can now sign in with a password only they know');
+  });
+
+  /**
+   * Found in testing: a password set from an invitation was right, the login
+   * returned 200, and the customer still could not get in. Two separate
+   * causes, both of which show as "it would not let me log in".
+   */
+  test('the address is matched with surrounding space trimmed', async () => {
+    assert.ok(await login(db, ' invited@alkavida.jm ', 'chosenbyme1'),
+      'a phone keyboard and a browser autofill both add a trailing space, and '
+      + '"wrong email or password" for an address that is plainly right is the '
+      + 'least debuggable message in the system');
+    assert.ok(await login(db, '\tINVITED@alkavida.jm\n', 'chosenbyme1'),
+      'capitals were already forgiven; whitespace was not');
+  });
+
+  test('the password itself is NOT trimmed', async () => {
+    const u = (await createUser(db, admin, {
+      email: 'spacey@alkavida.jm', name: 'Spacey', role: 'user',
+      password: '', byInvitation: true,
+    })).id;
+    const inv = await createInvitation(db, admin, u);
+    await acceptInvitation(db, inv.token, ' pass word ');
+
+    assert.ok(await login(db, 'spacey@alkavida.jm', ' pass word '),
+      'a space is a legitimate character in a password');
+    assert.equal(await login(db, 'spacey@alkavida.jm', 'pass word'), null,
+      'so it must never be quietly stripped from one');
   });
 
   test('the link works ONCE', async () => {

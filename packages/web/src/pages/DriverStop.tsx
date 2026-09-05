@@ -15,6 +15,8 @@ interface OpenInvoice {
   invoiceId: string;
   invoiceNumber: string;
   balanceCents: number;
+  /** The invoice raised by this very delivery. Listed first by the server. */
+  isThisDelivery?: boolean;
 }
 
 interface Stop {
@@ -133,16 +135,35 @@ export default function DriverStop() {
     }
   }
 
-  const invoicesToAllocate: OpenInvoice[] = [
-    ...(stop.invoice_id
-      ? [{
-          invoiceId: stop.invoice_id,
-          invoiceNumber: "Today's delivery",
-          balanceCents: stop.amountOwedCents,
-        }]
-      : []),
-    ...stop.openInvoices,
-  ];
+  /*
+   * Straight from the server, today's delivery first.
+   *
+   * This screen used to bolt a "Today's delivery" row on the front itself,
+   * using the amount owed for the stop, while the server supplied the real
+   * invoice balances for every other row. Two sources for one list is how a
+   * part-paid invoice comes to show two different balances depending on which
+   * row you read.
+   */
+  const invoicesToAllocate: OpenInvoice[] = stop.openInvoices;
+
+  /** Fill an invoice up to its balance, or as far as the cash reaches. */
+  function applyUpTo(inv: OpenInvoice, on: boolean) {
+    setAlloc((current) => {
+      const next = { ...current };
+      if (!on) {
+        delete next[inv.invoiceId];
+        return next;
+      }
+      const spentElsewhere = Object.entries(next)
+        .filter(([id]) => id !== inv.invoiceId)
+        .reduce((s, [, v]) => s + toCents(v || '0'), 0);
+      const room = Math.max(collectedCents - spentElsewhere, 0);
+      const amount = Math.min(inv.balanceCents, room);
+      if (amount <= 0) return next;
+      next[inv.invoiceId] = (amount / 100).toFixed(2);
+      return next;
+    });
+  }
 
   return (
     <>
@@ -274,22 +295,43 @@ export default function DriverStop() {
 
           <table>
             <thead>
-              <tr><th>Invoice</th><th className="num">Balance</th><th className="num">Apply</th></tr>
+              <tr>
+                <th className="num">Pay off</th>
+                <th>Invoice</th>
+                <th className="num">Balance</th>
+                <th className="num">Apply</th>
+              </tr>
             </thead>
             <tbody>
-              {invoicesToAllocate.map((inv) => (
-                <tr key={inv.invoiceId}>
-                  <td>{inv.invoiceNumber}</td>
-                  <td className="num">{money(inv.balanceCents)}</td>
-                  <td className="num">
-                    <input type="number" step="0.01" min="0" style={{ width: 120 }}
-                           value={alloc[inv.invoiceId] ?? ''}
-                           onChange={(e) => setAlloc((a) => ({
-                             ...a, [inv.invoiceId]: e.target.value,
-                           }))} />
-                  </td>
-                </tr>
-              ))}
+              {invoicesToAllocate.map((inv) => {
+                const applied = toCents(alloc[inv.invoiceId] || '0');
+                return (
+                  <tr key={inv.invoiceId}>
+                    {/* Ticking fills this invoice up to its balance, or as far
+                        as the cash reaches. The box below stays editable for a
+                        part payment. */}
+                    <td className="num">
+                      <input type="checkbox" style={{ width: 22, height: 22 }}
+                             checked={applied > 0 && applied >= inv.balanceCents}
+                             onChange={(e) => applyUpTo(inv, e.target.checked)} />
+                    </td>
+                    <td>
+                      {inv.invoiceNumber}
+                      {inv.isThisDelivery && (
+                        <div className="muted small">today&rsquo;s delivery</div>
+                      )}
+                    </td>
+                    <td className="num">{money(inv.balanceCents)}</td>
+                    <td className="num">
+                      <input type="number" step="0.01" min="0" style={{ width: 120 }}
+                             value={alloc[inv.invoiceId] ?? ''}
+                             onChange={(e) => setAlloc((a) => ({
+                               ...a, [inv.invoiceId]: e.target.value,
+                             }))} />
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
 

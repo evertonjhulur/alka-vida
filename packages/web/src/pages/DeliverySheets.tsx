@@ -12,10 +12,21 @@ interface Sheet {
 export default function DeliverySheets() {
   const [sheets, setSheets] = useState<Sheet[]>([]);
   const [error, setError] = useState<string | null>(null);
+  /** Blank means every date. A day is picked from the calendar. */
+  const [day, setDay] = useState('');
 
   useEffect(() => {
     api.get<Sheet[]>('/api/delivery-sheets').then(setSheets).catch((e) => setError(e.message));
   }, []);
+
+  /*
+   * Rounds accumulate - one per zone per day, for as long as the business has
+   * been running - so listing every one of them buries today's under last
+   * month's. The date is how anybody actually looks for a round.
+   */
+  const dayOf = (s: Sheet) => String(s.delivery_date).slice(0, 10);
+  const daysWithSheets = [...new Set(sheets.map(dayOf))].sort().reverse();
+  const shown = day ? sheets.filter((s) => dayOf(s) === day) : sheets;
 
   return (
     <>
@@ -26,6 +37,38 @@ export default function DeliverySheets() {
       {error && <div className="notice error">{error}</div>}
 
       <div className="panel">
+        <div className="row" style={{ alignItems: 'flex-end' }}>
+          <div className="field">
+            <label htmlFor="day">Which day?</label>
+            <input id="day" type="date" value={day} list="sheet-days"
+                   onChange={(e) => setDay(e.target.value)} />
+            {/* The days that actually have a round, offered by the picker. */}
+            <datalist id="sheet-days">
+              {daysWithSheets.map((d) => <option key={d} value={d} />)}
+            </datalist>
+          </div>
+          <div className="field">
+            {/* en-CA gives YYYY-MM-DD in local time, which is what the input wants
+                and what business_today() means. */}
+            <button className="secondary"
+                    onClick={() => setDay(new Date().toLocaleDateString('en-CA'))}>
+              Today
+            </button>{' '}
+            <button className="secondary" onClick={() => setDay('')}>
+              Show every day
+            </button>
+          </div>
+          <div className="field">
+            <div className="muted small">
+              {day
+                ? `${shown.length} round(s) on this day`
+                : `${sheets.length} round(s) across ${daysWithSheets.length} day(s)`}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div className="panel">
         <table>
           <thead>
             <tr>
@@ -34,7 +77,7 @@ export default function DeliverySheets() {
             </tr>
           </thead>
           <tbody>
-            {sheets.map((s) => (
+            {shown.map((s) => (
               <tr key={s.id}>
                 <td>{date(s.delivery_date)}</td>
                 <td>{s.zone}</td>
@@ -67,7 +110,13 @@ export default function DeliverySheets() {
             ))}
           </tbody>
         </table>
-        {sheets.length === 0 && <p className="muted">No delivery sheets yet.</p>}
+        {shown.length === 0 && (
+          <p className="muted">
+            {day
+              ? 'No round on that day. Pick another date, or show every day.'
+              : 'No delivery sheets yet.'}
+          </p>
+        )}
       </div>
     </>
   );

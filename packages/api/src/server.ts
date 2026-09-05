@@ -39,6 +39,7 @@ import * as recurring from './services/recurring.ts';
 import * as users from './services/users.ts';
 import * as invitations from './services/invitations.ts';
 import * as registration from './services/registration.ts';
+import * as zones from './services/zones.ts';
 import { collectOrder, counterSale } from './services/counter.ts';
 
 declare module 'fastify' {
@@ -314,6 +315,46 @@ export async function buildServer(db: Db) {
       const body = (req.body ?? {}) as { reason?: string };
       await recurring.endOwnSchedule(db, actorOf(req), portalCustomer(req),
         (req.params as { id: string }).id, body.reason);
+      return { ok: true };
+    });
+
+  /**
+   * What is sitting waiting for somebody, for the badges in the sidebar.
+   *
+   * One small call rather than the screens each polling their own list: the
+   * navigation is on every page, and a request per module per page load is a
+   * cost paid constantly for something that is usually zero.
+   */
+  app.get('/api/pending-counts', { preHandler: allow('admin', 'user') },
+    async () => {
+      const apps = await db.one<{ n: string }>(
+        `SELECT COUNT(*)::text AS n FROM customer_applications WHERE status = 'Pending'`);
+      const approvals = await db.one<{ n: string }>(
+        `SELECT COUNT(*)::text AS n FROM approval_requests WHERE status = 'Pending'`);
+      return { applications: Number(apps.n), approvals: Number(approvals.n) };
+    });
+
+  /* ---------------- delivery zones ---------------- */
+
+  app.get('/api/zones', { preHandler: allow('admin', 'user') },
+    async () => zones.listZones(db));
+
+  app.post('/api/zones', { preHandler: allow('admin', 'user') },
+    async (req) => zones.createZone(db, actorOf(req), req.body as never));
+
+  app.patch('/api/zones/:id', { preHandler: allow('admin', 'user') },
+    async (req) => {
+      await zones.updateZone(db, actorOf(req), (req.params as { id: string }).id,
+        req.body as never);
+      return { ok: true };
+    });
+
+  app.delete('/api/zones/:id', { preHandler: allow('admin') },
+    async (req) => zones.deleteZone(db, actorOf(req), (req.params as { id: string }).id));
+
+  app.post('/api/zones/:id/restore', { preHandler: allow('admin') },
+    async (req) => {
+      await zones.restoreZone(db, actorOf(req), (req.params as { id: string }).id);
       return { ok: true };
     });
 

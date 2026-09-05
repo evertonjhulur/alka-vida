@@ -7,12 +7,18 @@ interface Application {
   business_name: string | null; contact_person: string | null;
   first_name: string | null; last_name: string | null;
   email: string; phone: string; delivery_address: string | null;
+  address_line1: string | null; address_line2: string | null;
+  city: string | null; parish: string | null;
   delivery_zone: string | null; notes: string | null;
   status: string; created_at: string; decline_reason: string | null;
   customer_name: string | null; decided_by_name: string | null;
 }
 
 interface Tier { id: string; name: string }
+interface Zone { id: string; name: string; covers: string | null; retired_at: string | null }
+
+/** What the office may agree. Free text underneath, so older values still read. */
+const PAYMENT_TERMS = ['Cash on delivery', 'Net 15', 'Net 30'];
 
 const nameOf = (a: Application) => (a.account_type === 'Corporate'
   ? a.business_name ?? ''
@@ -29,7 +35,7 @@ const nameOf = (a: Application) => (a.account_type === 'Corporate'
 export default function Applications({ session }: { session: Session }) {
   const [apps, setApps] = useState<Application[]>([]);
   const [tiers, setTiers] = useState<Tier[]>([]);
-  const [zones, setZones] = useState<string[]>([]);
+  const [zones, setZones] = useState<Zone[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
   const [link, setLink] = useState<string | null>(null);
@@ -42,14 +48,11 @@ export default function Applications({ session }: { session: Session }) {
 
   async function load() {
     setApps(await api.get<Application[]>('/api/applications'));
-    if (isAdmin) {
-      try { setTiers(await api.get<Tier[]>('/api/price-tiers')); } catch { /* office only */ }
-    }
-    // Existing zones, so a new customer joins a round that already exists
-    // rather than inventing a spelling of one.
+    try { setTiers(await api.get<Tier[]>('/api/price-tiers')); } catch { /* not fatal */ }
+    // The managed round list, so a customer joins a round that exists rather
+    // than inventing one by spelling.
     try {
-      const cs = await api.get<Array<{ delivery_zone: string | null }>>('/api/customers');
-      setZones([...new Set(cs.map((c) => c.delivery_zone).filter(Boolean) as string[])].sort());
+      setZones((await api.get<Zone[]>('/api/zones')).filter((z) => !z.retired_at));
     } catch { /* not fatal */ }
   }
   useEffect(() => { load().catch((e) => setError(e.message)); }, []);
@@ -107,7 +110,15 @@ export default function Applications({ session }: { session: Session }) {
           <div className="muted">{a.phone}</div>
         </td>
         <td className="small">
-          {a.delivery_address ?? <span className="muted">no address given</span>}
+          {a.address_line1 || a.delivery_address ? (
+            <>
+              <div>{a.address_line1 ?? a.delivery_address}</div>
+              {a.address_line2 && <div>{a.address_line2}</div>}
+              {(a.city || a.parish) && (
+                <div className="muted">{[a.city, a.parish].filter(Boolean).join(', ')}</div>
+              )}
+            </>
+          ) : <span className="muted">no address given</span>}
           {a.notes && <div className="muted">“{a.notes}”</div>}
         </td>
         <td className="small muted">{date(a.created_at)}</td>
@@ -155,18 +166,23 @@ export default function Applications({ session }: { session: Session }) {
               </div>
               <div className="field">
                 <label>Delivery zone</label>
-                <input list="zones" value={terms.deliveryZone}
-                       placeholder="which round?"
-                       onChange={(e) => setTerms({ ...terms, deliveryZone: e.target.value })} />
-                <datalist id="zones">
-                  {zones.map((z) => <option key={z} value={z} />)}
-                </datalist>
+                <select value={terms.deliveryZone}
+                        onChange={(e) => setTerms({ ...terms, deliveryZone: e.target.value })}>
+                  <option value="">No round yet</option>
+                  {zones.map((z) => (
+                    <option key={z.id} value={z.name}>
+                      {z.name}{z.covers ? ` — ${z.covers}` : ''}
+                    </option>
+                  ))}
+                </select>
               </div>
               <div className="field">
                 <label>Payment terms</label>
-                <input style={{ width: 140 }} value={terms.paymentTerms}
-                       placeholder="e.g. Net 30"
-                       onChange={(e) => setTerms({ ...terms, paymentTerms: e.target.value })} />
+                <select value={terms.paymentTerms}
+                        onChange={(e) => setTerms({ ...terms, paymentTerms: e.target.value })}>
+                  <option value="">Not agreed yet</option>
+                  {PAYMENT_TERMS.map((t) => <option key={t} value={t}>{t}</option>)}
+                </select>
               </div>
               <div className="field">
                 <button disabled={busy} onClick={() => approve(a)}>

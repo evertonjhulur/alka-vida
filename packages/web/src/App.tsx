@@ -1,8 +1,8 @@
 import { useEffect, useState } from 'react';
 import {
-  HashRouter, Routes, Route, NavLink, Navigate, useNavigate,
+  HashRouter, Routes, Route, NavLink, Navigate, useNavigate, useLocation,
 } from 'react-router-dom';
-import { getSession, clearSession, type Session, type Role } from './lib/api';
+import { api, getSession, clearSession, type Session, type Role } from './lib/api';
 
 import Login from './pages/Login';
 import Dashboard from './pages/Dashboard';
@@ -38,6 +38,7 @@ import MyAccount from './pages/MyAccount';
 import Register from './pages/Register';
 import SetPassword from './pages/SetPassword';
 import Applications from './pages/Applications';
+import Zones from './pages/Zones';
 
 interface NavItem {
   to: string;
@@ -45,7 +46,11 @@ interface NavItem {
   roles: Role[];
   /** Groups the sidebar into Sales and Operations. */
   section?: string;
+  /** Which pending count, if any, puts a badge on this item. */
+  badge?: 'applications' | 'approvals';
 }
+
+interface PendingCounts { applications: number; approvals: number }
 
 /** Navigation mirrors the Section 10 permission table exactly. */
 const NAV: NavItem[] = [
@@ -60,7 +65,7 @@ const NAV: NavItem[] = [
   { to: '/invoices', label: 'Invoices', roles: ['admin', 'user'], section: 'Sales' },
   { to: '/payments', label: 'Payments', roles: ['admin', 'user'], section: 'Sales' },
   { to: '/statement', label: 'Statements', roles: ['admin', 'user'], section: 'Sales' },
-  { to: '/approvals', label: 'Approvals', roles: ['admin', 'user'], section: 'Sales' },
+  { to: '/approvals', label: 'Approvals', roles: ['admin', 'user'], section: 'Sales', badge: 'approvals' },
 
   { to: '/materials', label: 'Raw materials', roles: ['admin', 'user'], section: 'Operations' },
   { to: '/suppliers', label: 'Suppliers', roles: ['admin', 'user'], section: 'Operations' },
@@ -73,11 +78,16 @@ const NAV: NavItem[] = [
   { to: '/reports', label: 'Reports', roles: ['admin', 'user'] },
 
   { to: '/route', label: 'My route', roles: ['driver'] },
-  { to: '/portal', label: 'My account', roles: ['customer'] },
+  // The portal, as separate modules rather than tabs inside one screen.
+  { to: '/portal/order', label: 'Place an order', roles: ['customer'] },
+  { to: '/portal/orders', label: 'My orders', roles: ['customer'] },
+  { to: '/portal/repeats', label: 'Standing orders', roles: ['customer'] },
+  { to: '/portal/account', label: 'Statements & invoices', roles: ['customer'] },
 
   // Administration. Logins are the administrator's alone; changing your own
   // password belongs to everybody, which is why it is not in that section.
-  { to: '/applications', label: 'Account requests', roles: ['admin', 'user'], section: 'Administration' },
+  { to: '/applications', label: 'Account requests', roles: ['admin', 'user'], section: 'Administration', badge: 'applications' },
+  { to: '/zones', label: 'Delivery zones', roles: ['admin', 'user'], section: 'Administration' },
   { to: '/users', label: 'Logins', roles: ['admin'], section: 'Administration' },
   { to: '/my-account', label: 'My password', roles: ['admin', 'user', 'driver'] },
 ];
@@ -85,6 +95,22 @@ const NAV: NavItem[] = [
 function Shell({ session }: { session: Session }) {
   const navigate = useNavigate();
   const items = NAV.filter((n) => n.roles.includes(session.role));
+  const { pathname } = useLocation();
+
+  /**
+   * What is waiting for somebody, shown as a count beside the module.
+   *
+   * Re-read on every navigation, so approving the last request clears the
+   * badge without a refresh. Only the office sees these; a driver or a
+   * customer has no module to badge.
+   */
+  const [pending, setPending] = useState<PendingCounts>({ applications: 0, approvals: 0 });
+  const office = session.role === 'admin' || session.role === 'user';
+
+  useEffect(() => {
+    if (!office) return;
+    api.get<PendingCounts>('/api/pending-counts').then(setPending).catch(() => {});
+  }, [office, pathname]);
 
   return (
     <div className="app">
@@ -102,7 +128,14 @@ function Shell({ session }: { session: Session }) {
               {n.section && n.section !== items[i - 1]?.section && (
                 <div className="nav-section">{n.section}</div>
               )}
-              <NavLink to={n.to} end={n.to === '/'}>{n.label}</NavLink>
+              <NavLink to={n.to} end={n.to === '/'}>
+                {n.label}
+                {n.badge && pending[n.badge] > 0 && (
+                  <span className="nav-badge" title={`${pending[n.badge]} waiting for you`}>
+                    {pending[n.badge]}
+                  </span>
+                )}
+              </NavLink>
             </div>
           ))}
         </nav>
@@ -145,9 +178,12 @@ function Shell({ session }: { session: Session }) {
           <Route path="/reports" element={<Reports />} />
           <Route path="/route" element={<DriverRoute session={session} />} />
           <Route path="/route/stop/:stopId" element={<DriverStop />} />
-          <Route path="/portal" element={<Portal session={session} />} />
+          {/* Four modules, one screen behind them. */}
+          <Route path="/portal" element={<Navigate to="/portal/order" replace />} />
+          <Route path="/portal/:tab" element={<Portal session={session} />} />
           <Route path="/users" element={<Users session={session} />} />
           <Route path="/applications" element={<Applications session={session} />} />
+          <Route path="/zones" element={<Zones session={session} />} />
           <Route path="/my-account" element={<MyAccount session={session} />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
@@ -176,37 +212,46 @@ function HomeFor({ session }: { session: Session }) {
  */
 const PUBLIC_ROUTES = ['/register', '/set-password'];
 
-const publicRouteInHash = () => {
-  const path = window.location.hash.replace(/^#/, '').split('?')[0];
-  return PUBLIC_ROUTES.includes(path);
-};
+/**
+ * Chooses between the signed-in app and the pages that belong to nobody.
+ *
+ * The current path comes from useLocation, NOT from reading window.location
+ * and listening for hashchange. React Router drives a HashRouter through the
+ * History API, and pushState does not fire hashchange - so a flag maintained
+ * that way sticks on whatever it was when the page first loaded. It did:
+ * after setting a password from an invitation, signing in succeeded, the
+ * session was stored, and the app carried on showing the login form until the
+ * page was reloaded by hand. Which is precisely the moment a new customer
+ * meets this screen for the first time.
+ */
+function Routed({
+  session, onSignedIn,
+}: { session: Session | null; onSignedIn: (s: Session) => void }) {
+  const { pathname } = useLocation();
+
+  if (session && !PUBLIC_ROUTES.includes(pathname)) return <Shell session={session} />;
+
+  return (
+    <Routes>
+      <Route path="/register" element={<Register />} />
+      <Route path="/set-password" element={<SetPassword />} />
+      <Route path="*" element={<Login onSignedIn={onSignedIn} />} />
+    </Routes>
+  );
+}
 
 export default function App() {
   const [session, setSession] = useState<Session | null>(getSession());
-  const [onPublicRoute, setOnPublicRoute] = useState(publicRouteInHash);
 
   useEffect(() => {
     const onStorage = () => setSession(getSession());
-    const onHash = () => setOnPublicRoute(publicRouteInHash());
     window.addEventListener('storage', onStorage);
-    window.addEventListener('hashchange', onHash);
-    return () => {
-      window.removeEventListener('storage', onStorage);
-      window.removeEventListener('hashchange', onHash);
-    };
+    return () => window.removeEventListener('storage', onStorage);
   }, []);
 
   return (
     <HashRouter>
-      {session && !onPublicRoute
-        ? <Shell session={session} />
-        : (
-          <Routes>
-            <Route path="/register" element={<Register />} />
-            <Route path="/set-password" element={<SetPassword />} />
-            <Route path="*" element={<Login onSignedIn={setSession} />} />
-          </Routes>
-        )}
+      <Routed session={session} onSignedIn={setSession} />
     </HashRouter>
   );
 }

@@ -4,11 +4,23 @@ import { api } from '../lib/api';
 
 type AccountType = 'Corporate' | 'Individual';
 
+/**
+ * The fourteen parishes. Fixed, and offered as a list so that a round can
+ * later be grouped by parish without three spellings of St Catherine.
+ */
+const PARISHES = [
+  'Kingston', 'St Andrew', 'St Thomas', 'Portland', 'St Mary', 'St Ann',
+  'Trelawny', 'St James', 'Hanover', 'Westmoreland', 'St Elizabeth',
+  'Manchester', 'Clarendon', 'St Catherine',
+];
+
 const BLANK = {
   accountType: 'Corporate' as AccountType,
   businessName: '', contactPerson: '',
   firstName: '', lastName: '',
-  email: '', phone: '', deliveryAddress: '', notes: '',
+  email: '', phone: '',
+  addressLine1: '', addressLine2: '', city: '', parish: '',
+  notes: '',
 };
 
 /**
@@ -78,10 +90,13 @@ export default function Register() {
             <div className="field">
               <label htmlFor="at">What kind of account?</label>
               <select id="at" value={f.accountType}
+                      /* Switching kind clears only the name fields, which are
+                         the ones that differ. Everything already typed stays. */
                       onChange={(e) => setF({
                         ...BLANK, accountType: e.target.value as AccountType,
                         email: f.email, phone: f.phone,
-                        deliveryAddress: f.deliveryAddress, notes: f.notes,
+                        addressLine1: f.addressLine1, addressLine2: f.addressLine2,
+                        city: f.city, parish: f.parish, notes: f.notes,
                       })}>
                 <option value="Corporate">A business</option>
                 <option value="Individual">Myself</option>
@@ -132,10 +147,32 @@ export default function Register() {
 
           <div className="row">
             <div className="field" style={{ flex: '1 1 100%' }}>
-              <label htmlFor="ad">Where would we deliver?</label>
-              <input id="ad" style={{ width: '100%' }} value={f.deliveryAddress}
-                     placeholder="street, town, parish"
-                     onChange={(e) => setF({ ...f, deliveryAddress: e.target.value })} />
+              <label htmlFor="a1">Where would we deliver?</label>
+              <input id="a1" style={{ width: '100%' }} value={f.addressLine1}
+                     placeholder="Address line 1 — street and number"
+                     onChange={(e) => setF({ ...f, addressLine1: e.target.value })} />
+            </div>
+          </div>
+          <div className="row">
+            <div className="field" style={{ flex: '1 1 100%' }}>
+              <input id="a2" style={{ width: '100%' }} value={f.addressLine2}
+                     placeholder="Address line 2 — building, unit, landmark (optional)"
+                     onChange={(e) => setF({ ...f, addressLine2: e.target.value })} />
+            </div>
+          </div>
+          <div className="row">
+            <div className="field" style={{ flex: '1 1 240px' }}>
+              <label htmlFor="ct">Town or city</label>
+              <input id="ct" style={{ width: '100%' }} value={f.city}
+                     onChange={(e) => setF({ ...f, city: e.target.value })} />
+            </div>
+            <div className="field" style={{ flex: '1 1 200px' }}>
+              <label htmlFor="pa">Parish</label>
+              <select id="pa" style={{ width: '100%' }} value={f.parish}
+                      onChange={(e) => setF({ ...f, parish: e.target.value })}>
+                <option value="">Choose…</option>
+                {PARISHES.map((p) => <option key={p} value={p}>{p}</option>)}
+              </select>
             </div>
           </div>
 

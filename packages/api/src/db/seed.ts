@@ -287,6 +287,23 @@ export async function seed(db: Db, opts: { quiet?: boolean } = {}): Promise<void
         [name, phone, email, alkaVida, tierId, address, zone, seq, day, terms, userId],
       )).id;
 
+    // The rounds themselves, before anybody is put on one. Migration 014
+    // backfills these from customers already on file, but a FRESH install
+    // seeds its customers AFTER that migration has run, and would otherwise
+    // leave them on rounds the zone list has never heard of.
+    const ZONES = [
+      ['Kingston', 'Kingston and St Andrew'],
+      ['Portmore', 'Portmore and St Catherine'],
+      ['North Coast', 'St Ann and St Mary'],
+    ] as const;
+    for (let i = 0; i < ZONES.length; i++) {
+      await t.query(
+        `INSERT INTO delivery_zones (name, covers, sort_order) VALUES ($1,$2,$3)
+         ON CONFLICT (name) DO NOTHING`,
+        [ZONES[i][0], ZONES[i][1], (i + 1) * 10],
+      );
+    }
+
     await customer('Blue Mountain Offices', '876-555-1234', 'ap@bluemountain.jm',
       corporate, '12 Hope Road, Kingston 6', 'Kingston', 10, 'Mon', 'Net 30', portalUserId);
     await customer('Portmore Pharmacy', '876-555-9999', 'acct@portmorerx.jm',

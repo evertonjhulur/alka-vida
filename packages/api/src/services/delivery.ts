@@ -337,12 +337,26 @@ export async function getStopForDriver(db: Db, stopId: string) {
      WHERE oli.order_id = $1`, [stop.order_id],
   );
 
+  /*
+   * EVERY open invoice, this delivery's included and listed first.
+   *
+   * It used to be filtered out, on the reasoning that the office would settle
+   * today's delivery separately. The effect was that a driver handed $5,000
+   * for $3,864 of water could only offer the cash to OLDER invoices - so the
+   * delivery the money was actually for went down unpaid, and whatever the
+   * driver did not allocate became a payment attached to no invoice at all.
+   * The customer at the door is paying for today first.
+   */
+  const openInvoices = otherOpenInvoices
+    .map((i) => ({ ...i, isThisDelivery: i.invoiceId === stop.invoice_id }))
+    .sort((a, b) => Number(b.isThisDelivery) - Number(a.isThisDelivery));
+
   return {
     ...stop,
     // Tax-inclusive, always.
     amountOwedCents,
     lines,
-    openInvoices: otherOpenInvoices.filter((i) => i.invoiceId !== stop.invoice_id),
+    openInvoices,
   };
 }
 

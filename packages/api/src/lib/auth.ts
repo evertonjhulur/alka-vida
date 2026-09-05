@@ -154,11 +154,21 @@ export async function login(
   email: string,
   password: string,
 ): Promise<{ token: string; session: Omit<Session, 'exp'> } | null> {
+  // Trimmed as well as lowercased. Capitals were already forgiven; surrounding
+  // whitespace was not, and that is what a phone keyboard, a browser autofill
+  // and a copy-paste out of an email all add without being asked. "Wrong email
+  // or password" for an address that is plainly right is the least debuggable
+  // message in the system.
+  //
+  // Trimmed HERE rather than in SQL: Postgres trim() takes off spaces only,
+  // and a pasted address arrives with a newline on it.
+  const address = (email ?? '').trim();
+
   const user = await db.maybeOne<{
     id: string; name: string; role: Role; password_hash: string; active: boolean;
   }>(
     `SELECT id, name, role, password_hash, active FROM users WHERE lower(email) = lower($1)`,
-    [email],
+    [address],
   );
   if (!user || !user.active) return null;
   if (!(await verifyPassword(password, user.password_hash))) return null;

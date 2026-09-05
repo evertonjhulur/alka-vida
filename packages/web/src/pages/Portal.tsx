@@ -1,4 +1,5 @@
 import { Fragment, useEffect, useMemo, useState } from 'react';
+import { useNavigate, useParams } from 'react-router-dom';
 import { api, type Session } from '../lib/api';
 import { money, date, statusTone } from '../lib/format';
 import { StatementView } from './Statement';
@@ -37,7 +38,17 @@ const PATTERNS = ['Weekly', 'Biweekly', 'Monthly'] as const;
 type Tab = 'order' | 'orders' | 'repeats' | 'account';
 
 export default function Portal({ session }: { session: Session }) {
-  const [tab, setTab] = useState<Tab>('order');
+  /*
+   * Which module this is comes from the address, not from state: each one is
+   * its own item in the sidebar, so it has to survive a reload and a
+   * bookmark, and the highlighted nav item has to agree with what is on
+   * screen.
+   */
+  const { tab: fromUrl } = useParams();
+  const navigate = useNavigate();
+  const tab: Tab = (['order', 'orders', 'repeats', 'account'] as const)
+    .includes(fromUrl as Tab) ? (fromUrl as Tab) : 'order';
+  const setTab = (t: Tab) => navigate(`/portal/${t}`);
 
   const [rows, setRows] = useState<Row[]>([]);
   const [balance, setBalance] = useState<number | null>(null);
@@ -209,12 +220,6 @@ export default function Portal({ session }: { session: Session }) {
    * declared inside another gets a new type on every render, so the inputs
    * unmount and lose focus on every keystroke.
    */
-  const tabButton = (id: Tab, label: string) => (
-    <button className={tab === id ? '' : 'secondary'} onClick={() => setTab(id)}>
-      {label}
-    </button>
-  );
-
   const orderLine = (l: Line, i: number) => {
     const p = productOf(l.productId);
     return (
@@ -264,13 +269,6 @@ export default function Portal({ session }: { session: Session }) {
       <div className="panel">
         <div className="muted small">Current balance</div>
         <div className="owed">{money(balance ?? 0)}</div>
-      </div>
-
-      <div className="row" style={{ marginBottom: 16 }}>
-        {tabButton('order', 'Place an order')}{' '}
-        {tabButton('orders', `My orders${myOrders.length ? ` (${myOrders.length})` : ''}`)}{' '}
-        {tabButton('repeats', `Repeat orders${schedules.length ? ` (${schedules.length})` : ''}`)}{' '}
-        {tabButton('account', 'Invoices & statement')}
       </div>
 
       {tab === 'order' && (

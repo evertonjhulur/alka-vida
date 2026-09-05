@@ -16,7 +16,8 @@ import type { Db } from '../db/index.ts';
 import type { Actor } from './core.ts';
 import { audit, requireRole } from './core.ts';
 import { createInvitation, UNUSABLE_PASSWORD } from './invitations.ts';
-import { RuleViolation } from '@alka/shared';
+import { assertZoneUsable } from './zones.ts';
+import { composeAddress, RuleViolation } from '@alka/shared';
 
 export type AccountType = 'Corporate' | 'Individual';
 
@@ -31,7 +32,10 @@ export interface ApplicationInput {
   /** Both. */
   email: string;
   phone: string;
-  deliveryAddress?: string | null;
+  addressLine1?: string | null;
+  addressLine2?: string | null;
+  city?: string | null;
+  parish?: string | null;
   notes?: string | null;
 }
 
@@ -99,14 +103,25 @@ export async function submitApplication(
     );
   }
 
+  const address = {
+    addressLine1: clean(input.addressLine1),
+    addressLine2: clean(input.addressLine2),
+    city: clean(input.city),
+    parish: clean(input.parish),
+  };
+
   const row = await db.one<{ id: string }>(
     `INSERT INTO customer_applications
        (account_type, business_name, contact_person, first_name, last_name,
-        email, phone, delivery_address, notes)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+        email, phone, address_line1, address_line2, city, parish,
+        delivery_address, notes)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
      RETURNING id`,
     [accountType, businessName, contactPerson, firstName, lastName,
-     email, phone, clean(input.deliveryAddress), clean(input.notes)],
+     email, phone, address.addressLine1, address.addressLine2, address.city, address.parish,
+     // The whole line as well as the parts, so nothing downstream has to know
+     // the parts exist.
+     composeAddress(address), clean(input.notes)],
   );
 
   // Deliberately NOT audited against a user: nobody is signed in, and
@@ -152,9 +167,11 @@ export async function approveApplication(
     status: string; account_type: string; business_name: string | null;
     contact_person: string | null; first_name: string | null; last_name: string | null;
     email: string; phone: string; delivery_address: string | null;
+    address_line1: string | null; address_line2: string | null;
+    city: string | null; parish: string | null;
   }>(
     `SELECT status, account_type, business_name, contact_person, first_name, last_name,
-            email, phone, delivery_address
+            email, phone, delivery_address, address_line1, address_line2, city, parish
      FROM customer_applications WHERE id = $1`,
     [applicationId],
   );
@@ -162,20 +179,27 @@ export async function approveApplication(
     throw new RuleViolation(`this application has already been ${app.status.toLowerCase()}`);
   }
 
+  // A zone is what puts their orders on a round, so a mistyped one is worse
+  // than none at all - it would create a round nobody drives.
+  const zone = clean(terms.deliveryZone);
+  if (zone) await assertZoneUsable(db, zone);
+
   const name = applicantName(app);
   const wantsLogin = terms.createLogin !== false;
 
   const created = await db.tx(async (t) => {
     const customer = await t.one<{ id: string }>(
       `INSERT INTO customers
-         (name, phone, email, delivery_address, contact_person, account_type,
+         (name, phone, email, delivery_address, address_line1, address_line2,
+          city, parish, contact_person, account_type,
           price_tier_id, delivery_zone, payment_terms)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
        RETURNING id`,
       [name, app.phone, app.email, app.delivery_address,
+       app.address_line1, app.address_line2, app.city, app.parish,
        app.account_type === 'Corporate' ? app.contact_person : null,
        app.account_type, terms.priceTierId ?? null,
-       clean(terms.deliveryZone), clean(terms.paymentTerms)],
+       zone, clean(terms.paymentTerms)],
     );
 
     let userId: string | null = null;
