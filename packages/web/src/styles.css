@@ -193,10 +193,201 @@ label { display: block; font-size: 13px; color: var(--muted); margin-bottom: 4px
   font-variant-numeric: tabular-nums;
 }
 
+/* ---------- the phone ---------- */
+
+/*
+ * The top bar exists only on a narrow screen. On a wide one the sidebar does
+ * the job and this stays hidden, so the desktop layout is untouched.
+ */
+.topbar { display: none; }
+
+/*
+ * Shown only when a table has become cards. Declared BEFORE the media query
+ * so the phone rule that reveals it wins on specificity ties - the other way
+ * round and it stays hidden everywhere, which it did.
+ */
+.phone-only { display: none; }
+
+/*
+ * For a table that must stay a table - a statement is a running ledger, and
+ * the balance column only means anything read down the page. It scrolls
+ * inside its own box so the page itself never slides sideways underneath the
+ * reader.
+ */
+.table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+
 @media (max-width: 760px) {
-  .app { flex-direction: column; }
-  .sidebar { width: 100%; flex: none; }
-  .main { padding: 16px; }
+  /*
+   * The sidebar is GONE on a phone rather than stacked above the content.
+   * Stacking it gave a driver's phone half a screen of navigation - brand,
+   * name, role, every link and a sign-out button - before the stop they had
+   * pulled over to record.
+   */
+  .app { display: block; }
+  .sidebar { display: none; }
+
+  .topbar {
+    display: block;
+    position: sticky;
+    top: 0;
+    z-index: 20;
+    background: #10242c;
+    color: #fff;
+  }
+
+  .topbar-main {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 10px 14px;
+  }
+  .topbar-brand { font-weight: 700; font-size: 17px; letter-spacing: .2px; }
+
+  .topbar-menu,
+  .topbar-signout {
+    /* 44px is the smallest thing a thumb hits reliably while standing up. */
+    min-height: 44px;
+    padding: 0 16px;
+    background: transparent;
+    border: 1px solid rgba(255, 255, 255, .35);
+    color: #fff;
+    border-radius: 8px;
+    font-size: 15px;
+  }
+
+  /* Few destinations: show them all, so reaching one is a single tap. */
+  .topbar-tabs {
+    display: flex;
+    gap: 4px;
+    overflow-x: auto;
+    padding: 0 10px 10px;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+  }
+  .topbar-tabs::-webkit-scrollbar { display: none; }
+  .topbar-tabs a {
+    flex: 0 0 auto;
+    min-height: 40px;
+    display: flex;
+    align-items: center;
+    padding: 0 14px;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, .08);
+    color: #dbe6ea;
+    text-decoration: none;
+    font-size: 14px;
+    white-space: nowrap;
+  }
+  .topbar-tabs a.active { background: var(--brand); color: #fff; font-weight: 600; }
+
+  /* Many destinations: behind a button, laid over the content. */
+  .topbar-drawer {
+    border-top: 1px solid rgba(255, 255, 255, .12);
+    max-height: 72vh;
+    overflow-y: auto;
+    padding-bottom: 8px;
+  }
+  .topbar-drawer a {
+    display: block;
+    min-height: 46px;
+    line-height: 46px;
+    padding: 0 18px;
+    color: #cdd9de;
+    text-decoration: none;
+  }
+  .topbar-drawer a.active { background: var(--brand); color: #fff; font-weight: 600; }
+  .topbar-drawer .signout { padding: 12px 18px 4px; }
+
+  .main { padding: 14px; }
+
+  /*
+   * Touch sizing. A driver is standing at a gate holding a crate; a mouse
+   * pointer is not the thing being designed for here.
+   */
+  button { min-height: 44px; padding: 10px 16px; }
+  input, select, textarea {
+    min-height: 44px;
+    /* 16px, or iOS zooms the page in when the field is focused and the driver
+       has to pinch back out to see the rest of the form. */
+    font-size: 16px;
+  }
+  input[type="checkbox"] { min-height: 0; width: 26px; height: 26px; }
+
+  h1 { font-size: 22px; }
+  .panel { padding: 14px; }
+  table { font-size: 14px; }
+  th, td { padding: 8px 6px; }
+
+  /*
+   * A table marked `phone-cards` stops being a table here and becomes one
+   * card per row.
+   *
+   * A six-column table is around 500px wide; a phone is 375. The columns that
+   * fell off the right were the status and the buttons - so a customer could
+   * see an order on their phone but not cancel it, and a driver could not see
+   * the outcome of a stop. Scrolling a table sideways with a thumb, on a
+   * screen already being scrolled down, is not a fix.
+   *
+   * Each cell prints its column heading from `data-label`, so the card says
+   * what each value is without the header row.
+   */
+  .phone-cards thead { display: none; }
+  .phone-cards table,
+  .phone-cards tbody,
+  .phone-cards tr,
+  .phone-cards td { display: block; width: 100%; }
+
+  .phone-cards tr {
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 12px 14px;
+    margin-bottom: 10px;
+    background: #fff;
+  }
+  .phone-cards tbody tr:last-child td { border-bottom: 0; }
+
+  .phone-cards td {
+    border: 0;
+    padding: 2px 0;
+    /* .num right-aligns on desktop, which reads as a stray value in a card. */
+    text-align: left;
+  }
+
+  .phone-cards td[data-label]::before {
+    content: attr(data-label);
+    display: inline-block;
+    min-width: 76px;
+    color: var(--muted);
+    font-size: 13px;
+  }
+
+  /* The identifying cell and the status share the top line of the card. */
+  .phone-cards td.lead {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    font-weight: 700;
+    font-size: 16px;
+    margin-bottom: 6px;
+  }
+  .phone-cards td.lead::before { display: none; }
+
+  /* The figure the eye should land on. */
+  .phone-cards td.money { font-size: 17px; font-weight: 600; }
+  .phone-cards td.money::before { font-weight: 400; }
+
+  .phone-cards td.actions { display: flex; gap: 8px; margin-top: 10px; }
+  .phone-cards td.actions:empty { display: none; }
+  .phone-cards td.actions button,
+  .phone-cards td.actions a { flex: 1; text-align: center; }
+
+  /* A row with nothing in it does not earn a line on a phone. */
+  .phone-cards td.empty { display: none; }
+
+  /* Shown only in card form, or only in the table. */
+  .phone-cards .phone-only { display: inline-block; }
+  .phone-cards td.on-desktop { display: none; }
 }
 
 /* Sidebar section headings (Sales / Operations) */

@@ -123,6 +123,15 @@ export function StatementView(
       {data && (
         <div className="panel">
           <h2 style={{ marginTop: 0 }}>{data.customerName}</h2>
+          {/*
+            * A statement stays a TABLE on a phone, unlike the order and
+            * invoice lists. It is a running ledger - the balance column only
+            * means anything read straight down the page - so breaking it into
+            * one card per line would destroy the thing it exists for. It
+            * scrolls sideways inside its own box instead, which keeps the
+            * rest of the page still.
+            */}
+          <div className="table-scroll">
           <table>
             <thead>
               <tr>
@@ -154,6 +163,7 @@ export function StatementView(
               ))}
             </tbody>
           </table>
+          </div>
           {data.entries.length === 0 && <p className="muted">No entries in this period.</p>}
           <div className="total-line grand">
             <span>Balance due</span><span>{money(data.closingBalanceCents)}</span>

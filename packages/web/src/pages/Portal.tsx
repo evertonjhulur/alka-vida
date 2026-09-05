@@ -333,7 +333,7 @@ export default function Portal({ session }: { session: Session }) {
       )}
 
       {tab === 'orders' && (
-        <div className="panel">
+        <div className="panel phone-cards">
           <h2 style={{ marginTop: 0 }}>My orders</h2>
           <table>
             <thead>
@@ -346,21 +346,42 @@ export default function Portal({ session }: { session: Session }) {
               {myOrders.map((o) => (
                 <Fragment key={o.id}>
                   <tr>
-                    <td>
-                      {o.order_number}
-                      {o.source === 'Portal' && <div className="muted small">placed by you</div>}
+                    {/* On a phone this row is a card: `lead` is its heading,
+                        and each other cell prints its own column name. */}
+                    <td className="lead">
+                      <span>
+                        {o.order_number}
+                        {o.source === 'Portal' && (
+                          <div className="muted small">placed by you</div>
+                        )}
+                      </span>
+                      {/* The status sits beside the number on a card; the
+                          table below keeps its own Status column. */}
+                      <span className={`chip ${statusTone(o.status)} phone-only`}>
+                        {o.status}
+                      </span>
                     </td>
-                    <td>{date(o.order_date)}</td>
-                    <td>{o.requested_delivery_date ? date(o.requested_delivery_date) : '—'}</td>
-                    <td className="small">
+                    <td data-label="Placed">{date(o.order_date)}</td>
+                    <td data-label="Wanted"
+                        className={o.requested_delivery_date ? undefined : 'empty'}>
+                      {o.requested_delivery_date ? date(o.requested_delivery_date) : '—'}
+                    </td>
+                    <td data-label="How" className="small">
                       {o.delivery_mode === 'Pickup' ? 'Collection' : 'Delivery'}
                     </td>
-                    <td className="num">{money(Number(o.grand_total_cents))}</td>
-                    <td><span className={`chip ${statusTone(o.status)}`}>{o.status}</span></td>
-                    <td className="num">
+                    <td data-label="Total" className="num money">
+                      {money(Number(o.grand_total_cents))}
+                    </td>
+                    <td className="on-desktop">
+                      <span className={`chip ${statusTone(o.status)}`}>{o.status}</span>
+                    </td>
+                    <td className="num actions">
                       {/* Only an order that has not gone out can be changed.
                           Once it is delivered it has been invoiced. */}
-                      {o.status === 'Pending' ? (
+                      {/* Nothing at all once it has gone out, so the cell is
+                          genuinely empty and the card drops the row. The
+                          status is already on the line above. */}
+                      {o.status === 'Pending' && (
                         <>
                           <button className="secondary" disabled={busy}
                                   onClick={() => setRepeatFor(repeatFor === o.id ? null : o.id)}>
@@ -371,10 +392,6 @@ export default function Portal({ session }: { session: Session }) {
                             Cancel order
                           </button>
                         </>
-                      ) : (
-                        <span className="muted small">
-                          {o.status === 'Delivered' ? 'delivered' : ''}
-                        </span>
                       )}
                     </td>
                   </tr>
@@ -416,7 +433,7 @@ export default function Portal({ session }: { session: Session }) {
       )}
 
       {tab === 'repeats' && (
-        <div className="panel">
+        <div className="panel phone-cards">
           <h2 style={{ marginTop: 0 }}>Repeat orders</h2>
           <p className="muted small">
             An order we send you regularly without you having to ask. Set one up from
@@ -433,22 +450,30 @@ export default function Portal({ session }: { session: Session }) {
             <tbody>
               {schedules.map((s) => (
                 <tr key={s.id}>
-                  <td>
-                    {s.lineSummary || s.orderNumber}
-                    <div className="muted small">from {s.orderNumber}</div>
+                  <td className="lead">
+                    <span>
+                      {s.lineSummary || s.orderNumber}
+                      <div className="muted small">from {s.orderNumber}</div>
+                    </span>
+                    <span className={`chip ${s.paused ? 'warn' : 'ok'} phone-only`}>
+                      {s.paused ? 'Paused' : 'Running'}
+                    </span>
                   </td>
-                  <td>
+                  <td data-label="How often">
                     {s.pattern === 'Weekly' ? 'Every week'
                       : s.pattern === 'Biweekly' ? 'Every two weeks' : 'Every month'}
                   </td>
-                  <td>{s.nextDeliveryDate ? date(s.nextDeliveryDate) : '—'}</td>
-                  <td className="num">{s.occurrencesRaised}</td>
-                  <td>
+                  <td data-label="Next one"
+                      className={s.nextDeliveryDate ? undefined : 'empty'}>
+                    {s.nextDeliveryDate ? date(s.nextDeliveryDate) : '—'}
+                  </td>
+                  <td data-label="Sent so far" className="num">{s.occurrencesRaised}</td>
+                  <td className="on-desktop">
                     <span className={`chip ${s.paused ? 'warn' : 'ok'}`}>
                       {s.paused ? 'Paused' : 'Running'}
                     </span>
                   </td>
-                  <td className="num">
+                  <td className="num actions">
                     <button className="secondary" disabled={busy}
                             onClick={() => pauseRepeat(s)}>
                       {s.paused ? 'Start again' : 'Pause'}
@@ -477,7 +502,7 @@ export default function Portal({ session }: { session: Session }) {
 
       {tab === 'account' && (
         <>
-          <div className="panel">
+          <div className="panel phone-cards">
             <h2 style={{ marginTop: 0 }}>Invoices</h2>
             <table>
               <thead>
@@ -489,11 +514,23 @@ export default function Portal({ session }: { session: Session }) {
               <tbody>
                 {rows.map((r) => (
                   <tr key={r.invoice_id}>
-                    <td>{r.invoice_number}</td>
-                    <td>{date(r.invoice_date)}</td>
-                    <td className="num">{money(Number(r.grand_total_cents))}</td>
-                    <td className="num">{money(Number(r.balance_cents))}</td>
-                    <td><span className={`chip ${statusTone(r.status)}`}>{r.status}</span></td>
+                    <td className="lead">
+                      <span>{r.invoice_number}</span>
+                      <span className={`chip ${statusTone(r.status)} phone-only`}>
+                        {r.status}
+                      </span>
+                    </td>
+                    <td data-label="Date">{date(r.invoice_date)}</td>
+                    <td data-label="Total" className="num">
+                      {money(Number(r.grand_total_cents))}
+                    </td>
+                    {/* What they still owe is the number that matters here. */}
+                    <td data-label="Balance" className="num money">
+                      {money(Number(r.balance_cents))}
+                    </td>
+                    <td className="on-desktop">
+                      <span className={`chip ${statusTone(r.status)}`}>{r.status}</span>
+                    </td>
                   </tr>
                 ))}
               </tbody>

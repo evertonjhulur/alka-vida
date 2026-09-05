@@ -4,7 +4,7 @@ State of the Alka Vida rebuild. Read `README.md` first for what the system
 does and the rules behind it; this file covers where things stand, what is
 left, and what will bite you.
 
-Last updated after standing orders landed, on branch `operations-fixes`.
+Last updated after the phone layout pass, on branch `operations-fixes`.
 
 ---
 
@@ -35,8 +35,14 @@ Working and verified end to end, in the browser as well as in tests:
 | Route composition & assignment | `routing.ts` — who owns a round, which orders, in what order. |
 | Payments screen | Record, reverse, reassign from one place. |
 | Auth & roles | 4 roles, enforced at route AND service layer. Per-install signing key. |
+| User administration | Logins screen (admin): add, edit, set role, reset password, withdraw access. My password for everyone. `active` checked on EVERY request, so withdrawing bites at once (migration 012). |
+| Invitations | An invited account has an unusable password until a one-time link sets one. Only the token HASH is stored. The link is always returned on screen, because mail is usually not configured (migration 013). |
+| Customer registration | Public request form, Corporate or Individual. Creates an APPLICATION, never an account. The office approves and sets tier, zone and terms (migration 013). |
+| Customer portal | Four modules: place an order, my orders, standing orders, statements & invoices. Ordering, repeat orders, and cancelling what has not gone out. |
+| Delivery zones | Managed list, not free text. Rename carries customers and open sheets across (migration 014). |
+| Addresses | Line 1, line 2, town, parish. Composed into `delivery_address`, which stays what the stop and the invoice PDF read (migration 014). |
 
-**Tests: 291 passing** — 64 pure domain (`packages/shared`), 227 API
+**Tests: 373 passing** — 68 pure domain (`packages/shared`), 305 API
 (`packages/api`, against real PostgreSQL via PGlite).
 
 ```bash
@@ -56,8 +62,8 @@ packages/
 
 **API services** (`packages/api/src/services/`): approvals, audits, bottles,
 catalog, core, counter, customers, delivery, documents, inventory, invoices,
-ledger, orders, payments, pricing, quotations, recurring, reports, routing,
-settlement.
+invitations, ledger, orders, payments, pricing, quotations, recurring,
+registration, reports, routing, settlement, users, zones.
 
 `packages/api/src/lib/`: `auth.ts`, `settings.ts`.
 
@@ -76,6 +82,10 @@ decision behind them:
 | 008 | `business_date(ts)` applied where 004 missed |
 | 009 | standing orders — pause/end, and the unique index that stops an occurrence being raised twice |
 | 010 | material categories and sizes become data the office manages; withdrawing a material from use |
+| 011 | `counted_at` on a stock count, so confirming can tell whether stock moved underneath it |
+| 012 | user administration — `last_login_at`; `active` now honoured per request |
+| 013 | invitations (token hash, one use, expiry) and customer applications |
+| 014 | addresses in parts; delivery zones as a managed list |
 
 ---
 
@@ -83,6 +93,17 @@ decision behind them:
 
 - **Quotations have full service + tests but no screen.** Low priority; the
   spec calls them optional and low-frequency.
+- **The app is only reachable on this machine.** No customer can use the
+  portal from off-site: `PORTAL_URL` defaults to `http://localhost:3001`, so
+  an invitation link sent to a phone points at that phone. Evert intends to
+  host it on a web server. On that day: set `PORTAL_URL` to the public
+  address and serve over HTTPS, because customers set passwords through that
+  link. The server already binds `0.0.0.0`.
+- **Automatic zone assignment.** Zones and structured addresses now exist to
+  support it (preset areas, or geo-tagging from the address); nothing assigns
+  automatically yet.
+- **The dashboard is nearly empty** — two panels. It is the screen the owner
+  opens every morning and it says almost nothing.
 - **Excel export is CSV.** It opens in Excel and carries the columns an
   accountant needs, but is not a real `.xlsx`. The invoice PDF *is* real now.
 - Route sequencing is the zone-template model by design — no geocoding.
@@ -123,6 +144,24 @@ rather than opening a second one.
 first. Two agents editing this tree at once will conflict — it has already
 happened here.
 
+**Do NOT restart the app while Evert is testing.** Two "bugs" he reported were
+in-flight requests dying on a restart done underneath him — a saved allocation
+that "failed to fetch", and a screen that would not load. Ask first, or wait.
+
+**React Router drives the HashRouter through the History API, so `hashchange`
+never fires.** Anything that needs the current path must read `useLocation()`.
+A flag maintained by a `hashchange` listener sticks on whatever it was at page
+load: it did, and signing in after setting a password left the login form on
+screen while the session sat happily in storage.
+
+**The phone layout is one breakpoint, `max-width: 760px`.** Below it the
+sidebar is replaced by `.topbar` — a strip of pills for a role with five or
+fewer destinations, a Menu drawer for the office. A table marked
+`phone-cards` becomes one card per row, each cell printing its column name
+from `data-label`. Desktop is untouched by all of it. A table that is a
+running ledger (the statement) stays a table inside `.table-scroll` instead,
+because the balance column only means anything read down the page.
+
 ---
 
 ## Invariants that must not be broken
@@ -155,6 +194,25 @@ Load-bearing. Each corresponds to a real bug and is pinned by a named test.
     only — never from the list it also uses to look a line's material up.
     Filtering the whole list is what made a withdrawn component read as
     costing zero and, on the next save, relabelled it `Water`.
+12. **A portal order goes through `createPortalOrder`, never `createOrder`.**
+    Order entry accepts a price per LINE, and that outranks the customer's
+    tier rate by design — it is how the office overrides a rate for one order.
+    The portal takes quantities, delivery-or-collection, a date and a note,
+    and sets everything else itself.
+13. **A customer cancels only what has not been delivered.** A delivered order
+    has an invoice against it; reversing that is a credit note the office
+    raises.
+14. **A user is never deleted, only deactivated**, because every write ends in
+    an `audit_log` row that references `users(id)`. And the system can never
+    be locked out of itself: deactivating yourself, changing your own role, and
+    removing the last active administrator are all refused.
+15. **A password is never trimmed; an email address always is.** A space is a
+    legitimate character in a password and stripping it locks people out. A
+    trailing space on an address is a keyboard artefact and refusing it is
+    indistinguishable, to the person, from the password being wrong.
+16. **A stock count is refused once stock has moved under it**, because
+    confirming writes the counted figure outright rather than applying a
+    difference. The override is deliberate and is recorded on the count.
 
 ---
 
@@ -174,7 +232,27 @@ with nothing set the app runs normally minus emailing.
 Data lives in `packages/api/.data` (PGlite, gitignored). Set `DATABASE_URL` to
 a real PostgreSQL server and the adapter switches with no code change.
 
-Seeded logins are in `README.md`.
+Seeded logins are in `README.md`. **The seeded passwords are printed on the
+sign-in page and have not been changed** — the first real job on any install
+is to create proper logins and withdraw the shared ones.
+
+---
+
+## Where testing has reached
+
+Evert walks the system in business order and reports what breaks; diagnose and
+discuss before building.
+
+**Walked and working:** customers, orders, delivery sheets, driver routes, raw
+materials, suppliers and PO pricing, production, stock counts, the bottle pool,
+products and pricing, and — as of this week — registration, approval,
+invitation, first sign-in, portal ordering, repeat orders and cancellation.
+
+**Never walked:** the money path end to end — order → delivery → invoice →
+payment → statement — and the correction paths behind it (reversal,
+reassignment, invoice edit, credit notes). This is the largest untested stretch
+in the system and the one where a mistake is expensive and quiet. It is the
+obvious next thing to test.
 
 ---
 
@@ -195,6 +273,18 @@ rather than only calling service functions:
 - Production couldn't finish a partial case.
 - "Pickup" silently ran the counter-sale path.
 - A React component declared inside another lost focus on every keystroke.
+- The portal route spread the request body into `createOrder`, and a line
+  price outranks the customer's tier rate by design — so a customer could have
+  named their own price and given themselves 100% off. `createPortalOrder` is
+  an allowlist now.
+- A trailing space in an email address was refused at sign-in. Capitals were
+  forgiven, whitespace was not, and a trailing space is what a phone keyboard,
+  an autofill and a copy-paste all add.
+- The driver's split list had two sources: the screen bolted a "Today's
+  delivery" row on the front while the server supplied the rest, so one
+  part-paid invoice could show two different balances.
+- A stock count confirmed after stock had moved silently put the moved stock
+  back. Counts now record when they were taken and refuse, with an override.
 
 The pattern that kept repeating: **the business logic was right and the
 delivery layer was wrong.** Test in the browser, not just through the services.

@@ -107,13 +107,86 @@ function Shell({ session }: { session: Session }) {
   const [pending, setPending] = useState<PendingCounts>({ applications: 0, approvals: 0 });
   const office = session.role === 'admin' || session.role === 'user';
 
+  /** The phone menu. Closes on navigation, so a tap never leaves it covering. */
+  const [menuOpen, setMenuOpen] = useState(false);
+  useEffect(() => { setMenuOpen(false); }, [pathname]);
+
   useEffect(() => {
     if (!office) return;
     api.get<PendingCounts>('/api/pending-counts').then(setPending).catch(() => {});
   }, [office, pathname]);
 
+  const signOut = () => { clearSession(); navigate('/login'); location.reload(); };
+
+  const badgeFor = (n: NavItem) => (n.badge && pending[n.badge] > 0
+    ? (
+      <span className="nav-badge" title={`${pending[n.badge]} waiting for you`}>
+        {pending[n.badge]}
+      </span>
+    )
+    : null);
+
+  /*
+   * A driver or a customer has a handful of destinations, so on a phone they
+   * get them all as a strip they can tap straight away. The office has
+   * twenty-odd, which only fits behind a menu button.
+   *
+   * The old layout stacked the whole sidebar above the content on a narrow
+   * screen: brand, name, role, every link and a Sign out button. On a
+   * driver's phone that was half the screen given to navigation they did not
+   * need, with the actual stop pushed below the fold.
+   */
+  const compactNav = items.length <= 5;
+
   return (
     <div className="app">
+      {/* Phone only. The desktop sidebar below is untouched. */}
+      <header className="topbar">
+        <div className="topbar-main">
+          <span className="topbar-brand">Alka Vida</span>
+          {!compactNav && (
+            <button className="topbar-menu" aria-expanded={menuOpen}
+                    onClick={() => setMenuOpen(!menuOpen)}>
+              {menuOpen ? 'Close' : 'Menu'}
+              {!menuOpen && (pending.applications + pending.approvals > 0) && (
+                <span className="nav-badge">{pending.applications + pending.approvals}</span>
+              )}
+            </button>
+          )}
+          {compactNav && (
+            <button className="topbar-signout" onClick={signOut}>Sign out</button>
+          )}
+        </div>
+
+        {compactNav && (
+          <nav className="topbar-tabs">
+            {items.map((n) => (
+              <NavLink key={n.to} to={n.to} end={n.to === '/'}>
+                {n.label}{badgeFor(n)}
+              </NavLink>
+            ))}
+          </nav>
+        )}
+
+        {!compactNav && menuOpen && (
+          <nav className="topbar-drawer" onClick={() => setMenuOpen(false)}>
+            {items.map((n, i) => (
+              <div key={n.to}>
+                {n.section && n.section !== items[i - 1]?.section && (
+                  <div className="nav-section">{n.section}</div>
+                )}
+                <NavLink to={n.to} end={n.to === '/'}>
+                  {n.label}{badgeFor(n)}
+                </NavLink>
+              </div>
+            ))}
+            <div className="signout">
+              <button className="secondary" onClick={signOut}>Sign out</button>
+            </div>
+          </nav>
+        )}
+      </header>
+
       <aside className="sidebar">
         <div className="brand">Alka Vida</div>
         <div className="who">
@@ -129,23 +202,13 @@ function Shell({ session }: { session: Session }) {
                 <div className="nav-section">{n.section}</div>
               )}
               <NavLink to={n.to} end={n.to === '/'}>
-                {n.label}
-                {n.badge && pending[n.badge] > 0 && (
-                  <span className="nav-badge" title={`${pending[n.badge]} waiting for you`}>
-                    {pending[n.badge]}
-                  </span>
-                )}
+                {n.label}{badgeFor(n)}
               </NavLink>
             </div>
           ))}
         </nav>
         <div className="signout">
-          <button
-            className="secondary"
-            onClick={() => { clearSession(); navigate('/login'); location.reload(); }}
-          >
-            Sign out
-          </button>
+          <button className="secondary" onClick={signOut}>Sign out</button>
         </div>
       </aside>
 
