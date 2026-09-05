@@ -1092,6 +1092,10 @@ export async function buildServer(db: Db) {
   app.get('/api/reports/material-costs', { preHandler: allow('admin', 'user') },
     async (req) => inventory.materialCostReport(db, (req.query as { id?: string }).id));
 
+  // The opening screen, in one call rather than six.
+  app.get('/api/dashboard', { preHandler: allow('admin', 'user') },
+    async () => reports.dashboard(db));
+
   app.get('/api/reports/receivables', { preHandler: allow('admin', 'user') },
     async () => reports.receivablesSummary(db));
 

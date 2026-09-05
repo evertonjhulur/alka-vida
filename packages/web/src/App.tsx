@@ -260,7 +260,7 @@ function Shell({ session }: { session: Session }) {
 function HomeFor({ session }: { session: Session }) {
   if (session.role === 'driver') return <Navigate to="/route" replace />;
   if (session.role === 'customer') return <Navigate to="/portal" replace />;
-  return <Dashboard />;
+  return <Dashboard session={session} />;
 }
 
 /**
