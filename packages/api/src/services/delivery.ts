@@ -331,7 +331,11 @@ export async function getStopForDriver(db: Db, stopId: string) {
   const amountOwedCents = await amountOwedForStop(db, stopId);
   const otherOpenInvoices = await openInvoicesForCustomer(db, stop.customer_id as string);
   const lines = await db.query(
+    // is_returnable and total_bottles come along so the driver's screen can
+    // fill the bottles-delivered box from the order rather than relying on
+    // somebody remembering to type a number the system already knows.
     `SELECT oli.id AS order_line_id, p.name AS product_name, p.bottles_per_case,
+            p.is_returnable, oli.total_bottles,
             oli.cases, oli.loose_bottles
      FROM order_line_items oli JOIN products p ON p.id = oli.product_id
      WHERE oli.order_id = $1`, [stop.order_id],

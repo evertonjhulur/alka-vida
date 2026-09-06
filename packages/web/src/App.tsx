@@ -39,6 +39,7 @@ import Register from './pages/Register';
 import SetPassword from './pages/SetPassword';
 import Applications from './pages/Applications';
 import Zones from './pages/Zones';
+import CustomerRecord from './pages/CustomerRecord';
 
 interface NavItem {
   to: string;
@@ -221,6 +222,7 @@ function Shell({ session }: { session: Session }) {
           <Route path="/orders" element={<Orders />} />
           <Route path="/recurring" element={<Recurring />} />
           <Route path="/customers" element={<Customers session={session} />} />
+          <Route path="/customers/:customerId" element={<CustomerRecord session={session} />} />
           <Route path="/pricing" element={<Pricing session={session} />} />
           <Route path="/products/:productId/bom" element={<Bom />} />
           <Route path="/delivery" element={<DeliverySheets />} />

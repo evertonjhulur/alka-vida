@@ -179,7 +179,7 @@ export async function dashboard(db: Db) {
    * driver for money nobody was ever going to collect.
    */
   const rounds = await db.query(
-    `SELECT s.id, s.zone, business_date(s.delivery_date::timestamptz)::text AS delivery_date,
+    `SELECT s.id, s.zone, s.delivery_date::text AS delivery_date,
             s.driver_name, s.status,
             (SELECT COUNT(*)::int FROM delivery_stops st
               WHERE st.delivery_sheet_id = s.id) AS stops,
@@ -236,4 +236,42 @@ export async function dashboard(db: Db) {
     },
     lowStock,
   };
+}
+
+/**
+ * Deliveries that carried returnable bottles but recorded none going out.
+ *
+ * The count of bottles delivered is typed by the driver; it is not taken from
+ * the order. So a driver who leaves the box blank silently understates how
+ * many bottles are out with customers - and the per-customer holding, which
+ * is what you would use to chase bottles back, is understated the same way.
+ * It is an error that never announces itself, which is why it is worth a
+ * report of its own.
+ *
+ * Read-only. It reports the gap; it does not close it.
+ */
+export async function bottlesNotRecorded(db: Db) {
+  return db.query(
+    `SELECT s.id AS stop_id,
+            sh.delivery_date::text AS delivery_date,
+            sh.zone, sh.driver_name,
+            c.id AS customer_id, c.name AS customer_name,
+            o.order_number,
+            SUM(oli.total_bottles)::int AS bottles_on_the_order,
+            s.bottles_delivered_full::int AS bottles_recorded,
+            s.bottles_empties_picked_up::int AS empties_recorded
+     FROM delivery_stops s
+     JOIN delivery_sheets sh ON sh.id = s.delivery_sheet_id
+     JOIN customers c ON c.id = s.customer_id
+     JOIN customer_orders o ON o.id = s.order_id
+     JOIN order_line_items oli ON oli.order_id = o.id
+     JOIN products p ON p.id = oli.product_id AND p.is_returnable
+     WHERE s.stop_outcome = 'Delivered'
+     GROUP BY s.id, sh.delivery_date, sh.zone, sh.driver_name,
+              c.id, c.name, o.order_number,
+              s.bottles_delivered_full, s.bottles_empties_picked_up
+     HAVING SUM(oli.total_bottles) > 0
+        AND COALESCE(s.bottles_delivered_full, 0) < SUM(oli.total_bottles)
+     ORDER BY sh.delivery_date DESC, c.name`,
+  );
 }

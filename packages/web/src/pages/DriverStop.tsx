@@ -9,6 +9,9 @@ interface StopLine {
   bottles_per_case: number;
   cases: number;
   loose_bottles: number;
+  /** A 5-gallon bottle goes out on loan and has to come back. */
+  is_returnable: boolean;
+  total_bottles: number;
 }
 
 interface OpenInvoice {
@@ -56,6 +59,10 @@ export default function DriverStop() {
   const [allocError, setAllocError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
+  /** Bottles delivered: follows the lines until the driver overrides it. */
+  const [fulls, setFulls] = useState('');
+  const [fullsTouched, setFullsTouched] = useState(false);
+
   async function load() {
     const s = await api.get<Stop>(`/api/stops/${stopId}`);
     setStop(s);
@@ -71,6 +78,26 @@ export default function DriverStop() {
 
   if (error && !stop) return <div className="notice error">{error}</div>;
   if (!stop) return <p className="muted">Loading…</p>;
+
+  /*
+   * How many returnable bottles this stop is putting out.
+   *
+   * Taken from the quantities the driver has just entered above, NOT from the
+   * order, so reducing a line reduces the bottles with it. Until now there was
+   * no field for this at all - the column existed, the API accepted it, and
+   * the screen never sent it, so every delivery recorded zero bottles going
+   * out and the pool quietly understated what was with customers.
+   */
+  const carriesReturnables = stop.lines.some((l) => l.is_returnable);
+  const bottlesFromLines = stop.lines
+    .filter((l) => l.is_returnable)
+    .reduce((sum, l) => {
+      const entered = Number(delivered[l.order_line_id]);
+      const qty = Number.isFinite(entered) ? entered : 0;
+      // A returnable sold by the case still puts out that many bottles.
+      return sum + qty * (l.bottles_per_case > 0 ? l.bottles_per_case : 1);
+    }, 0);
+  const fullsShown = fullsTouched ? fulls : String(bottlesFromLines);
 
   const collectedCents = toCents(collected || '0');
   const allocatedCents = Object.values(alloc)
@@ -102,6 +129,9 @@ export default function DriverStop() {
         paymentReceived: collectedCents > 0,
         paymentMethod: collectedCents > 0 ? method : null,
         paymentAmountCents: collectedCents,
+        // What actually went out on loan. Without this the pool never learns
+        // the bottles left the truck.
+        bottlesDeliveredFull: Number(fullsShown) || 0,
         bottlesEmptiesPickedUp: Number(empties) || 0,
         bottlesLostDamaged: Number(lost) || 0,
         driverNotes: notes || null,
@@ -231,6 +261,20 @@ export default function DriverStop() {
           )}
 
           <div className="row" style={{ marginTop: 14 }}>
+            {/*
+              * Only shown when this stop actually carries returnables. It
+              * follows the delivered quantities above until the driver types
+              * over it, so the common case is right without anyone doing
+              * anything - and a short delivery is still one edit away.
+              */}
+            {carriesReturnables && (
+              <div className="field">
+                <label htmlFor="fulls">5-gallon bottles delivered</label>
+                <input id="fulls" type="number" min="0" style={{ width: 120 }}
+                       value={fullsShown}
+                       onChange={(e) => { setFullsTouched(true); setFulls(e.target.value); }} />
+              </div>
+            )}
             <div className="field">
               <label htmlFor="empties">Empties picked up</label>
               <input id="empties" type="number" min="0" style={{ width: 120 }}

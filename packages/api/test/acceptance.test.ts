@@ -14,6 +14,8 @@ import { markStop, saveStopAllocation, getStopForDriver } from '../src/services/
 import { settleRoute, getSettlementReview, adjustAllocation } from '../src/services/settlement.ts';
 import { getInvoiceLedger, editInvoice, openInvoicesForCustomer } from '../src/services/invoices.ts';
 import { reversePayment, reassignPayment, getCustomerBalance } from '../src/services/payments.ts';
+import { bottleAccount } from '../src/services/bottles.ts';
+import { bottlesNotRecorded } from '../src/services/reports.ts';
 
 let f: Fixture;
 before(async () => { f = await setupFixture(); });
@@ -543,4 +545,67 @@ describe('8. A driver cash shortfall at day end', () => {
     assert.equal(row.varianceCents, TOTAL - 100_000, 'variance traces to this stop');
     assert.ok(row.deliveredSummary.includes('Alka Vida 500ml'));
   });
+});
+
+/**
+ * The bottle pool only learns what the driver's screen tells it.
+ *
+ * There was no "bottles delivered" field on that screen at all: the column
+ * existed and the API accepted it, but nothing ever sent a value. So every
+ * delivery of 5-gallon bottles recorded zero going out, and both the pool and
+ * each customer's holding quietly understated what was on loan. Two real
+ * deliveries were found in that state.
+ */
+describe('Returnable bottles reach the pool', () => {
+  test('a delivery that carries returnables records them going out', async () => {
+    const order = await createOrder(f.db, f.office, {
+      customerId: f.customerId,
+      deliveryMode: 'Delivery',
+      requestedDeliveryDate: '2026-08-12',
+      lines: [{ productId: f.fiveGalProductId, looseBottles: 3 }],
+    });
+    const [stop] = await stopsOf(f.db, order.deliverySheetId!);
+
+    // This customer carries deliveries from earlier tests in the file, so
+    // measure the MOVEMENT rather than the running total.
+    const before = await bottleAccount(f.db, f.customerId);
+
+    await markStop(f.db, f.driver, {
+      stopId: stop.id, outcome: 'Delivered',
+      bottlesDeliveredFull: 3, bottlesEmptiesPickedUp: 1,
+    });
+
+    const row = await f.db.one<{ full: number; empties: number }>(
+      `SELECT bottles_delivered_full AS full, bottles_empties_picked_up AS empties
+       FROM delivery_stops WHERE id = $1`, [stop.id],
+    );
+    assert.equal(Number(row.full), 3, 'three bottles went out on loan');
+    assert.equal(Number(row.empties), 1);
+
+    const after = await bottleAccount(f.db, f.customerId);
+    assert.equal(after.delivered - before.delivered, 3);
+    assert.equal(after.returned - before.returned, 1);
+    assert.equal(after.closingHolding - before.closingHolding, 2,
+      'three out and one back leaves two more of ours with the customer');
+  });
+
+  test('the report finds a delivery that recorded fewer bottles than it carried',
+    async () => {
+      const order = await createOrder(f.db, f.office, {
+        customerId: f.customerId,
+        deliveryMode: 'Delivery',
+        requestedDeliveryDate: '2026-08-13',
+        lines: [{ productId: f.fiveGalProductId, looseBottles: 4 }],
+      });
+      const [stop] = await stopsOf(f.db, order.deliverySheetId!);
+      // Delivered, but nobody recorded the bottles - the old behaviour.
+      await markStop(f.db, f.driver, { stopId: stop.id, outcome: 'Delivered' });
+
+      const gaps = await bottlesNotRecorded(f.db);
+      const mine = gaps.find((g) => (g as { stop_id: string }).stop_id === stop.id) as
+        { bottles_on_the_order: number; bottles_recorded: number } | undefined;
+      assert.ok(mine, 'a delivery of four bottles recording none must be reported');
+      assert.equal(Number(mine.bottles_on_the_order), 4);
+      assert.equal(Number(mine.bottles_recorded), 0);
+    });
 });

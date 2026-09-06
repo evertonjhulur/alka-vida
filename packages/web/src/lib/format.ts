@@ -22,9 +22,49 @@ export function toCents(input: string): number {
   return Math.round(n * 100);
 }
 
+/** The business runs on Jamaica time. Never the browser's, never UTC. */
+export const BUSINESS_TIMEZONE = 'America/Jamaica';
+
+/**
+ * Today, in Jamaica. For anything that fills in or compares against a date.
+ *
+ * en-CA formats as YYYY-MM-DD, which is what `<input type="date">` wants and
+ * what the server means by a business date.
+ */
+export function todayInJamaica(): string {
+  return new Date().toLocaleDateString('en-CA', { timeZone: BUSINESS_TIMEZONE });
+}
+
+/**
+ * A date, as the business would say it.
+ *
+ * Two different things arrive here and they must be treated differently:
+ *
+ *   * A DATE column - an invoice date, a delivery date - comes over as
+ *     `2026-09-04T00:00:00.000Z`. There is no instant in that, only a day, so
+ *     it is taken as written. Converting it to a timezone would move it back
+ *     a day, which is the bug migrations 004 and 008 were written to fix.
+ *
+ *   * A TIMESTAMP - created_at, reconciled_date - is a real instant. Slicing
+ *     its UTC form showed the wrong day for anything after 7pm Jamaica: an
+ *     order placed at 19:27 on the 4th read as the 5th. It is converted to
+ *     Jamaica time instead.
+ *
+ * The two are told apart by the time being exactly UTC midnight. A real
+ * instant landing exactly there is indistinguishable from a plain date and
+ * will read as the UTC day - that is one second in 86,400, and the
+ * alternative, every date column wrong by a day, is far worse.
+ */
 export function date(value: string | null | undefined): string {
   if (!value) return '—';
-  return String(value).slice(0, 10);
+  const s = String(value);
+
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+  if (/^\d{4}-\d{2}-\d{2}T00:00:00(\.000)?Z$/.test(s)) return s.slice(0, 10);
+
+  const d = new Date(s);
+  if (Number.isNaN(d.getTime())) return s.slice(0, 10);
+  return d.toLocaleDateString('en-CA', { timeZone: BUSINESS_TIMEZONE });
 }
 
 /** Colour token for an invoice status chip. */

@@ -11,6 +11,12 @@ interface Entry {
   runningBalanceCents: number;
 }
 
+/** The 5-gallon bottles this customer is holding, over the same window. */
+interface BottleAccount {
+  openingHolding: number; delivered: number; returned: number;
+  lost: number; closingHolding: number;
+}
+
 interface StatementData {
   customerId: string;
   customerName: string;
@@ -34,6 +40,7 @@ export function StatementView(
   const [to, setTo] = useState('');
   const [filter, setFilter] = useState<(typeof FILTERS)[number]>('All');
   const [data, setData] = useState<StatementData | null>(null);
+  const [bottles, setBottles] = useState<BottleAccount | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -49,6 +56,14 @@ export function StatementView(
     api.get<StatementData>(`/api/customers/${selected}/statement?${q}`)
       .then((d) => { setData(d); setError(null); })
       .catch((e) => setError(e.message));
+
+    // The bottles they are holding, over the same window. Not fatal if it
+    // fails - the money statement is the point of the screen.
+    const bq = new URLSearchParams();
+    if (from) bq.set('from', from);
+    if (to) bq.set('to', to);
+    api.get<BottleAccount>(`/api/customers/${selected}/bottles?${bq}`)
+      .then(setBottles).catch(() => setBottles(null));
   }, [selected, from, to, filter]);
 
   /**
@@ -202,8 +217,33 @@ export function StatementView(
           </table>
           </div>
           {data.entries.length === 0 && <p className="muted">No entries in this period.</p>}
+
+          {/* A returnable bottle is an asset out on loan. Shown only for a
+              customer who has ever had one - a case buyer should not read a
+              row of zeroes and wonder what it means. */}
+          {bottles && (bottles.delivered > 0 || bottles.closingHolding !== 0) && (
+            <div className="aging" style={{ marginTop: 14 }}>
+              <div className="age">
+                <b>Bottles held at start</b><span>{bottles.openingHolding}</span>
+              </div>
+              <div className="age">
+                <b>Delivered</b><span>+{bottles.delivered}</span>
+              </div>
+              <div className="age">
+                <b>Collected</b><span>−{bottles.returned}</span>
+              </div>
+              <div className="age">
+                <b>Held now</b><span>{bottles.closingHolding}</span>
+              </div>
+            </div>
+          )}
+
           <div className="total-line grand">
-            <span>Balance due</span><span>{money(data.closingBalanceCents)}</span>
+            {/* Paid more than invoiced is IN CREDIT. "Balance due -$275" is a
+                sentence nobody should have to decode, and the printed
+                statement says it the same way. */}
+            <span>{data.closingBalanceCents < 0 ? 'In credit' : 'Balance due'}</span>
+            <span>{money(Math.abs(data.closingBalanceCents))}</span>
           </div>
         </div>
       )}

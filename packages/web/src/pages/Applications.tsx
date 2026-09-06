@@ -17,8 +17,18 @@ interface Application {
 interface Tier { id: string; name: string }
 interface Zone { id: string; name: string; covers: string | null; retired_at: string | null }
 
-/** What the office may agree. Free text underneath, so older values still read. */
-const PAYMENT_TERMS = ['Cash on delivery', 'Net 15', 'Net 30'];
+/**
+ * What the office may agree. Free text in the column underneath, so a value
+ * saved before this was a list still reads.
+ *
+ * The same list as the Customers screen, deliberately: approving an
+ * application is the first time terms are set, and offering fewer options
+ * there than when editing the customer afterwards would be an odd place to be
+ * stricter. An admin confirms the terms either way.
+ */
+const PAYMENT_TERMS = [
+  'Cash on delivery', 'Net 15', 'Net 30', 'Net 60', 'Net 90',
+];
 
 const nameOf = (a: Application) => (a.account_type === 'Corporate'
   ? a.business_name ?? ''

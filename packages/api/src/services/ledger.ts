@@ -97,10 +97,20 @@ export async function getStatement(
              CASE WHEN p.is_reversal THEN 'Reversal' ELSE 'Payment' END AS type,
              CASE
                WHEN p.is_reversal THEN 'Payment reversed'
-               WHEN p.invoice_id IS NULL THEN 'Payment received'
+               -- Says WHY the reference is blank. A row reading "Payment
+               -- received" next to an empty reference column looks like data
+               -- has gone missing. It has not: the money simply is not against
+               -- an invoice, and there is no separate credit concept in this
+               -- system (invariant 6). This is how that reads on a statement.
+               WHEN p.invoice_id IS NULL THEN 'Payment received, left on account'
                ELSE 'Payment received, applied to ' || COALESCE(inv.invoice_number,'')
              END AS description,
-             COALESCE(p.reference, inv.invoice_number, '') AS reference,
+             -- The INVOICE it paid comes first. p.reference is whatever the
+             -- office typed - a cheque number, a deposit slip - and showing
+             -- that under a column headed Reference, beside an invoice row
+             -- carrying an invoice number, invites exactly one question: why
+             -- do these not match?
+             COALESCE(inv.invoice_number, p.reference, '') AS reference,
              -p.amount_cents AS amount_cents,
              to_char(p.payment_date AT TIME ZONE $2,'YYYY-MM-DD HH24:MI:SS.US') AS sort_key
       FROM payments p

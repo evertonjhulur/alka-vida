@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api, type Session } from '../lib/api';
-import { money, date } from '../lib/format';
+import { money, date, BUSINESS_TIMEZONE } from '../lib/format';
 
 interface Aging {
   currentCents: number; d30Cents: number; d60Cents: number;
@@ -40,13 +40,17 @@ interface DashboardData {
 }
 
 const greeting = () => {
-  const h = new Date().getHours();
+  // The hour in Jamaica, so "good morning" is not the browser's opinion.
+  const h = Number(new Date().toLocaleString('en-GB', {
+    timeZone: BUSINESS_TIMEZONE, hour: '2-digit', hour12: false,
+  }));
   if (h < 12) return 'Good morning';
   if (h < 17) return 'Good afternoon';
   return 'Good evening';
 };
 
 const today = () => new Date().toLocaleDateString('en-JM', {
+  timeZone: BUSINESS_TIMEZONE,
   weekday: 'long', day: 'numeric', month: 'long', year: 'numeric',
 });
 

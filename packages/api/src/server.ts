@@ -501,6 +501,29 @@ export async function buildServer(db: Db) {
     return ledger.getStatement(db, id, { from: q.from, to: q.to, filter: q.filter });
   });
 
+  // The whole customer record on one screen: who they are, what they owe,
+  // their orders, invoices and payments.
+  app.get('/api/customers/:id/history', { preHandler: allow('admin', 'user') },
+    async (req) => customers.customerHistory(db, (req.params as { id: string }).id));
+
+  // The 5-gallon bottles a customer is holding, over the same window as the
+  // statement. A returnable bottle is an asset out on loan.
+  app.get('/api/customers/:id/bottles', async (req) => {
+    const { id } = req.params as { id: string };
+    assertOwnCustomer(req, id);
+    const q = req.query as { from?: string; to?: string };
+    return bottles.bottleAccount(db, id, { from: q.from, to: q.to });
+  });
+
+  app.post('/api/customers/:id/statement/email', { preHandler: allow('admin', 'user') },
+    async (req) => {
+      const body = (req.body ?? {}) as {
+        from?: string; to?: string; filter?: ledger.StatementFilter; sendTo?: string;
+      };
+      return documents.emailStatement(db, actorOf(req), (req.params as { id: string }).id,
+        { from: body.from, to: body.to, filter: body.filter, sendTo: body.sendTo });
+    });
+
   // The statement as a document. A customer may download their own, the same
   // rule the JSON above follows.
   app.get('/api/customers/:id/statement.pdf', async (req, reply) => {
@@ -1101,6 +1124,22 @@ export async function buildServer(db: Db) {
 
   app.get('/api/reports/reorder', { preHandler: allow('admin', 'user') },
     async () => reports.reorderReport(db));
+
+  // Close a gap the report above found: record bottles that went out on a
+  // delivery where nobody wrote them down. Works on a settled round, which
+  // almost nothing else does - the lock there guards money, and a returnable
+  // bottle is not money.
+  app.post('/api/stops/:id/bottles-correction', { preHandler: allow('admin') },
+    async (req) => {
+      const body = req.body as { delivered: number; reason: string };
+      return bottles.correctStopBottles(db, actorOf(req), (req.params as { id: string }).id,
+        { delivered: Number(body.delivered), reason: body.reason });
+    });
+
+  // Deliveries that carried returnable bottles but recorded fewer going out
+  // than the order held. Read-only: it reports the gap, it does not close it.
+  app.get('/api/reports/bottles-not-recorded', { preHandler: allow('admin', 'user') },
+    async () => reports.bottlesNotRecorded(db));
 
   app.get('/api/reports/bottle-pool', { preHandler: allow('admin', 'user') },
     async () => reports.bottlePoolReport(db));

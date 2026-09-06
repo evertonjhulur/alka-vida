@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../lib/api';
-import { money, date } from '../lib/format';
+import { money, date, todayInJamaica } from '../lib/format';
 
 interface Sheet {
   id: string; delivery_date: string; zone: string; status: string;
@@ -48,10 +48,9 @@ export default function DeliverySheets() {
             </datalist>
           </div>
           <div className="field">
-            {/* en-CA gives YYYY-MM-DD in local time, which is what the input wants
-                and what business_today() means. */}
-            <button className="secondary"
-                    onClick={() => setDay(new Date().toLocaleDateString('en-CA'))}>
+            {/* Jamaica's today, not the browser's: a laptop set to another
+                timezone would otherwise ask for the wrong day's round. */}
+            <button className="secondary" onClick={() => setDay(todayInJamaica())}>
               Today
             </button>{' '}
             <button className="secondary" onClick={() => setDay('')}>

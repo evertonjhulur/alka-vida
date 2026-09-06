@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { Link } from 'react-router-dom';
 import { api, type Session } from '../lib/api';
 import { money } from '../lib/format';
 
@@ -38,6 +39,17 @@ export default function Customers({ session }: { session: Session }) {
 
   const [survivor, setSurvivor] = useState('');
   const [merged, setMerged] = useState('');
+
+  const [search, setSearch] = useState('');
+
+  /*
+   * Matched across every field somebody might have to hand: a customer rings
+   * up and gives a phone number, or the driver knows only the street.
+   */
+  const needle = search.trim().toLowerCase();
+  const found = needle === '' ? rows : rows.filter((c) => [
+    c.name, c.phone, c.email, c.delivery_zone, c.delivery_address, c.price_tier,
+  ].some((f) => (f ?? '').toLowerCase().includes(needle)));
 
   async function load() {
     setRows(await api.get<Customer[]>('/api/customers'));
@@ -245,36 +257,68 @@ export default function Customers({ session }: { session: Session }) {
         )}
 
         {!showForm && (
-          <table>
-            <thead>
-              <tr>
-                <th>Name</th><th>Contact</th><th>Zone</th><th>Route #</th>
-                <th>Tier</th><th className="num">Balance</th><th />
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((c) => (
-                <tr key={c.id}>
-                  <td>
-                    {c.name}
-                    {c.delivery_address && (
-                      <div className="muted small">{c.delivery_address}</div>
-                    )}
-                  </td>
-                  <td className="small muted">{c.phone}<br />{c.email}</td>
-                  <td>{c.delivery_zone ?? <span className="chip warn">none set</span>}</td>
-                  <td>{c.route_sequence}</td>
-                  <td>{c.price_tier ?? <span className="muted">list price</span>}</td>
-                  <td className="num">{money(Number(c.balance_cents ?? 0))}</td>
-                  <td className="num">
-                    <button className="secondary" onClick={() => startEdit(c.id)}>Edit</button>
-                  </td>
+          <>
+            {/* Finding one customer among hundreds by reading down the page is
+                the sort of thing that quietly stops people using a screen. */}
+            <div className="row" style={{ marginBottom: 12 }}>
+              <div className="field" style={{ flex: '1 1 320px', marginBottom: 0 }}>
+                <label htmlFor="csearch">Find a customer</label>
+                <input id="csearch" style={{ width: '100%' }} value={search}
+                       placeholder="name, phone, email, zone or address"
+                       onChange={(e) => setSearch(e.target.value)} />
+              </div>
+              {search && (
+                <div className="field" style={{ marginBottom: 0 }}>
+                  <button className="secondary" onClick={() => setSearch('')}>Clear</button>
+                </div>
+              )}
+              <div className="field" style={{ marginBottom: 0 }}>
+                <div className="muted small">
+                  {search
+                    ? `${found.length} of ${rows.length}`
+                    : `${rows.length} customer${rows.length === 1 ? '' : 's'}`}
+                </div>
+              </div>
+            </div>
+
+            <table>
+              <thead>
+                <tr>
+                  <th>Name</th><th>Contact</th><th>Zone</th><th>Route #</th>
+                  <th>Tier</th><th className="num">Balance</th><th />
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {found.map((c) => (
+                  <tr key={c.id}>
+                    <td>
+                      {/* The name opens the record. A customer is something you
+                          look INTO - their orders, invoices, payments and
+                          bottles - not just a row to edit. */}
+                      <Link to={`/customers/${c.id}`}><strong>{c.name}</strong></Link>
+                      {c.delivery_address && (
+                        <div className="muted small">{c.delivery_address}</div>
+                      )}
+                    </td>
+                    <td className="small muted">{c.phone}<br />{c.email}</td>
+                    <td>{c.delivery_zone ?? <span className="chip warn">none set</span>}</td>
+                    <td>{c.route_sequence}</td>
+                    <td>{c.price_tier ?? <span className="muted">list price</span>}</td>
+                    <td className="num">{money(Number(c.balance_cents ?? 0))}</td>
+                    <td className="num">
+                      <Link to={`/customers/${c.id}`}>Open</Link>{' '}
+                      <button className="secondary" onClick={() => startEdit(c.id)}>Edit</button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </>
         )}
         {!showForm && rows.length === 0 && <p className="muted">No customers yet.</p>}
+        {!showForm && rows.length > 0 && found.length === 0 && (
+          <p className="muted">Nobody matches “{search}”.</p>
+        )}
       </div>
 
       {session.role === 'admin' && !showForm && (

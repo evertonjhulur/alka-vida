@@ -88,7 +88,9 @@ export type Parish = (typeof PARISHES)[number];
  * What the office may agree with a customer. Free text on the column, so an
  * older value keeps working, but these are what the screen offers.
  */
-export const PAYMENT_TERMS = ['Cash on delivery', 'Net 15', 'Net 30'] as const;
+export const PAYMENT_TERMS = [
+  'Cash on delivery', 'Net 15', 'Net 30', 'Net 60', 'Net 90',
+] as const;
 export type PaymentTerms = (typeof PAYMENT_TERMS)[number];
 
 /** The parts of a delivery address, as the forms collect them. */

@@ -22,6 +22,7 @@ import { audit, requireRole, num } from './core.ts';
 import { RuleViolation } from '@alka/shared';
 import { getInvoiceDetail } from './invoices.ts';
 import { getStatement, type StatementFilter } from './ledger.ts';
+import { bottleAccount } from './bottles.ts';
 
 const BRAND = {
   name: 'Alka Vida',
@@ -292,6 +293,9 @@ export async function renderStatementPdf(
     [customerId],
   );
 
+  // Bottles they are holding, over the same window as the ledger.
+  const bottles = await bottleAccount(db, customerId, { from: opts.from, to: opts.to });
+
   const doc = new PDFDocument({ size: 'LETTER', margin: 50 });
   const chunks: Buffer[] = [];
   doc.on('data', (c: Buffer) => chunks.push(c));
@@ -341,25 +345,47 @@ export async function renderStatementPdf(
   };
   headerRow();
 
+  /**
+   * One line of the ledger.
+   *
+   * The row advances by its TALLEST cell, not by whatever the last one
+   * happened to be. Six cells are drawn at the same y; pdfkit leaves the
+   * cursor wherever the final call finished, so a description that wrapped to
+   * two lines was written over by the row beneath it - which put figures
+   * against the wrong line and made an invoice number look like it did not
+   * match its payment.
+   */
   const row = (
     date: string, type: string, desc: string, ref: string,
     amount: string, balance: string, muted = false,
   ) => {
-    // A statement can run past one page; carry the column headings over.
-    if (doc.y > 690) {
+    const cells: Array<{ text: string; x: number; w: number; right?: boolean }> = [
+      { text: date, x: cols.date, w: 64 },
+      { text: type, x: cols.type, w: 74 },
+      { text: desc, x: cols.desc, w: 150 },
+      { text: ref, x: cols.ref, w: 66 },
+      { text: amount, x: cols.amount, w: 62, right: true },
+      { text: balance, x: cols.balance, w: 70, right: true },
+    ];
+
+    doc.fontSize(8.5).fillColor(muted ? '#666' : '#000');
+    const height = Math.max(
+      ...cells.map((c) => doc.heightOfString(c.text || ' ', { width: c.w })),
+    );
+
+    // Break before drawing, not after, so a row is never split across pages.
+    if (doc.y + height > 690) {
       doc.addPage();
       doc.y = 50;
       headerRow();
+      doc.fontSize(8.5).fillColor(muted ? '#666' : '#000');
     }
+
     const y = doc.y;
-    doc.fontSize(8.5).fillColor(muted ? '#666' : '#000')
-      .text(date, cols.date, y)
-      .text(type, cols.type, y, { width: 74 })
-      .text(desc, cols.desc, y, { width: 150 })
-      .text(ref, cols.ref, y, { width: 66 })
-      .text(amount, cols.amount, y, { width: 62, align: 'right' })
-      .text(balance, cols.balance, y, { width: 70, align: 'right' });
-    doc.moveDown(0.55);
+    for (const c of cells) {
+      doc.text(c.text, c.x, y, { width: c.w, align: c.right ? 'right' : 'left' });
+    }
+    doc.y = y + height + 3;
   };
 
   row('', '', 'Opening balance', '', '', cash(statement.openingBalanceCents), true);
@@ -377,11 +403,75 @@ export async function renderStatementPdf(
   doc.moveTo(left, doc.y + 2).lineTo(right, doc.y + 2).strokeColor('#ccc').stroke();
   doc.moveDown(0.8);
 
-  /* what they owe, and how old it is */
+  /*
+   * What they owe - or what they are up.
+   *
+   * A customer who paid more than the invoice is IN CREDIT, and "Balance due
+   * -$275.00" is a sentence nobody should have to decode. The figure is shown
+   * unsigned under the label that describes it.
+   */
+  const closing = statement.closingBalanceCents;
+  const inCredit = closing < 0;
+
+  /*
+   * The figure sits in the SAME column as the running balance above it, and
+   * the label is right-aligned into the space to its left. Two separate
+   * placements, not one `continued` run: a continued string inherits the
+   * right-alignment of the piece before it, so the amount was laid out
+   * against the wrong box and pushed past the right margin.
+   */
+  const totalY = doc.y;
   doc.fontSize(12).fillColor('#000')
-    .text('Balance due', cols.amount - 110, doc.y, { width: 200, align: 'right', continued: true })
-    .text(`   ${cash(statement.closingBalanceCents)}`);
-  doc.moveDown(1.4);
+    .text(inCredit ? 'In credit' : 'Balance due',
+      cols.desc, totalY, { width: cols.balance - cols.desc - 10, align: 'right' })
+    .text(cash(Math.abs(closing)),
+      cols.balance, totalY, { width: 70, align: 'right' });
+  doc.y = totalY + 18;
+
+  if (inCredit) {
+    doc.fontSize(8.5).fillColor('#555')
+      .text('Paid ahead. This comes off the next invoice.',
+        cols.desc, doc.y, { width: right - cols.desc, align: 'right' });
+  }
+  doc.moveDown(1.2);
+
+  /*
+   * The bottle account.
+   *
+   * A returnable 5-gallon bottle is a real asset out on loan. The ledger above
+   * says what the customer owes; this says how many bottles of yours they are
+   * holding. They belong on one piece of paper because the conversation about
+   * one is usually the conversation about the other.
+   *
+   * Printed only when this customer has ever had a returnable - a 500ml case
+   * buyer should not read a row of zeroes and wonder what it means.
+   */
+  const everHadBottles = bottles.delivered > 0 || bottles.openingHolding !== 0
+    || bottles.closingHolding !== 0;
+  if (everHadBottles) {
+    doc.fontSize(9).fillColor('#555').text('5-GALLON BOTTLES', left, doc.y);
+    doc.moveDown(0.4);
+    const top = doc.y;
+    const cell = (label: string, value: string, i: number, strong = false) => {
+      const x = left + i * 128;
+      doc.y = top;
+      doc.fontSize(8).fillColor('#555').text(label, x, doc.y, { width: 120 });
+      doc.fontSize(11).fillColor(strong ? '#000' : '#333')
+        .text(value, x, doc.y, { width: 120 });
+    };
+    cell('Held at start', String(bottles.openingHolding), 0);
+    cell('Delivered', `+${bottles.delivered}`, 1);
+    cell('Collected', `-${bottles.returned}`, 2);
+    cell('Held now', String(bottles.closingHolding), 3, true);
+    doc.y = top + 34;
+
+    if (bottles.lost > 0) {
+      doc.fontSize(8).fillColor('#777')
+        .text(`${bottles.lost} recorded lost or damaged and written off.`, left, doc.y);
+      doc.moveDown(0.8);
+    }
+    doc.moveDown(0.6);
+  }
 
   const owed = Number(aging.total);
   if (owed > 0) {
@@ -440,6 +530,68 @@ export function mailConfigured(): boolean {
  * Marks the invoice Sent only once the mail server has accepted it, so an
  * invoice is never recorded as sent when it was not.
  */
+/**
+ * Send a customer their statement.
+ *
+ * Mirrors emailInvoice deliberately, including refusing plainly when no mail
+ * account is set up rather than failing somewhere in the middle. Unlike an
+ * invoice, sending a statement changes nothing about the records - it is a
+ * copy of what is already true - so there is no lifecycle to update, only an
+ * audit line saying it went.
+ */
+export async function emailStatement(
+  db: Db,
+  actor: Actor,
+  customerId: string,
+  opts: { from?: string | null; to?: string | null;
+          filter?: StatementFilter; sendTo?: string | null } = {},
+): Promise<{ sentTo: string; customerName: string }> {
+  requireRole(actor, 'admin', 'user');
+
+  if (!mailConfigured()) {
+    throw new RuleViolation(
+      'email is not set up on this machine yet. Add the Alka Vida mail account '
+      + 'details to the settings file, restart, and the Send button will work. '
+      + 'Until then, download the PDF and attach it yourself.',
+    );
+  }
+
+  const doc = await renderStatementPdf(db, customerId,
+    { from: opts.from, to: opts.to, filter: opts.filter });
+  const to = (opts.sendTo ?? doc.customerEmail ?? '').trim();
+  if (!to) {
+    throw new RuleViolation(
+      `${doc.customerName} has no email address on file. Add one to the customer `
+      + 'record, or type an address to send this to.',
+    );
+  }
+
+  const transport = createTransport({
+    host: process.env.SMTP_HOST,
+    port: Number(process.env.SMTP_PORT ?? 587),
+    secure: Number(process.env.SMTP_PORT ?? 587) === 465,
+    auth: { user: process.env.SMTP_USER!, pass: process.env.SMTP_PASS! },
+  });
+
+  await transport.sendMail({
+    from: process.env.MAIL_FROM ?? process.env.SMTP_USER,
+    to,
+    subject: `${BRAND.name} statement of account`,
+    text:
+      `Good day,\n\nPlease find attached your statement of account from `
+      + `${BRAND.name}.\n\nThank you for your business.\n\n${BRAND.company}\n`,
+    attachments: [{ filename: doc.filename, content: doc.pdf }],
+  });
+
+  await db.tx(async (t) => {
+    await audit(t, actor, 'update', 'Customer', customerId, doc.customerName, {
+      statementEmailedTo: to,
+    });
+  });
+
+  return { sentTo: to, customerName: doc.customerName };
+}
+
 export async function emailInvoice(
   db: Db,
   actor: Actor,

@@ -4,7 +4,7 @@
 
 import type { Db } from '../db/index.ts';
 import type { Actor } from './core.ts';
-import { audit, businessToday, requireRole } from './core.ts';
+import { audit, businessToday, num, requireRole } from './core.ts';
 import { RuleViolation } from '@alka/shared';
 
 /**
@@ -188,4 +188,71 @@ export async function listSelectableCustomers(db: Db) {
      WHERE c.active
      ORDER BY c.name`,
   );
+}
+
+/**
+ * Everything about one customer on a single screen: who they are, what they
+ * owe, what they have ordered, what has been invoiced, what they have paid,
+ * and how many of your bottles they are holding.
+ *
+ * One call rather than six. The alternative is a screen that draws itself in
+ * pieces, and a customer record is read while somebody is on the phone.
+ */
+export async function customerHistory(db: Db, customerId: string) {
+  const customer = await db.one<Record<string, unknown>>(
+    `SELECT c.*, t.name AS price_tier_name, u.email AS portal_email
+     FROM customers c
+     LEFT JOIN price_tiers t ON t.id = c.price_tier_id
+     LEFT JOIN users u ON u.id = c.user_id
+     WHERE c.id = $1`,
+    [customerId],
+  );
+
+  const orders = await db.query(
+    `SELECT id, order_number, order_date::text AS order_date,
+            status, delivery_mode, source, grand_total_cents::text AS grand_total_cents
+     FROM customer_orders WHERE customer_id = $1
+     ORDER BY order_date DESC, order_number DESC LIMIT 25`,
+    [customerId],
+  );
+
+  const invoices = await db.query(
+    `SELECT invoice_id, invoice_number,
+            invoice_date::text AS invoice_date,
+            due_date::text AS due_date, status,
+            grand_total_cents::text AS grand_total_cents,
+            balance_cents::text AS balance_cents, is_credit_note
+     FROM invoice_ledger WHERE customer_id = $1
+     ORDER BY invoice_date DESC, invoice_number DESC LIMIT 25`,
+    [customerId],
+  );
+
+  const payments = await db.query(
+    `SELECT p.id, business_date(p.payment_date)::text AS payment_date,
+            p.amount_cents::text AS amount_cents, p.method, p.reference,
+            p.is_reversal, p.status, i.invoice_number
+     FROM payments p
+     LEFT JOIN invoices i ON i.id = p.invoice_id
+     WHERE p.customer_id = $1 AND p.status = 'Confirmed'
+     ORDER BY p.payment_date DESC LIMIT 25`,
+    [customerId],
+  );
+
+  /*
+   * From customer_balances - everything invoiced less every confirmed payment
+   * - and NOT from summing invoice_ledger.
+   *
+   * A payment left on the account belongs to no invoice, so it never appears
+   * in the invoice ledger. Summing that ledger said a customer who had paid
+   * $275 over owed exactly zero, while her statement said she was $275 in
+   * credit. Two screens disagreeing about one customer's position is worse
+   * than either of them being slightly wrong.
+   */
+  const balance = await db.one<{ balance_cents: string }>(
+    `SELECT COALESCE(balance_cents, 0)::text AS balance_cents
+     FROM customer_balances WHERE customer_id = $1`,
+    [customerId],
+  );
+
+  return { customer, orders, invoices, payments, balanceCents: num(balance.balance_cents) };
 }

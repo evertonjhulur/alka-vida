@@ -292,3 +292,157 @@ export async function poolHistory(db: Db, limit = 100) {
     [limit],
   );
 }
+
+/**
+ * One customer's 5-gallon bottle account, shaped like the money statement:
+ * what they were holding at the start, what moved in the period, and what
+ * they are holding now.
+ *
+ * A returnable bottle is a real asset out on loan. The money statement says
+ * what a customer owes; this says how many of your bottles they have. Both
+ * belong on the same piece of paper, because the conversation about one is
+ * usually the conversation about the other.
+ *
+ * Dates come from the delivery SHEET, not the stop: a stop has no date of its
+ * own, it belongs to the round that carried it.
+ */
+export async function bottleAccount(
+  db: Db,
+  customerId: string,
+  opts: { from?: string | null; to?: string | null } = {},
+): Promise<{
+  openingHolding: number;
+  delivered: number;
+  returned: number;
+  lost: number;
+  closingHolding: number;
+}> {
+  const from = opts.from ?? null;
+  const to = opts.to ?? null;
+
+  const row = await db.one<{
+    opening: string; delivered: string; returned: string; lost: string; closing: string;
+  }>(
+    `SELECT
+       -- everything BEFORE the window, so the period reads as a movement
+       COALESCE(SUM(
+         CASE WHEN $2::date IS NULL OR sh.delivery_date < $2::date
+              THEN s.bottles_delivered_full - s.bottles_empties_picked_up
+                   - s.bottles_lost_damaged ELSE 0 END), 0)::text AS opening,
+       COALESCE(SUM(CASE WHEN inWindow THEN s.bottles_delivered_full ELSE 0 END), 0)::text
+         AS delivered,
+       COALESCE(SUM(CASE WHEN inWindow THEN s.bottles_empties_picked_up ELSE 0 END), 0)::text
+         AS returned,
+       COALESCE(SUM(CASE WHEN inWindow THEN s.bottles_lost_damaged ELSE 0 END), 0)::text
+         AS lost,
+       -- what they hold now, counting everything up to the end of the window
+       COALESCE(SUM(
+         CASE WHEN $3::date IS NULL OR sh.delivery_date <= $3::date
+              THEN s.bottles_delivered_full - s.bottles_empties_picked_up
+                   - s.bottles_lost_damaged ELSE 0 END), 0)::text AS closing
+     FROM delivery_stops s
+     JOIN delivery_sheets sh ON sh.id = s.delivery_sheet_id
+     CROSS JOIN LATERAL (
+       SELECT ($2::date IS NULL OR sh.delivery_date >= $2::date)
+          AND ($3::date IS NULL OR sh.delivery_date <= $3::date) AS inWindow
+     ) w
+     WHERE s.customer_id = $1 AND s.stop_outcome = 'Delivered'`,
+    [customerId, from, to],
+  );
+
+  return {
+    openingHolding: num(row.opening),
+    delivered: num(row.delivered),
+    returned: num(row.returned),
+    lost: num(row.lost),
+    closingHolding: num(row.closing),
+  };
+}
+
+/**
+ * Record bottles that went out on a delivery where nobody wrote them down.
+ *
+ * This deliberately works on a SETTLED round, which almost nothing else does.
+ * The lock on a settled route exists to protect money - corrections there go
+ * through payment reversal, reassignment or invoice editing - and bottles are
+ * not money. A returnable is an asset on loan; getting its count right does
+ * not move a cent of anybody's balance.
+ *
+ * It exists because the driver's screen had no bottles-delivered field at
+ * all: the column was there, the API accepted a value, and nothing ever sent
+ * one, so every returnable delivery recorded zero going out. That is fixed
+ * going forward, but the deliveries already made need correcting, and doing
+ * that by hand in the database leaves no trace of who did it or why.
+ *
+ * The stop AND the pool move together. The original delivery moved neither,
+ * so correcting one without the other would just relocate the error.
+ */
+export async function correctStopBottles(
+  db: Db,
+  actor: Actor,
+  stopId: string,
+  args: { delivered: number; reason: string },
+): Promise<{ was: number; now: number; poolMoved: number }> {
+  requireRole(actor, 'admin');
+  if (!args.reason?.trim()) {
+    throw new RuleViolation('a reason is required when correcting a delivery record');
+  }
+  if (!Number.isFinite(args.delivered) || args.delivered < 0) {
+    throw new RuleViolation('bottles delivered cannot be negative');
+  }
+
+  return db.tx(async (t) => {
+    const stop = await t.one<{
+      bottles_delivered_full: number; stop_outcome: string; customer_id: string;
+    }>(
+      `SELECT bottles_delivered_full, stop_outcome, customer_id
+       FROM delivery_stops WHERE id = $1 FOR UPDATE`,
+      [stopId],
+    );
+    if (stop.stop_outcome !== 'Delivered') {
+      throw new RuleViolation('only a delivered stop can have its bottle count corrected');
+    }
+
+    const was = num(stop.bottles_delivered_full);
+    const delta = args.delivered - was;
+    if (delta === 0) return { was, now: was, poolMoved: 0 };
+
+    await t.query(
+      `UPDATE delivery_stops SET bottles_delivered_full = $2 WHERE id = $1`,
+      [stopId, args.delivered],
+    );
+
+    const customer = await t.maybeOne<{ name: string }>(
+      `SELECT name FROM customers WHERE id = $1`, [stop.customer_id],
+    );
+
+    // Only the difference moves: the pool must not be charged twice if this
+    // is run again.
+    if (delta > 0) {
+      await applyDeliveryMovement(t, actor, {
+        delivered: delta,
+        reference: `Correction ${stopId}`,
+        customerName: customer?.name,
+      });
+    } else {
+      const pool = await defaultPool(t);
+      if (pool) {
+        await t.query(
+          `UPDATE five_gal_bottle_pool
+           SET clean_ready = clean_ready + $2,
+               filled_with_customer = GREATEST(filled_with_customer - $2, 0)
+           WHERE id = $1`,
+          [pool.id, Math.abs(delta)],
+        );
+      }
+    }
+
+    await audit(t, actor, 'adjust', 'DeliveryStop', stopId, `bottles ${was} -> ${args.delivered}`, {
+      bottlesWas: was, bottlesNow: args.delivered, poolMoved: delta,
+      reason: args.reason.trim(),
+      settledRoute: true,
+    });
+
+    return { was, now: args.delivered, poolMoved: delta };
+  });
+}
