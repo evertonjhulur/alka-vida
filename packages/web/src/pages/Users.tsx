@@ -47,6 +47,8 @@ export default function Users({ session }: { session: Session }) {
   const [editFor, setEditFor] = useState<string | null>(null);
   const [ed, setEd] = useState({ name: '', email: '', role: 'user' as Role });
 
+  const [search, setSearch] = useState('');
+
   const [pwFor, setPwFor] = useState<string | null>(null);
   const [pw, setPw] = useState('');
 
@@ -152,17 +154,32 @@ export default function Users({ session }: { session: Session }) {
     }, 'Could not reset the password');
   }
 
-  const active = users.filter((u) => u.active);
-  const withdrawn = users.filter((u) => !u.active);
+  const needle = search.trim().toLowerCase();
+  const matches = (u: User) => needle === '' || [
+    u.name, u.email, ROLE_LABEL[u.role], u.role, u.customer_name ?? '',
+  ].some((f) => f.toLowerCase().includes(needle));
+
+  const active = users.filter((u) => u.active && matches(u));
+  const withdrawn = users.filter((u) => !u.active && matches(u));
   const linkable = customers.filter(
     (c) => !users.some((u) => u.customer_id === c.id && u.active),
   );
+
+  const toggleEdit = (u: User) => {
+    const next = editFor === u.id ? null : u.id;
+    setEditFor(next); setPwFor(null);
+    if (next) setEd({ name: u.name, email: u.email, role: u.role });
+  };
 
   const row = (u: User) => (
     <Fragment key={u.id}>
       <tr>
         <td>
-          <strong>{u.name}</strong>
+          {/* The name opens the same editor the button does - managing
+              somebody should not require finding the right button first. */}
+          <button className="as-link" disabled={busy} onClick={() => toggleEdit(u)}>
+            <strong>{u.name}</strong>
+          </button>
           {u.id === session.id && <span className="chip info" style={{ marginLeft: 6 }}>you</span>}
           <div className="muted small">{u.email}</div>
           {u.customer_name && <div className="muted small">for {u.customer_name}</div>}
@@ -175,12 +192,7 @@ export default function Users({ session }: { session: Session }) {
           {u.last_login_at ? date(u.last_login_at) : 'never signed in'}
         </td>
         <td className="num">
-          <button className="secondary" disabled={busy}
-                  onClick={() => {
-                    const next = editFor === u.id ? null : u.id;
-                    setEditFor(next); setPwFor(null);
-                    if (next) setEd({ name: u.name, email: u.email, role: u.role });
-                  }}>
+          <button className="secondary" disabled={busy} onClick={() => toggleEdit(u)}>
             {editFor === u.id ? 'Cancel' : 'Edit'}
           </button>{' '}
           <button className="secondary" disabled={busy || !u.active}
@@ -388,6 +400,20 @@ export default function Users({ session }: { session: Session }) {
           </form>
         )}
 
+        <div className="row" style={{ alignItems: 'flex-end' }}>
+          <div className="field" style={{ flex: '1 1 260px' }}>
+            <label htmlFor="usearch">Find a login</label>
+            <input id="usearch" style={{ width: '100%' }} value={search}
+                   placeholder="name, email, or role"
+                   onChange={(e) => setSearch(e.target.value)} />
+          </div>
+          {search && (
+            <div className="field">
+              <button className="secondary" onClick={() => setSearch('')}>Clear</button>
+            </div>
+          )}
+        </div>
+
         <table>
           <thead>
             <tr>
@@ -396,7 +422,11 @@ export default function Users({ session }: { session: Session }) {
           </thead>
           <tbody>{active.map(row)}</tbody>
         </table>
-        {active.length === 0 && <p className="muted">No active logins.</p>}
+        {active.length === 0 && (
+          <p className="muted">
+            {search ? `Nobody active matches “${search}”.` : 'No active logins.'}
+          </p>
+        )}
       </div>
 
       {withdrawn.length > 0 && (

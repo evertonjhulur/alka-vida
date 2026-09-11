@@ -530,3 +530,21 @@ ul.todo li:last-child { border-bottom: 0; }
   .fig-value { font-size: 21px; }
   .aging { grid-template-columns: repeat(2, 1fr); }
 }
+
+/*
+ * A button that reads as a link. For a name that opens its own record or
+ * editor: it must look like the clickable thing it is, but it is an action
+ * rather than a destination, so it stays a <button> for the keyboard and for
+ * anyone using a screen reader.
+ */
+button.as-link {
+  background: none;
+  border: 0;
+  padding: 0;
+  font: inherit;
+  color: var(--brand);
+  cursor: pointer;
+  text-align: left;
+}
+button.as-link:hover { text-decoration: underline; }
+button.as-link:disabled { color: inherit; cursor: default; text-decoration: none; }

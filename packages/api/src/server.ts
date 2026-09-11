@@ -40,6 +40,7 @@ import * as users from './services/users.ts';
 import * as invitations from './services/invitations.ts';
 import * as registration from './services/registration.ts';
 import * as zones from './services/zones.ts';
+import * as labour from './services/labour.ts';
 import { collectOrder, counterSale } from './services/counter.ts';
 
 declare module 'fastify' {
@@ -357,6 +358,68 @@ export async function buildServer(db: Db) {
       await zones.restoreZone(db, actorOf(req), (req.params as { id: string }).id);
       return { ok: true };
     });
+
+  /* ---------------- employees and labour ---------------- */
+
+  // Payroll and, later, true production cost. Nothing in the current costing
+  // reads any of this yet - see the header of migration 015.
+
+  app.get('/api/employees', { preHandler: allow('admin', 'user') },
+    async (req) => labour.listEmployees(db, actorOf(req)));
+
+  app.post('/api/employees', { preHandler: allow('admin') },
+    async (req) => labour.createEmployee(db, actorOf(req), req.body as never));
+
+  app.get('/api/employees/:id', { preHandler: allow('admin', 'user') },
+    async (req) => labour.getEmployee(db, actorOf(req), (req.params as { id: string }).id));
+
+  app.patch('/api/employees/:id', { preHandler: allow('admin') },
+    async (req) => {
+      await labour.updateEmployee(db, actorOf(req), (req.params as { id: string }).id,
+        req.body as never);
+      return { ok: true };
+    });
+
+  // Somebody leaving, or coming back. Never a delete: their past work is part
+  // of what production cost.
+  app.post('/api/employees/:id/active', { preHandler: allow('admin') },
+    async (req) => {
+      const body = req.body as { active: boolean; endedOn?: string | null };
+      await labour.setEmployeeActive(db, actorOf(req), (req.params as { id: string }).id,
+        body?.active !== false, body?.endedOn);
+      return { ok: true };
+    });
+
+  // Save retyping the people the system already knows. Safe to press twice.
+  app.post('/api/employees/import', { preHandler: allow('admin') },
+    async (req) => labour.importEmployeesFromLogins(db, actorOf(req)));
+
+  app.get('/api/labour', { preHandler: allow('admin', 'user') },
+    async (req) => {
+      const q = req.query as { employeeId?: string; from?: string; to?: string };
+      return labour.listLabourEntries(db, actorOf(req),
+        { employeeId: q.employeeId, from: q.from, to: q.to });
+    });
+
+  app.post('/api/labour', { preHandler: allow('admin', 'user') },
+    async (req) => labour.recordLabour(db, actorOf(req), req.body as never));
+
+  app.delete('/api/labour/:id', { preHandler: allow('admin') },
+    async (req) => {
+      await labour.deleteLabourEntry(db, actorOf(req), (req.params as { id: string }).id);
+      return { ok: true };
+    });
+
+  // What is owed for a period, per person. A date range rather than a fixed
+  // pay cycle - weekly, fortnightly and monthly are all just a range.
+  app.get('/api/labour/period', { preHandler: allow('admin', 'user') },
+    async (req) => {
+      const q = req.query as { from?: string; to?: string };
+      return labour.labourForPeriod(db, actorOf(req), { from: q.from, to: q.to });
+    });
+
+  app.get('/api/labour/months', { preHandler: allow('admin', 'user') },
+    async (req) => labour.labourByMonth(db, actorOf(req)));
 
   /* ---------------- registration and invitations ---------------- */
 

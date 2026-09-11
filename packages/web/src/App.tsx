@@ -39,6 +39,8 @@ import Register from './pages/Register';
 import SetPassword from './pages/SetPassword';
 import Applications from './pages/Applications';
 import Zones from './pages/Zones';
+import Employees from './pages/Employees';
+import EmployeeRecord from './pages/EmployeeRecord';
 import CustomerRecord from './pages/CustomerRecord';
 
 interface NavItem {
@@ -89,6 +91,7 @@ const NAV: NavItem[] = [
   // password belongs to everybody, which is why it is not in that section.
   { to: '/applications', label: 'Account requests', roles: ['admin', 'user'], section: 'Administration', badge: 'applications' },
   { to: '/zones', label: 'Delivery zones', roles: ['admin', 'user'], section: 'Administration' },
+  { to: '/employees', label: 'Employees', roles: ['admin', 'user'], section: 'Administration' },
   { to: '/users', label: 'Logins', roles: ['admin'], section: 'Administration' },
   { to: '/my-account', label: 'My password', roles: ['admin', 'user', 'driver'] },
 ];
@@ -249,6 +252,8 @@ function Shell({ session }: { session: Session }) {
           <Route path="/users" element={<Users session={session} />} />
           <Route path="/applications" element={<Applications session={session} />} />
           <Route path="/zones" element={<Zones session={session} />} />
+          <Route path="/employees" element={<Employees session={session} />} />
+          <Route path="/employees/:employeeId" element={<EmployeeRecord session={session} />} />
           <Route path="/my-account" element={<MyAccount session={session} />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>

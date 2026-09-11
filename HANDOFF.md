@@ -36,14 +36,16 @@ Working and verified end to end, in the browser as well as in tests:
 | Route composition & assignment | `routing.ts` — who owns a round, which orders, in what order. |
 | Payments screen | Record, reverse, reassign from one place. |
 | Auth & roles | 4 roles, enforced at route AND service layer. Per-install signing key. |
-| User administration | Logins screen (admin): add, edit, set role, reset password, withdraw access. My password for everyone. `active` checked on EVERY request, so withdrawing bites at once (migration 012). |
+| User administration | Logins screen (admin): search, add, edit, set role (a `user` can be promoted to `admin` in the Edit row), reset password, withdraw access. My password for everyone. `active` checked on EVERY request, so withdrawing bites at once (migration 012). |
 | Invitations | An invited account has an unusable password until a one-time link sets one. Only the token HASH is stored. The link is always returned on screen, because mail is usually not configured (migration 013). |
 | Customer registration | Public request form, Corporate or Individual. Creates an APPLICATION, never an account. The office approves and sets tier, zone and terms (migration 013). |
+| Dashboard | Rebuilt around "what needs me today?" — four figures, round progress, money owed sorted by how LATE rather than how large, and a needs-a-decision list. One `/api/dashboard` call. |
 | Customer portal | Four modules: place an order, my orders, standing orders, statements & invoices. Ordering, repeat orders, and cancelling what has not gone out. |
 | Delivery zones | Managed list, not free text. Rename carries customers and open sheets across (migration 014). |
 | Addresses | Line 1, line 2, town, parish. Composed into `delivery_address`, which stays what the stop and the invoice PDF read (migration 014). |
+| Employees & labour cost | Who works here, paid by the hour or by the trip, and the hours/trips recorded against them. Payroll totals for any date range. **Add from logins** creates a record per existing login — title from the role (`admin`→Manager, `user`→Employee, `driver`→Driver), rate left blank — and is safe to press twice. **Deliberately not wired into costing** (migration 015). A person is managed on their own record at `/employees/:id` — details, rate, and their own work history. |
 
-**Tests: 373 passing** — 68 pure domain (`packages/shared`), 305 API
+**Tests: 411 passing** — 68 pure domain (`packages/shared`), 343 API
 (`packages/api`, against real PostgreSQL via PGlite).
 
 ```bash
@@ -103,8 +105,15 @@ decision behind them:
 - **Automatic zone assignment.** Zones and structured addresses now exist to
   support it (preset areas, or geo-tagging from the address); nothing assigns
   automatically yet.
-- **The dashboard is nearly empty** — two panels. It is the screen the owner
-  opens every morning and it says almost nothing.
+- **Labour is not in the cost of a case.** The employees module records what
+  work costs (migration 015) but NOTHING reads it: a case of water still
+  costs what its materials cost, so every margin in the system reads better
+  than it is. Connecting it is a deliberate future decision, not a tidy-up —
+  it moves every margin at once. `labourByMonth()` is the figure that work
+  will read. A test in `labour.test.ts` asserts nothing reads the table yet,
+  so whoever connects it has to delete a test that says why it was not.
+- **Payroll is a total, not a payment.** The screen says what is owed for a
+  period; nothing pays it, deducts anything statutory, or files anything.
 - **Excel export is CSV.** It opens in Excel and carries the columns an
   accountant needs, but is not a real `.xlsx`. The invoice PDF *is* real now.
 - Route sequencing is the zone-template model by design — no geocoding.
@@ -165,6 +174,15 @@ because the balance column only means anything read down the page.
 
 ---
 
+**Where a person is managed.** Evert's division, and it decides where new
+screens go: a **customer** is managed in Customers, an **employee** in
+Employees, and **Logins** is about access only — who may sign in and as what.
+A name on a list opens the thing that manages it; do not scatter one person's
+management across two screens. Employee job titles follow the login role:
+`user` is an employee, `admin` a manager, `driver` a driver.
+
+---
+
 ## Invariants that must not be broken
 
 Load-bearing. Each corresponds to a real bug and is pinned by a named test.
@@ -214,6 +232,14 @@ Load-bearing. Each corresponds to a real bug and is pinned by a named test.
 16. **A stock count is refused once stock has moved under it**, because
     confirming writes the counted figure outright rather than applying a
     difference. The override is deliberate and is recorded on the count.
+17. **Work cannot be recorded against an employee whose rate is zero.** A zero
+    is a blank nobody has filled in — everyone brought across by "Add from
+    logins" starts that way — and costing their week at nothing would look
+    exactly like it had worked. Typing a rate on the entry is the way past it.
+18. **A labour entry keeps the rate it was costed at.** `rate_cents` is copied
+    from the employee when the work is recorded and never updated, so a pay
+    rise applies to work done after it and never restates an earlier week.
+    Same rule as invariant 8, same reason. Never "look up the current rate".
 
 ---
 
@@ -252,10 +278,17 @@ invitation, first sign-in, portal ordering, repeat orders and cancellation.
 **The money path has been walked** — order → delivery → invoice → payment —
 as of 2026-09-05.
 
-**Still to test: the statement.** It now has a real PDF document
-(`renderStatementPdf`) with a letterhead, the running ledger and an age
-analysis. The letterhead uses a logo file if one is present beside the
-launcher; with none it falls back to the wordmark in type.
+**The statement has been walked** — on screen and as a PDF, with the
+letterhead, the running ledger, the age analysis and the 5-gallon bottle
+account. Three bugs came out of it: the payment column showed the wrong
+invoice number, the total sat over the previous column, and dates printed a
+day early. All fixed.
+
+**Still to test: corrections** — reversal, reassignment, invoice edit and
+credit notes all pass in tests but have not been walked in the browser.
+
+**Untested because it has no data yet: employees.** The module is built and
+the tests pass; Evert is entering real people and their rates.
 
 ---
 
