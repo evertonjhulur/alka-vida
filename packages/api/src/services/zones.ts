@@ -12,7 +12,7 @@
  * in one transaction.
  */
 
-import type { Db } from '../db/index.ts';
+import type { Db, Queryable } from '../db/index.ts';
 import type { Actor } from './core.ts';
 import { audit, requireRole } from './core.ts';
 import { RuleViolation } from '@alka/shared';
@@ -21,11 +21,17 @@ export interface ZoneInput {
   name: string;
   /** Which areas this round covers. What automatic assignment will read. */
   covers?: string | null;
+  /** The days this round goes out, e.g. ['Mon','Thu']. Empty = any day. */
+  runDays?: string[] | null;
 }
+
+const WEEK = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+const cleanDays = (d: readonly string[] | null | undefined) =>
+  WEEK.filter((w) => (d ?? []).includes(w));
 
 export async function listZones(db: Db) {
   return db.query(
-    `SELECT z.id, z.name, z.covers, z.retired_at, z.sort_order,
+    `SELECT z.id, z.name, z.covers, z.retired_at, z.sort_order, z.run_days,
             (SELECT COUNT(*)::int FROM customers c
              WHERE c.delivery_zone = z.name AND c.active) AS customer_count
      FROM delivery_zones z
@@ -34,7 +40,7 @@ export async function listZones(db: Db) {
 }
 
 /** The zone must exist and still be in use before a customer is put on it. */
-export async function assertZoneUsable(db: Db, name: string): Promise<void> {
+export async function assertZoneUsable(db: Queryable, name: string): Promise<void> {
   const rows = await db.query<{ retired_at: string | null }>(
     `SELECT retired_at FROM delivery_zones WHERE name = $1`, [name],
   );
@@ -61,8 +67,9 @@ export async function createZone(
       `SELECT COALESCE(MAX(sort_order), 0) + 10 AS n FROM delivery_zones`,
     );
     const row = await t.one<{ id: string }>(
-      `INSERT INTO delivery_zones (name, covers, sort_order) VALUES ($1,$2,$3) RETURNING id`,
-      [name, input.covers?.trim() || null, Number(last.n)],
+      `INSERT INTO delivery_zones (name, covers, sort_order, run_days)
+       VALUES ($1,$2,$3,$4) RETURNING id`,
+      [name, input.covers?.trim() || null, Number(last.n), cleanDays(input.runDays)],
     );
     await audit(t, actor, 'create', 'DeliveryZone', row.id, name, input);
     return { id: row.id };
@@ -102,6 +109,10 @@ export async function updateZone(
       await t.query(
         `UPDATE delivery_sheets SET zone = $2 WHERE zone = $1 AND status = 'Open'`,
         [before.name, name]);
+    }
+    if ('runDays' in input) {
+      await t.query(`UPDATE delivery_zones SET run_days = $2 WHERE id = $1`,
+        [zoneId, cleanDays(input.runDays)]);
     }
     if ('covers' in input) {
       await t.query(`UPDATE delivery_zones SET covers = $2 WHERE id = $1`,

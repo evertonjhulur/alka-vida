@@ -558,3 +558,74 @@ drawn by `<DialogHost />` in the shell. All 14 remaining `window.confirm` /
 `window.prompt` calls (logins, price lists, raw materials, suppliers, stock
 count, employees, portal orders and repeats, standing orders, zones) use it,
 each with a button that says what it does ("Cancel the order" / "Keep it").
+
+### Everton's revision list, 30 Sep 2026
+
+Eighteen points from his testing, all built. Migration **016_sales_revisions**.
+Tests: 443 passing (68 shared + 375 API; `test/revisions.test.ts` is new).
+His decisions: weekly/monthly customers get ONE real invoice per period,
+**due on receipt**; quotes accepted both ways (office/portal and an email
+link); special prices AND price lists; extra addresses of both kinds.
+
+- **Customers** (`components/CustomerForm.tsx`, shared by Add customer and
+  the Details tab): business or person first; address in parts; zone is a
+  drop-down showing the days the round runs; several delivery days
+  (`customers.delivery_days`, first one still fills `default_delivery_day`);
+  invoice cycle (Every delivery / Weekly / Monthly); GCT exempt + certificate
+  no.; opt-outs for automatic statements and reminders. `updateCustomer` now
+  only touches the fields sent, and a field sent as null is cleared.
+- **Zones** carry `run_days`. New order defaults the date to the customer's
+  next delivery day and warns when a date is not a day the round runs.
+- **Other addresses** (`customer_addresses`, `components/CustomerExtras.tsx`):
+  one Billing address (invoices, statements, receipts and quotes are addressed
+  to it) and any number of Delivery addresses with their own zone. An order
+  carries `address_id`; `orders.deliveryTarget` decides the round and the
+  address on the stop. Standing orders keep the address.
+- **Special prices** (`customer_prices`): precedence is line override >
+  special price > price list > list price, in `resolveLines` and in
+  `customers.customerPrices` (what `/api/customers/:id/prices` returns).
+- **Discounts** may be an amount: `discount_fixed_cents` on orders, invoices,
+  quotes and discount approval requests. `computeTotals(lines, pct, applyGct,
+  fixedCents)` - a fixed amount wins and never goes below zero.
+- **GCT removable**: `gct_exempt` on orders, invoices and quotes (defaults to
+  the customer's). An admin can switch it on the invoice's "Change quantities,
+  discount or GCT".
+- **Unit prices** show and can be typed per line on New order and Change the
+  order (sent as the line override, which was always allowed for the office).
+- **Weekly/monthly invoicing** (`services/cycles.ts`): for those customers a
+  delivery or collection raises no invoice; stops keep `invoice_id` null and
+  collections have no `invoice_orders` row. `raiseCycleInvoices` groups by
+  Mon-Sun week or calendar month and raises one invoice per closed period,
+  lines tagged `delivered_on`/`order_id`/`reference`, each order's discount
+  carried as one fixed amount, `due_date = invoice_date`. Unattached money
+  (driver cash) is applied straight after. Runs hourly with the standing
+  orders; "Invoice now" on the customer page bills everything waiting.
+  `customer_orders.fulfilled_on` records the day goods left.
+- **Quotes** (`pages/Quotes.tsx`, `/quotes`): list, editor, view, PDF,
+  email with an accept link (`/#/quote/<token>`, public, token hash only),
+  mark sent/accepted/declined, convert to order at the quoted prices. Portal
+  has a Quotes tab. **Quotes now SHOW GCT** (previously none; the old test
+  asserting no GCT was rewritten on purpose). The accept link points at
+  PORTAL_URL, so it only works off this PC once the app is hosted.
+- **Credit notes** (`pages/CreditNotes.tsx`): by product (lines, GCT worked
+  out) or by amount (GCT split out of the total), against an invoice or just
+  the account; PDF and email. Office ones still go to Needs a decision; the
+  split is kept in the approval payload.
+- **Several invoices, one email** (customer Invoices tab tick boxes):
+  `documents.renderInvoicesPdf` (cover page + each invoice), `emailInvoices`.
+- **Receipts**: "Email a receipt" tick box on every payment form
+  (`sendReceipt`); receipt PDF from the customer's Payments tab. A receipt
+  that cannot be sent never undoes the payment. `payments.receipt_number`.
+- **Automatic emails** (`/auto-emails`, `paperwork.runAutomation`, hourly):
+  monthly statements, overdue reminders (first after N days, then every M),
+  optional auto-send of cycle invoices; `auto_emails` log stops repeats.
+  Switched OFF until an administrator turns them on; needs the mail account.
+- **Purchasing**: supplier products tagged GCT exempt / Env exempt
+  (`supplier_materials`); each PO line carries its own GCT and Environmental
+  Levy (0.375%, `system_settings.env_tax_rate_percent`). POs can be changed
+  or deleted until goods are received, closed after, downloaded as a PDF and
+  emailed to the supplier.
+- Fixed on the way: invoice PDF dates printed a day early (`String(Date)`);
+  ledger rows now give ISO dates.
+- All mail goes through `documents.sendMail`; tests catch it with
+  `setMailSinkForTests`.

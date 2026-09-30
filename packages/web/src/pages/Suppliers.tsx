@@ -9,6 +9,8 @@ interface SuppliedMaterial {
   unitOfMeasure: string;
   unitCostCents: number;
   priceBreaks: Array<{ minQty: number; unitCostCents: number }>;
+  gctExempt?: boolean;
+  envExempt?: boolean;
 }
 
 interface Supplier {
@@ -26,9 +28,13 @@ interface PriceForm {
   rawMaterialId: string;
   cost: string;
   breaks: Array<{ minQty: string; cost: string }>;
+  gctExempt: boolean;
+  envExempt: boolean;
 }
 
-const BLANK_PRICE: PriceForm = { rawMaterialId: '', cost: '', breaks: [{ minQty: '', cost: '' }] };
+const BLANK_PRICE: PriceForm = {
+  rawMaterialId: '', cost: '', breaks: [{ minQty: '', cost: '' }], gctExempt: false, envExempt: false,
+};
 
 /** A supplier's own details, as the add and edit forms hold them. */
 interface Details {
@@ -129,6 +135,8 @@ export default function Suppliers() {
                 minQty: String(b.minQty), cost: (b.unitCostCents / 100).toFixed(2),
               }))
             : [{ minQty: '', cost: '' }],
+          gctExempt: !!existing.gctExempt,
+          envExempt: !!existing.envExempt,
         }
       : { ...BLANK_PRICE, breaks: [{ minQty: '', cost: '' }] });
   }
@@ -142,6 +150,8 @@ export default function Suppliers() {
         priceBreaks: price.breaks
           .filter((b) => Number(b.minQty) > 0 && b.cost !== '')
           .map((b) => ({ minQty: Number(b.minQty), unitCostCents: toCents(b.cost) })),
+        gctExempt: price.gctExempt,
+        envExempt: price.envExempt,
       });
       setMsg('Pricing saved. Purchase orders raised from now on will use it.');
       setPricingFor(null);
@@ -252,6 +262,19 @@ export default function Suppliers() {
                    value={price.cost}
                    onChange={(e) => setPrice({ ...price, cost: e.target.value })} />
           </div>
+        </div>
+
+        <div className="row" style={{ marginBottom: 6 }}>
+          <label className="check">
+            <input type="checkbox" checked={price.gctExempt}
+                   onChange={(e) => setPrice({ ...price, gctExempt: e.target.checked })} />
+            GCT exempt (no GCT on this from them)
+          </label>
+          <label className="check">
+            <input type="checkbox" checked={price.envExempt}
+                   onChange={(e) => setPrice({ ...price, envExempt: e.target.checked })} />
+            Env exempt (no Environmental Levy)
+          </label>
         </div>
 
         <div className="small muted" style={{ marginBottom: 6 }}>
@@ -389,6 +412,7 @@ export default function Suppliers() {
               <tr>
                 <th>Material</th>
                 <th className="num">Standard cost</th>
+                <th>Taxes</th>
                 <th>Volume breaks</th>
                 <th />
               </tr>
@@ -398,6 +422,10 @@ export default function Suppliers() {
                 <tr key={m.rawMaterialId}>
                   <td>{m.name}</td>
                   <td className="num">{money(m.unitCostCents)} / {m.unitOfMeasure}</td>
+                  <td className="small">
+                    {m.gctExempt ? <span className="chip neutral">GCT exempt</span> : 'GCT'}{' '}
+                    {m.envExempt ? <span className="chip neutral">Env exempt</span> : '· Env'}
+                  </td>
                   <td className="small">
                     {m.priceBreaks.length === 0
                       ? <span className="muted">one price at any quantity</span>

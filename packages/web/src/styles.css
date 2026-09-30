@@ -1085,3 +1085,34 @@ button.big-go {
 .dialog-more { font-size: 14px; color: var(--muted); margin: 0 0 10px; white-space: pre-line; }
 .dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
 .dialog-actions button { min-width: 96px; }
+
+/* ---------- Revisions, 30 Sep 2026 ---------- */
+.field .label, span.label { display: block; font-size: 13px; color: var(--muted); margin-bottom: 4px; }
+.form-block { border: 1px solid var(--line); border-radius: 6px; padding: 10px 14px 4px; margin: 0 0 14px; }
+.form-block legend { font-size: 13px; font-weight: 600; padding: 0 6px; color: var(--ink); }
+.grow { flex: 1 1 220px; }
+.grow input, .grow select { width: 100%; }
+label.check { display: flex; align-items: center; gap: 8px; color: var(--ink); font-size: 14px; margin: 4px 0 8px; cursor: pointer; }
+label.check input { width: auto; margin: 0; }
+.day-picks { display: flex; flex-wrap: wrap; gap: 6px; }
+.day-pick {
+  min-width: 48px; padding: 6px 8px; background: #fff; color: var(--ink);
+  border: 1px solid var(--line-control); border-radius: 6px; font-weight: 500;
+}
+.day-pick:hover { background: #f1f5f9; filter: none; }
+.day-pick.runs { text-decoration: underline; text-underline-offset: 3px; }
+.day-pick.on { background: var(--brand); border-color: var(--brand); color: #fff; }
+.money-toggle { display: inline-flex; border: 1px solid var(--line-control); border-radius: 6px; overflow: hidden; vertical-align: middle; }
+.money-toggle button { border: 0; border-radius: 0; padding: 3px 9px; background: #fff; color: var(--ink); min-height: 0; font-size: 13px; }
+.money-toggle button.on { background: var(--brand); color: #fff; }
+.price-input { width: 96px; text-align: right; }
+.price-input.changed { border-color: var(--warn); background: var(--warn-bg); }
+.tick-col { width: 34px; }
+.tick-col input { width: auto; }
+.batch-bar {
+  display: flex; flex-wrap: wrap; gap: 8px; align-items: center; justify-content: space-between;
+  background: var(--info-bg); border: 1px solid #c3dcf5; border-radius: 6px; padding: 8px 12px; margin: 0 0 10px;
+}
+.addr-card { border: 1px solid var(--line); border-radius: 6px; padding: 10px 12px; margin-bottom: 8px; }
+.addr-card .chip { margin-left: 6px; }
+.quote-public { max-width: 760px; margin: 24px auto; padding: 0 16px; }

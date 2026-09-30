@@ -18,7 +18,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { Db } from '../db/index.ts';
 import type { Actor } from './core.ts';
-import { audit, requireRole, num } from './core.ts';
+import { audit, businessToday, requireRole, num } from './core.ts';
 import { RuleViolation } from '@alka/shared';
 import { getInvoiceDetail } from './invoices.ts';
 import { getStatement, type StatementFilter } from './ledger.ts';
@@ -110,8 +110,59 @@ export interface InvoiceDocument {
   customerEmail: string | null;
 }
 
-/** Build the invoice PDF. Pure rendering - it changes nothing. */
-export async function renderInvoicePdf(db: Db, invoiceId: string): Promise<InvoiceDocument> {
+/** A new letter-size document collecting into a Buffer. */
+function newDoc(): { doc: PDFKit.PDFDocument; finished: Promise<Buffer> } {
+  const doc = new PDFDocument({ size: 'LETTER', margin: 50 });
+  const chunks: Buffer[] = [];
+  doc.on('data', (c: Buffer) => chunks.push(c));
+  const finished = new Promise<Buffer>((resolve) => {
+    doc.on('end', () => resolve(Buffer.concat(chunks)));
+  });
+  return { doc, finished };
+}
+
+const fmtDate = (d: unknown) => {
+  // A DATE column arrives as a Date at UTC midnight; its ISO form is the day.
+  // String(date) would print it in local time, a day early (see migration 004).
+  const iso = d instanceof Date ? d.toISOString().slice(0, 10) : String(d ?? '').slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(iso)) return iso;
+  const [y, m, day] = iso.split('-').map(Number);
+  const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  return `${day} ${months[m - 1]} ${y}`;
+};
+
+/** Where to send paper for this customer: billing address if one is marked. */
+async function billTo(db: Db, customerId: string) {
+  const customer = await db.one<{
+    name: string; email: string | null; phone: string | null; contact_person: string | null;
+    delivery_address: string | null; payment_terms: string | null;
+    gct_exempt: boolean; gct_exempt_ref: string | null; invoice_cycle: string;
+  }>(
+    `SELECT name, email, phone, contact_person, delivery_address, payment_terms,
+            gct_exempt, gct_exempt_ref, invoice_cycle
+     FROM customers WHERE id = $1`, [customerId],
+  );
+  const billing = await db.maybeOne<{
+    label: string; address_line1: string | null; address_line2: string | null;
+    city: string | null; parish: string | null; contact_person: string | null;
+  }>(
+    `SELECT label, address_line1, address_line2, city, parish, contact_person
+     FROM customer_addresses WHERE customer_id = $1 AND active AND is_billing LIMIT 1`,
+    [customerId],
+  );
+  const address = billing
+    ? [billing.address_line1, billing.address_line2, billing.city, billing.parish]
+      .map((x) => (x ?? '').trim()).filter(Boolean).join(', ')
+    : customer.delivery_address;
+  return { ...customer, address, attention: billing?.contact_person ?? customer.contact_person };
+}
+
+/**
+ * Draw one invoice or credit note onto `doc`, starting on the current page.
+ * Shared by the single PDF and by several invoices sent together in one
+ * attachment, so they can never look different.
+ */
+async function drawInvoice(doc: PDFKit.PDFDocument, db: Db, invoiceId: string) {
   const detail = await getInvoiceDetail(db, invoiceId);
   if (!detail) throw new RuleViolation('that invoice no longer exists');
   const ledger = detail as unknown as {
@@ -119,71 +170,85 @@ export async function renderInvoicePdf(db: Db, invoiceId: string): Promise<Invoi
     dueDate: string | null; isCreditNote: boolean; grandTotalCents: number;
     amountPaidCents: number; balanceCents: number;
     subtotal_cents: number; discount_amount_cents: number; gct_cents: number;
+    discount_percent: number; discount_fixed_cents: number; gct_exempt: boolean;
+    cycle: string | null; period_from: string | null; period_to: string | null;
+    notes: string | null; credit_status: string;
   };
-
-  const customer = await db.one<{
-    name: string; email: string | null; phone: string | null;
-    delivery_address: string | null; payment_terms: string | null;
-  }>(
-    `SELECT name, email, phone, delivery_address, payment_terms
-     FROM customers WHERE id = $1`,
-    [ledger.customerId],
+  const customer = await billTo(db, ledger.customerId);
+  const orders = await db.query<{ order_number: string }>(
+    `SELECT o.order_number FROM invoice_orders io JOIN customer_orders o ON o.id = io.order_id
+     WHERE io.invoice_id = $1 ORDER BY o.order_number`, [invoiceId],
   );
-
-  const orders = await db.query<{ order_number: string; delivery_mode: string }>(
-    `SELECT o.order_number, o.delivery_mode
-     FROM invoice_orders io JOIN customer_orders o ON o.id = io.order_id
-     WHERE io.invoice_id = $1 ORDER BY o.order_number`,
-    [invoiceId],
+  const linked = await db.maybeOne<{ invoice_number: string }>(
+    `SELECT li.invoice_number FROM invoices i JOIN invoices li ON li.id = i.linked_invoice_id
+     WHERE i.id = $1`, [invoiceId],
   );
-
   const lines = (detail as unknown as { lines?: Array<Record<string, unknown>> }).lines ?? [];
+  const isCN = ledger.isCreditNote;
 
-  const doc = new PDFDocument({ size: 'LETTER', margin: 50 });
-  const chunks: Buffer[] = [];
-  doc.on('data', (c: Buffer) => chunks.push(c));
-  const finished = new Promise<Buffer>((resolve) => {
-    doc.on('end', () => resolve(Buffer.concat(chunks)));
-  });
-
-  /* letterhead — shared with the statement, so the two match */
   letterhead(doc, 50);
   doc.moveDown(1.2);
 
   doc.fillColor('#000').fontSize(16)
-    .text(ledger.isCreditNote ? 'CREDIT NOTE' : 'INVOICE', { align: 'right' });
+    .text(isCN ? 'CREDIT NOTE' : 'INVOICE', 50, doc.y, { align: 'right', width: 510 });
   doc.fontSize(10)
-    .text(ledger.invoiceNumber, { align: 'right' })
-    .text(`Date: ${String(ledger.invoiceDate).slice(0, 10)}`, { align: 'right' });
-  if (ledger.dueDate) {
-    doc.text(`Due: ${String(ledger.dueDate).slice(0, 10)}`, { align: 'right' });
+    .text(ledger.invoiceNumber, { align: 'right', width: 510 })
+    .text(`Date: ${fmtDate(ledger.invoiceDate)}`, { align: 'right', width: 510 });
+  if (!isCN) {
+    // A weekly or monthly invoice is due on receipt (Everton, 30 Sep 2026).
+    if (ledger.cycle || (ledger.dueDate && fmtDate(ledger.dueDate) === fmtDate(ledger.invoiceDate))) {
+      doc.text('Due: on receipt', { align: 'right', width: 510 });
+    } else if (ledger.dueDate) {
+      doc.text(`Due: ${fmtDate(ledger.dueDate)}`, { align: 'right', width: 510 });
+    }
+  }
+  if (ledger.period_from && ledger.period_to) {
+    doc.text(`Deliveries ${fmtDate(ledger.period_from)} to ${fmtDate(ledger.period_to)}`,
+      { align: 'right', width: 510 });
   }
   doc.moveDown(1);
 
-  /* who it is for */
-  doc.fontSize(9).fillColor('#555').text('BILL TO');
+  doc.fontSize(9).fillColor('#555').text(isCN ? 'CREDIT TO' : 'BILL TO', 50);
   doc.fontSize(11).fillColor('#000').text(customer.name);
   doc.fontSize(9).fillColor('#333');
-  if (customer.delivery_address) doc.text(customer.delivery_address);
+  if (customer.attention) doc.text(`Attn: ${customer.attention}`);
+  if (customer.address) doc.text(customer.address);
   if (customer.phone) doc.text(customer.phone);
   if (customer.email) doc.text(customer.email);
-  if (customer.payment_terms) doc.text(`Terms: ${customer.payment_terms}`);
-  if (orders.length > 0) {
+  if (!isCN && customer.payment_terms && !ledger.cycle) doc.text(`Terms: ${customer.payment_terms}`);
+  if (ledger.gct_exempt && customer.gct_exempt_ref) doc.text(`GCT exemption: ${customer.gct_exempt_ref}`);
+  if (isCN && linked) doc.text(`Against invoice ${linked.invoice_number}`);
+  if (!ledger.cycle && orders.length > 0) {
     doc.text(`Order${orders.length > 1 ? 's' : ''}: ${orders.map((o) => o.order_number).join(', ')}`);
   }
   doc.moveDown(1.2);
 
-  /* the goods */
   const left = 50;
-  const cols = { desc: left, qty: 330, unit: 400, total: 480 };
-  doc.fillColor('#000').fontSize(9);
-  doc.text('DESCRIPTION', cols.desc, doc.y, { continued: true });
-  doc.text('QTY', cols.qty, doc.y, { continued: true });
-  doc.text('UNIT', cols.unit, doc.y, { continued: true });
-  doc.text('AMOUNT', cols.total, doc.y);
-  doc.moveTo(left, doc.y + 2).lineTo(560, doc.y + 2).strokeColor('#ccc').stroke();
-  doc.moveDown(0.6);
+  const cycleLayout = lines.some((l) => l.delivered_on);
+  const cols = cycleLayout
+    ? { date: left, ref: 118, desc: 180, qty: 340, unit: 400, total: 480 }
+    : { date: 0, ref: 0, desc: left, qty: 330, unit: 400, total: 480 };
+  const header = () => {
+    const y = doc.y;
+    doc.fillColor('#555').fontSize(8);
+    if (cycleLayout) {
+      doc.text('DELIVERED', cols.date, y).text('ORDER', cols.ref, y);
+    }
+    doc.text('DESCRIPTION', cols.desc, y)
+      .text('QTY', cols.qty, y)
+      .text('UNIT PRICE', cols.unit, y, { width: 70, align: 'right' })
+      .text('AMOUNT', cols.total, y, { width: 80, align: 'right' });
+    doc.moveTo(left, doc.y + 2).lineTo(560, doc.y + 2).strokeColor('#ccc').stroke();
+    doc.moveDown(0.6);
+  };
+  header();
 
+  if (lines.length === 0 && isCN) {
+    const y = doc.y;
+    doc.fontSize(9).fillColor('#000')
+      .text(ledger.notes || 'Credit', cols.desc, y, { width: 270 });
+    doc.moveDown(0.4);
+  }
   for (const l of lines) {
     const cases = num(l.cases as number);
     const loose = num(l.loose_bottles as number);
@@ -191,45 +256,137 @@ export async function renderInvoicePdf(db: Db, invoiceId: string): Promise<Invoi
     const unit = cases > 0
       ? num(l.price_per_case_cents as number)
       : num(l.price_per_bottle_cents as number);
+    if (doc.y > 680) { doc.addPage(); doc.y = 50; header(); }
     const y = doc.y;
-    doc.fontSize(9)
-      .text(String(l.product_name ?? ''), cols.desc, y, { width: 270 })
+    doc.fontSize(9).fillColor('#000');
+    if (cycleLayout) {
+      doc.text(l.delivered_on ? fmtDate(l.delivered_on) : '', cols.date, y, { width: 64 })
+        .text(String(l.reference ?? ''), cols.ref, y, { width: 60 });
+    }
+    doc.text(String(l.product_name ?? ''), cols.desc, y, { width: cols.qty - cols.desc - 8 })
       .text(qty, cols.qty, y)
-      .text(cash(unit), cols.unit, y)
-      .text(cash(num(l.line_total_cents as number)), cols.total, y);
-    doc.moveDown(0.4);
+      .text(cash(unit), cols.unit, y, { width: 70, align: 'right' })
+      .text(cash(num(l.line_total_cents as number)), cols.total, y, { width: 80, align: 'right' });
+    doc.y = Math.max(doc.y, y + 12);
+    doc.moveDown(0.3);
   }
 
   doc.moveDown(0.8);
-  const money = (label: string, value: number, bold = false) => {
+  const sign = isCN ? -1 : 1;
+  const row = (label: string, value: number, bold = false) => {
+    if (doc.y > 700) { doc.addPage(); doc.y = 50; }
     const y = doc.y;
-    doc.fontSize(bold ? 11 : 9)
-      .text(label, cols.unit - 80, y, { width: 150, align: 'right' })
+    doc.fillColor('#000').fontSize(bold ? 11 : 9)
+      .text(label, cols.unit - 150, y, { width: 220, align: 'right' })
       .text(cash(value), cols.total, y, { width: 80, align: 'right' });
     doc.moveDown(0.35);
   };
-  money('Subtotal', num(ledger.subtotal_cents));
+  row('Subtotal', sign * num(ledger.subtotal_cents));
   if (num(ledger.discount_amount_cents) > 0) {
-    money('Discount', -num(ledger.discount_amount_cents));
+    const how = num(ledger.discount_fixed_cents) > 0 ? 'Discount'
+      : `Discount ${num(ledger.discount_percent)}%`;
+    row(how, -num(ledger.discount_amount_cents));
   }
-  money('GCT 15%', num(ledger.gct_cents));
-  money('Total', ledger.grandTotalCents, true);
-  money('Paid', ledger.amountPaidCents);
-  money('Balance due', ledger.balanceCents, true);
+  row(ledger.gct_exempt ? 'GCT (exempt)' : 'GCT 15%', sign * num(ledger.gct_cents));
+  if (isCN) {
+    row('Credit total', -ledger.grandTotalCents, true);
+    if (ledger.credit_status === 'Pending') {
+      doc.fontSize(8).fillColor('#8a5c00').text('Awaiting approval - not yet applied to the account.',
+        cols.desc, doc.y, { width: 510 - cols.desc + 50, align: 'right' });
+    }
+  } else {
+    row('Total', ledger.grandTotalCents, true);
+    row('Paid', ledger.amountPaidCents);
+    row('Balance due', ledger.balanceCents, true);
+  }
 
   doc.moveDown(2).fontSize(8).fillColor('#777')
-    .text(`${BRAND.company}  ·  All amounts in Jamaican dollars, GCT inclusive.`,
+    .text(`${BRAND.company}  ·  All amounts in Jamaican dollars${ledger.gct_exempt ? '' : ', GCT inclusive'}.`,
       left, doc.y, { align: 'center', width: 510 });
 
-  doc.end();
-  const pdf = await finished;
+  return { invoiceNumber: ledger.invoiceNumber, customerName: customer.name, customerEmail: customer.email };
+}
 
+/** Build the invoice (or credit note) PDF. Pure rendering - it changes nothing. */
+export async function renderInvoicePdf(db: Db, invoiceId: string): Promise<InvoiceDocument> {
+  const { doc, finished } = newDoc();
+  const info = await drawInvoice(doc, db, invoiceId);
+  doc.end();
+  return { filename: `${info.invoiceNumber}.pdf`, pdf: await finished, ...info };
+}
+
+/**
+ * Several invoices in ONE PDF, one after another, each on its own page
+ * (Everton, 30 Sep 2026, point 16: select open invoices, send one email with
+ * one attachment). A short cover page lists them and the total.
+ */
+export async function renderInvoicesPdf(
+  db: Db, invoiceIds: readonly string[],
+): Promise<{ filename: string; pdf: Buffer; customerId: string; customerName: string;
+             customerEmail: string | null; numbers: string[]; totalDueCents: number }> {
+  const ids = [...new Set(invoiceIds)];
+  if (ids.length === 0) throw new RuleViolation('choose at least one invoice');
+  const rows = await db.query<{
+    invoice_id: string; invoice_number: string; customer_id: string; invoice_date: string;
+    due_date: string | null; grand_total_cents: number; balance_cents: number; is_credit_note: boolean;
+  }>(
+    `SELECT invoice_id, invoice_number, customer_id, invoice_date::text AS invoice_date,
+            due_date::text AS due_date, grand_total_cents, balance_cents, is_credit_note
+     FROM invoice_ledger WHERE invoice_id = ANY($1::uuid[])
+     ORDER BY invoice_date, invoice_number`, [ids],
+  );
+  if (rows.length !== ids.length) throw new RuleViolation('one of those invoices no longer exists');
+  const customerIds = new Set(rows.map((r) => r.customer_id));
+  if (customerIds.size > 1) throw new RuleViolation('invoices sent together must all be for one customer');
+  const customer = await billTo(db, rows[0].customer_id);
+
+  const { doc, finished } = newDoc();
+  letterhead(doc, 50);
+  doc.moveDown(1.2);
+  doc.fillColor('#000').fontSize(16).text('INVOICES ENCLOSED', 50, doc.y, { align: 'right', width: 510 });
+  doc.fontSize(10).text(fmtDate(businessToday()), { align: 'right', width: 510 });
+  doc.moveDown(1);
+  doc.fontSize(11).text(customer.name, 50);
+  doc.fontSize(9).fillColor('#333');
+  if (customer.address) doc.text(customer.address);
+  doc.moveDown(1.2);
+  const y0 = doc.y;
+  doc.fontSize(8).fillColor('#555')
+    .text('INVOICE', 50, y0).text('DATE', 160, y0).text('DUE', 260, y0)
+    .text('TOTAL', 360, y0, { width: 90, align: 'right' })
+    .text('STILL OWED', 460, y0, { width: 100, align: 'right' });
+  doc.moveTo(50, doc.y + 2).lineTo(560, doc.y + 2).strokeColor('#ccc').stroke();
+  doc.moveDown(0.6);
+  let due = 0;
+  for (const r of rows) {
+    const y = doc.y;
+    doc.fontSize(9).fillColor('#000')
+      .text(r.invoice_number, 50, y).text(fmtDate(r.invoice_date), 160, y)
+      .text(r.due_date ? fmtDate(r.due_date) : '-', 260, y)
+      .text(cash(num(r.grand_total_cents)), 360, y, { width: 90, align: 'right' })
+      .text(cash(num(r.balance_cents)), 460, y, { width: 100, align: 'right' });
+    doc.moveDown(0.4);
+    due += num(r.balance_cents);
+  }
+  doc.moveDown(0.6);
+  const yt = doc.y;
+  doc.fontSize(11).text('Total still owed', 300, yt, { width: 150, align: 'right' })
+    .text(cash(due), 460, yt, { width: 100, align: 'right' });
+
+  for (const r of rows) {
+    doc.addPage();
+    await drawInvoice(doc, db, r.invoice_id);
+  }
+  doc.end();
+  const numbers = rows.map((r) => r.invoice_number);
   return {
-    filename: `${ledger.invoiceNumber}.pdf`,
-    pdf,
-    invoiceNumber: ledger.invoiceNumber,
+    filename: `Invoices-${customer.name.replace(/[^A-Za-z0-9]+/g, '-')}-${numbers.length}.pdf`,
+    pdf: await finished,
+    customerId: rows[0].customer_id,
     customerName: customer.name,
     customerEmail: customer.email,
+    numbers,
+    totalDueCents: due,
   };
 }
 
@@ -260,14 +417,9 @@ export async function renderStatementPdf(
 ): Promise<StatementDocument> {
   const statement = await getStatement(db, customerId, opts);
 
-  const customer = await db.one<{
-    name: string; email: string | null; phone: string | null;
-    delivery_address: string | null; payment_terms: string | null;
-  }>(
-    `SELECT name, email, phone, delivery_address, payment_terms
-     FROM customers WHERE id = $1`,
-    [customerId],
-  );
+  // The billing address when one is marked, the main address otherwise.
+  const bt = await billTo(db, customerId);
+  const customer = { ...bt, delivery_address: bt.address };
 
   /*
    * Age analysis, from the invoice ledger rather than the statement stream:
@@ -514,6 +666,24 @@ export async function renderStatementPdf(
   };
 }
 
+/* ================================================================== */
+/* Sending                                                             */
+/* ================================================================== */
+
+export interface MailMessage {
+  to: string;
+  subject: string;
+  text: string;
+  attachments?: Array<{ filename: string; content: Buffer }>;
+}
+
+/**
+ * Tests (and only tests) can catch outgoing mail instead of needing a real
+ * mail account. Never set by the app itself.
+ */
+let mailSink: ((m: MailMessage) => void | Promise<void>) | null = null;
+export function setMailSinkForTests(fn: typeof mailSink): void { mailSink = fn; }
+
 /**
  * Is sending set up on this machine?
  *
@@ -521,65 +691,73 @@ export async function renderStatementPdf(
  * offering something that will fail.
  */
 export function mailConfigured(): boolean {
+  if (mailSink) return true;
   return !!(process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS);
 }
 
-/**
- * Email an invoice to the customer on file.
- *
- * Marks the invoice Sent only once the mail server has accepted it, so an
- * invoice is never recorded as sent when it was not.
- */
+const NOT_SET_UP =
+  'email is not set up on this machine yet. Add the Alka Vida mail account '
+  + 'details to the settings file, restart, and the Send button will work. '
+  + 'Until then, download the PDF and attach it yourself.';
+
+/** The one place mail leaves the building. */
+export async function sendMail(m: MailMessage): Promise<void> {
+  if (!mailConfigured()) throw new RuleViolation(NOT_SET_UP);
+  if (mailSink) { await mailSink(m); return; }
+  const port = Number(process.env.SMTP_PORT ?? 587);
+  const transport = createTransport({
+    host: process.env.SMTP_HOST,
+    port,
+    // 465 is implicit TLS; 587 upgrades with STARTTLS.
+    secure: port === 465,
+    auth: { user: process.env.SMTP_USER!, pass: process.env.SMTP_PASS! },
+  });
+  await transport.sendMail({
+    from: process.env.MAIL_FROM ?? process.env.SMTP_USER,
+    to: m.to, subject: m.subject, text: m.text, attachments: m.attachments,
+  });
+}
+
+/** The address to use, or a plain refusal naming who has none. */
+function recipient(override: string | null | undefined, onFile: string | null, who: string): string {
+  const to = (override ?? onFile ?? '').trim();
+  if (!to) {
+    throw new RuleViolation(
+      `${who} has no email address on file. Add one to their record, or type an address to send this to.`,
+    );
+  }
+  return to;
+}
+
+const signOff = `\n\nThank you for your business.\n\n${BRAND.company}\n`;
+
 /**
  * Send a customer their statement.
  *
- * Mirrors emailInvoice deliberately, including refusing plainly when no mail
- * account is set up rather than failing somewhere in the middle. Unlike an
- * invoice, sending a statement changes nothing about the records - it is a
- * copy of what is already true - so there is no lifecycle to update, only an
- * audit line saying it went.
+ * Unlike an invoice, sending a statement changes nothing about the records -
+ * it is a copy of what is already true - so there is no lifecycle to update,
+ * only an audit line saying it went.
  */
 export async function emailStatement(
   db: Db,
   actor: Actor,
   customerId: string,
   opts: { from?: string | null; to?: string | null;
-          filter?: StatementFilter; sendTo?: string | null } = {},
+          filter?: StatementFilter; sendTo?: string | null; note?: string | null;
+          subject?: string | null } = {},
 ): Promise<{ sentTo: string; customerName: string }> {
   requireRole(actor, 'admin', 'user');
-
-  if (!mailConfigured()) {
-    throw new RuleViolation(
-      'email is not set up on this machine yet. Add the Alka Vida mail account '
-      + 'details to the settings file, restart, and the Send button will work. '
-      + 'Until then, download the PDF and attach it yourself.',
-    );
-  }
+  if (!mailConfigured()) throw new RuleViolation(NOT_SET_UP);
 
   const doc = await renderStatementPdf(db, customerId,
     { from: opts.from, to: opts.to, filter: opts.filter });
-  const to = (opts.sendTo ?? doc.customerEmail ?? '').trim();
-  if (!to) {
-    throw new RuleViolation(
-      `${doc.customerName} has no email address on file. Add one to the customer `
-      + 'record, or type an address to send this to.',
-    );
-  }
+  const to = recipient(opts.sendTo, doc.customerEmail, doc.customerName);
 
-  const transport = createTransport({
-    host: process.env.SMTP_HOST,
-    port: Number(process.env.SMTP_PORT ?? 587),
-    secure: Number(process.env.SMTP_PORT ?? 587) === 465,
-    auth: { user: process.env.SMTP_USER!, pass: process.env.SMTP_PASS! },
-  });
-
-  await transport.sendMail({
-    from: process.env.MAIL_FROM ?? process.env.SMTP_USER,
+  await sendMail({
     to,
-    subject: `${BRAND.name} statement of account`,
-    text:
-      `Good day,\n\nPlease find attached your statement of account from `
-      + `${BRAND.name}.\n\nThank you for your business.\n\n${BRAND.company}\n`,
+    subject: opts.subject ?? `${BRAND.name} statement of account`,
+    text: `Good day,\n\nPlease find attached your statement of account from ${BRAND.name}.`
+      + (opts.note ? `\n\n${opts.note}` : '') + signOff,
     attachments: [{ filename: doc.filename, content: doc.pdf }],
   });
 
@@ -588,10 +766,15 @@ export async function emailStatement(
       statementEmailedTo: to,
     });
   });
-
   return { sentTo: to, customerName: doc.customerName };
 }
 
+/**
+ * Email one invoice or credit note to the customer on file.
+ *
+ * Marks it Sent only once the mail server has accepted it, so an invoice is
+ * never recorded as sent when it was not.
+ */
 export async function emailInvoice(
   db: Db,
   actor: Actor,
@@ -599,53 +782,71 @@ export async function emailInvoice(
   overrideTo?: string | null,
 ): Promise<{ sentTo: string; invoiceNumber: string }> {
   requireRole(actor, 'admin', 'user');
-
-  if (!mailConfigured()) {
-    throw new RuleViolation(
-      'email is not set up on this machine yet. Add the Alka Vida mail account ' +
-      'details to the settings file, restart, and the Send button will work. ' +
-      'Until then, download the PDF and attach it yourself.',
-    );
-  }
+  if (!mailConfigured()) throw new RuleViolation(NOT_SET_UP);
 
   const doc = await renderInvoicePdf(db, invoiceId);
-  const to = (overrideTo ?? doc.customerEmail ?? '').trim();
-  if (!to) {
-    throw new RuleViolation(
-      `${doc.customerName} has no email address on file. Add one to the customer ` +
-      `record, or type an address to send this to.`,
-    );
-  }
+  const to = recipient(overrideTo, doc.customerEmail, doc.customerName);
+  const isCN = doc.invoiceNumber.startsWith('CN');
 
-  const transport = createTransport({
-    host: process.env.SMTP_HOST,
-    port: Number(process.env.SMTP_PORT ?? 587),
-    // 465 is implicit TLS; 587 upgrades with STARTTLS.
-    secure: Number(process.env.SMTP_PORT ?? 587) === 465,
-    auth: { user: process.env.SMTP_USER!, pass: process.env.SMTP_PASS! },
-  });
-
-  await transport.sendMail({
-    from: process.env.MAIL_FROM ?? process.env.SMTP_USER,
+  await sendMail({
     to,
-    subject: `${BRAND.name} invoice ${doc.invoiceNumber}`,
-    text:
-      `Good day,\n\nPlease find attached invoice ${doc.invoiceNumber} from ` +
-      `${BRAND.name}.\n\nThank you for your business.\n\n${BRAND.company}\n`,
+    subject: `${BRAND.name} ${isCN ? 'credit note' : 'invoice'} ${doc.invoiceNumber}`,
+    text: `Good day,\n\nPlease find attached ${isCN ? 'credit note' : 'invoice'} `
+      + `${doc.invoiceNumber} from ${BRAND.name}.` + signOff,
     attachments: [{ filename: doc.filename, content: doc.pdf }],
   });
 
-  // Only now is it true to say it was sent.
   await db.tx(async (t) => {
     await t.query(
-      `UPDATE invoices SET lifecycle = 'Sent', sent_date = business_today()
+      `UPDATE invoices SET lifecycle = CASE WHEN lifecycle = 'Open' THEN 'Sent' ELSE lifecycle END,
+         sent_date = business_today()
        WHERE id = $1 AND lifecycle <> 'Cancelled'`,
       [invoiceId],
     );
-    await audit(t, actor, 'update', 'Invoice', invoiceId, doc.invoiceNumber, {
-      emailedTo: to,
-    });
+    await audit(t, actor, 'update', 'Invoice', invoiceId, doc.invoiceNumber, { emailedTo: to });
   });
-
   return { sentTo: to, invoiceNumber: doc.invoiceNumber };
 }
+
+/**
+ * Several of one customer's invoices in ONE email with ONE attachment
+ * (Everton, 30 Sep 2026, point 16). Each is marked Sent.
+ */
+export async function emailInvoices(
+  db: Db,
+  actor: Actor,
+  invoiceIds: readonly string[],
+  opts: { to?: string | null; note?: string | null } = {},
+): Promise<{ sentTo: string; invoiceNumbers: string[]; totalDueCents: number }> {
+  requireRole(actor, 'admin', 'user');
+  if (!mailConfigured()) throw new RuleViolation(NOT_SET_UP);
+  const doc = await renderInvoicesPdf(db, invoiceIds);
+  const to = recipient(opts.to, doc.customerEmail, doc.customerName);
+  const list = doc.numbers.join(', ');
+
+  await sendMail({
+    to,
+    subject: `${BRAND.name} invoices ${doc.numbers.length > 3
+      ? `(${doc.numbers.length})` : list}`,
+    text: `Good day,\n\nPlease find attached ${doc.numbers.length === 1 ? 'invoice' : 'invoices'} `
+      + `${list} from ${BRAND.name}, in one PDF.\n\nTotal still owed on these: ${cash(doc.totalDueCents)}.`
+      + (opts.note ? `\n\n${opts.note}` : '') + signOff,
+    attachments: [{ filename: doc.filename, content: doc.pdf }],
+  });
+
+  await db.tx(async (t) => {
+    for (const id of invoiceIds) {
+      await t.query(
+        `UPDATE invoices SET lifecycle = CASE WHEN lifecycle = 'Open' THEN 'Sent' ELSE lifecycle END,
+           sent_date = business_today()
+         WHERE id = $1 AND lifecycle <> 'Cancelled'`, [id],
+      );
+    }
+    await audit(t, actor, 'update', 'Customer', doc.customerId, doc.customerName, {
+      invoicesEmailedTogether: doc.numbers, emailedTo: to,
+    });
+  });
+  return { sentTo: to, invoiceNumbers: doc.numbers, totalDueCents: doc.totalDueCents };
+}
+
+export { cash as formatCash, newDoc, fmtDate, billTo, letterhead, BRAND, recipient, signOff };

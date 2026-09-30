@@ -18,7 +18,7 @@ import { audit, num, requireRole } from './core.ts';
 import type { Cents, PaymentMethod, StopOutcome } from '@alka/shared';
 import { RuleViolation, validateAllocation, assertQuantityShape, totalBottles } from '@alka/shared';
 import { createInvoice, openInvoicesForCustomer } from './invoices.ts';
-import { refreshOrderStatus, summariseOrderLines } from './orders.ts';
+import { deliveryTarget, refreshOrderStatus, summariseOrderLines } from './orders.ts';
 import { applyDeliveryMovement } from './bottles.ts';
 
 export interface DeliveredLineInput {
@@ -118,8 +118,10 @@ export async function markStop(
       await writeDeliveredQuantities(t, input.stopId, stop.order_id, input.deliveredLines);
       await moveBottlePool(t, actor, input.stopId, stop.customer_id, input);
 
-      // An invoice is generated only here, and only once per stop.
-      if (!invoiceId) {
+      // An invoice is generated only here, and only once per stop - unless the
+      // customer is billed weekly or monthly, when the delivery waits on the
+      // account for the cycle invoice (cycles.ts) instead.
+      if (!invoiceId && !(await billedOnCycle(t, stop.customer_id))) {
         const created = await invoiceFromDelivery(t, actor, stop.order_id, stop.customer_id);
         invoiceId = created.id;
         invoiceNumber = created.invoiceNumber;
@@ -127,6 +129,11 @@ export async function markStop(
           [input.stopId, invoiceId]);
       }
       orderStatus = await refreshOrderStatus(t, stop.order_id);
+      await t.query(
+        `UPDATE customer_orders o SET fulfilled_on = ds.delivery_date
+         FROM delivery_sheets ds WHERE o.id = $1 AND ds.id = $2`,
+        [stop.order_id, stop.delivery_sheet_id],
+      );
     }
 
     const amountOwedCents = await amountOwedForStop(t, input.stopId);
@@ -197,6 +204,14 @@ async function writeDeliveredQuantities(
   }
 }
 
+/** Is this customer invoiced once a week or month rather than per delivery? */
+export async function billedOnCycle(t: Queryable, customerId: string): Promise<boolean> {
+  const c = await t.one<{ invoice_cycle: string }>(
+    `SELECT invoice_cycle FROM customers WHERE id = $1`, [customerId],
+  );
+  return c.invoice_cycle === 'Weekly' || c.invoice_cycle === 'Monthly';
+}
+
 /** Build the invoice from what was actually delivered, not what was ordered. */
 async function invoiceFromDelivery(
   t: Queryable,
@@ -218,14 +233,19 @@ async function invoiceFromDelivery(
     throw new RuleViolation('cannot invoice a delivery with no delivered quantities');
   }
 
-  const order = await t.one<{ discount_percent: number; order_number: string }>(
-    `SELECT discount_percent, order_number FROM customer_orders WHERE id = $1`, [orderId],
+  const order = await t.one<{
+    discount_percent: number; order_number: string; discount_fixed_cents: number; gct_exempt: boolean;
+  }>(
+    `SELECT discount_percent, order_number, discount_fixed_cents, gct_exempt
+     FROM customer_orders WHERE id = $1`, [orderId],
   );
 
   return createInvoice(t, actor, {
     customerId,
     orderIds: [orderId],
     discountPercent: num(order.discount_percent),
+    discountFixedCents: num(order.discount_fixed_cents),
+    gctExempt: order.gct_exempt,
     notes: `Delivery of ${order.order_number}`,
     lines: lines.map((l) => ({
       productId: l.product_id,
@@ -324,7 +344,7 @@ export async function getStopForDriver(db: Db, stopId: string) {
   const stop = await db.maybeOne<Record<string, unknown>>(
     // Where the stop sits on its round ("Stop 3 of 5", same order as the
     // round page), the customer's terms, and their standing notes.
-    `SELECT s.*, c.name AS customer_name, c.payment_terms, c.notes AS customer_notes,
+    `SELECT s.*, c.name AS customer_name, c.payment_terms, c.notes AS customer_notes, c.invoice_cycle,
             d.zone AS sheet_zone,
             (SELECT COUNT(*) FROM delivery_stops x
               WHERE x.delivery_sheet_id = s.delivery_sheet_id)::int AS stop_count,
@@ -389,8 +409,11 @@ export async function addOrderToSheet(
     if (sheet.status !== 'Open') {
       throw new RuleViolation('orders can only be added to an Open delivery sheet');
     }
-    const order = await t.one<{ customer_id: string; order_number: string; status: string }>(
-      `SELECT customer_id, order_number, status FROM customer_orders WHERE id = $1`, [orderId],
+    const order = await t.one<{
+      customer_id: string; order_number: string; status: string; address_id: string | null;
+    }>(
+      `SELECT customer_id, order_number, status, address_id FROM customer_orders WHERE id = $1`,
+      [orderId],
     );
     if (order.status === 'Delivered' || order.status === 'Cancelled') {
       throw new RuleViolation(
@@ -413,12 +436,7 @@ export async function addOrderToSheet(
         `${elsewhere.delivery_date}. Take it off that route first.`,
       );
     }
-    const customer = await t.one<{
-      delivery_address: string | null; phone: string | null; route_sequence: number;
-    }>(
-      `SELECT delivery_address, phone, route_sequence FROM customers WHERE id = $1`,
-      [order.customer_id],
-    );
+    const customer = await deliveryTarget(t, order.customer_id, order.address_id);
 
     // Without this the driver gets a stop with no idea what to put on the
     // van - the auto-routed path has always filled it, the manual one did not.

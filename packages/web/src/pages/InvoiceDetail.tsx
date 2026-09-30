@@ -16,6 +16,7 @@ interface Line {
   id: string; product_id: string; product_name: string; cases: number;
   loose_bottles: number; bottles_per_case: number; line_total_cents: number;
   price_per_case_cents: number; price_per_bottle_cents: number;
+  delivered_on?: string | null; reference?: string | null;
 }
 interface Payment {
   id: string; amount_cents: number; payment_date: string; method: string;
@@ -48,6 +49,8 @@ interface Invoice {
   created_at: string;
   subtotal_cents: number; discount_amount_cents: number; discount_status: string;
   discount_percent: number; is_credit_note: boolean;
+  discount_fixed_cents?: number; gct_exempt?: boolean; cycle?: string | null;
+  period_from?: string | null; period_to?: string | null; credit_status?: string;
   gct_cents: number; grandTotalCents: number; amountPaidCents: number;
   balanceCents: number; status: string; lines: Line[]; payments: Payment[];
   // Optional on purpose: an older server does not send these, and a screen
@@ -83,12 +86,13 @@ export default function InvoiceDetail({ session }: { session: Session }) {
   const [mailReady, setMailReady] = useState(false);
   const [panel, setPanel] = useState<Panel>(null);
   const [moreOpen, setMoreOpen] = useState(false);
-  const [pay, setPay] = useState({ amount: '', method: 'Cash', reference: '' });
+  const [pay, setPay] = useState({ amount: '', method: 'Cash', reference: '', receipt: true });
   const [mailTo, setMailTo] = useState('');
-  const [disc, setDisc] = useState({ percent: '', reason: '' });
+  const [disc, setDisc] = useState({ percent: '', reason: '', as: '%' as '%' | '$' });
   const [credit, setCredit] = useState({ amount: '', reason: '' });
-  const [edit, setEdit] = useState<{ discount: string; reason: string; qty: Record<string, string> }>(
-    { discount: '', reason: '', qty: {} });
+  const [edit, setEdit] = useState<{
+    discount: string; as: '%' | '$'; gct: boolean; reason: string; qty: Record<string, string>;
+  }>({ discount: '', as: '%', gct: true, reason: '', qty: {} });
   const [reversing, setReversing] = useState<{ id: string; reason: string } | null>(null);
 
   async function load() { setInv(await api.get<Invoice>(`/api/invoices/${invoiceId}`)); }
@@ -123,13 +127,15 @@ export default function InvoiceDetail({ session }: { session: Session }) {
   const open = (p: Panel) => {
     setMoreOpen(false); setError(null);
     if (p === panel) { setPanel(null); return; }
-    if (p === 'pay') setPay({ amount: (i.balanceCents / 100).toFixed(2), method: 'Cash', reference: '' });
+    if (p === 'pay') setPay({ amount: (i.balanceCents / 100).toFixed(2), method: 'Cash', reference: '', receipt: true });
     if (p === 'email') setMailTo(i.customer?.email ?? '');
-    if (p === 'discount') setDisc({ percent: '', reason: '' });
+    if (p === 'discount') setDisc({ percent: '', reason: '', as: '%' });
     if (p === 'credit') setCredit({ amount: '', reason: '' });
     if (p === 'edit') {
+      const fixed = Number(i.discount_fixed_cents) || 0;
       setEdit({
-        discount: String(Number(i.discount_percent) || 0), reason: '',
+        discount: fixed > 0 ? (fixed / 100).toFixed(2) : String(Number(i.discount_percent) || 0),
+        as: fixed > 0 ? '$' : '%', gct: !i.gct_exempt, reason: '',
         qty: Object.fromEntries(i.lines.map((l) => [
           l.id, String(Number(l.bottles_per_case) > 0 ? l.cases : l.loose_bottles)])),
       });
@@ -155,14 +161,18 @@ export default function InvoiceDetail({ session }: { session: Session }) {
   const recordPayment = () => act(async () => {
     const cents = toCents(pay.amount);
     const toThis = Math.min(cents, Math.max(i.balanceCents, 0));
-    await api.post('/api/payments/receive', {
-      customerId: i.customerId, amountCents: cents, method: pay.method,
-      reference: pay.reference || null,
-      allocations: toThis > 0 ? [{ invoiceId: i.invoiceId, amountCents: toThis }] : [],
-    });
-    return cents > toThis
+    const r = await api.post<{ receipt?: { sentTo: string; receiptNumber: string }; receiptError?: string }>(
+      '/api/payments/receive', {
+        customerId: i.customerId, amountCents: cents, method: pay.method,
+        reference: pay.reference || null,
+        allocations: toThis > 0 ? [{ invoiceId: i.invoiceId, amountCents: toThis }] : [],
+        sendReceipt: pay.receipt,
+      });
+    const receipt = r.receipt ? ` Receipt ${r.receipt.receiptNumber} emailed to ${r.receipt.sentTo}.`
+      : r.receiptError ? ` No receipt was sent: ${r.receiptError}` : '';
+    return (cents > toThis
       ? `${money(cents)} received: ${money(toThis)} against ${i.invoiceNumber}, ${money(cents - toThis)} left on their account.`
-      : `${money(cents)} received against ${i.invoiceNumber}.`;
+      : `${money(cents)} received against ${i.invoiceNumber}.`) + receipt;
   }, 'Could not record the payment');
 
   const applyHere = (cents: number) => act(async () => {
@@ -172,12 +182,15 @@ export default function InvoiceDetail({ session }: { session: Session }) {
   }, 'Could not apply the money');
 
   const requestDiscount = () => act(async () => {
+    const fixed = disc.as === '$' ? toCents(disc.percent) : 0;
     const r = await api.post<{ appliedImmediately?: boolean }>(`/api/invoices/${i.invoiceId}/discount`, {
-      discountPercent: Number(disc.percent), reason: disc.reason.trim(),
+      discountPercent: disc.as === '%' ? Number(disc.percent) : 0,
+      discountFixedCents: fixed, reason: disc.reason.trim(),
     });
+    const what = fixed > 0 ? `${money(fixed)} discount` : `${disc.percent}% discount`;
     return r.appliedImmediately
-      ? `${disc.percent}% discount given on ${i.invoiceNumber}.`
-      : `${disc.percent}% discount asked for. It is in Needs a decision; the balance stays as it is until approved.`;
+      ? `${what} given on ${i.invoiceNumber}.`
+      : `${what} asked for. It is in Needs a decision; the balance stays as it is until approved.`;
   }, 'Could not record the discount');
 
   const raiseCredit = () => act(async () => {
@@ -192,7 +205,9 @@ export default function InvoiceDetail({ session }: { session: Session }) {
   /** Admin only. Editing an issued invoice always demands a reason. */
   const saveEdit = () => act(async () => {
     await api.patch(`/api/invoices/${i.invoiceId}`, {
-      discountPercent: Number(edit.discount) || 0,
+      discountPercent: edit.as === '%' ? Number(edit.discount) || 0 : 0,
+      discountFixedCents: edit.as === '$' ? toCents(edit.discount) : 0,
+      gctExempt: !edit.gct,
       reason: edit.reason,
       lines: i.lines.map((l) => {
         const typed = Number(edit.qty[l.id]);
@@ -264,7 +279,7 @@ export default function InvoiceDetail({ session }: { session: Session }) {
     steps.push({ tone: 'todo', title: 'Not emailed yet', meta: 'Use Email to customer, or it goes with their next statement' });
   }
   if (i.discount_status === 'Pending') {
-    steps.push({ tone: 'warn', title: `${Number(i.discount_percent)}% discount waiting for a decision`, meta: 'The full amount is owed until it is approved' });
+    steps.push({ tone: 'warn', title: `${Number(i.discount_fixed_cents) > 0 ? money(Number(i.discount_fixed_cents)) : `${Number(i.discount_percent)}%`} discount waiting for a decision`, meta: 'The full amount is owed until it is approved' });
   }
   for (const c of i.creditNotes ?? []) {
     steps.push({
@@ -327,6 +342,10 @@ export default function InvoiceDetail({ session }: { session: Session }) {
                      onChange={(e) => setPay({ ...pay, reference: e.target.value })} /></div>
             <div className="field"><button disabled={busy || toCents(pay.amount) <= 0} onClick={recordPayment}>Record payment</button></div>
           </div>
+          <label className="check">
+            <input type="checkbox" checked={pay.receipt} onChange={(e) => setPay({ ...pay, receipt: e.target.checked })} />
+            Email a receipt to {i.customer?.email || 'the customer (no address on file)'}
+          </label>
           <p className="muted small">Anything above the {money(i.balanceCents)} owed stays on their account for the next invoice.</p>
         </>
       );
@@ -354,8 +373,14 @@ export default function InvoiceDetail({ session }: { session: Session }) {
         <>
           <h2>Give a discount</h2>
           <div className="row">
-            <div className="field"><label htmlFor="d-pct">Discount %</label>
-              <input id="d-pct" type="number" min="0" max="100" step="0.01" style={{ width: 100 }}
+            <div className="field"><label htmlFor="d-pct">Discount</label>
+              <span className="money-toggle" role="group" aria-label="Discount as">
+                {(['%', '$'] as const).map((k) => (
+                  <button key={k} type="button" className={disc.as === k ? 'on' : ''}
+                          onClick={() => setDisc({ ...disc, as: k, percent: '' })}>{k === '%' ? '%' : '$ amount'}</button>
+                ))}
+              </span>{' '}
+              <input id="d-pct" type="number" min="0" max={disc.as === '%' ? 100 : undefined} step="0.01" style={{ width: 100 }}
                      value={disc.percent} onChange={(e) => setDisc({ ...disc, percent: e.target.value })} /></div>
             <div className="field" style={{ flex: '1 1 280px' }}><label htmlFor="d-why">Why (required)</label>
               <input id="d-why" style={{ width: '100%' }} value={disc.reason}
@@ -373,7 +398,9 @@ export default function InvoiceDetail({ session }: { session: Session }) {
         <>
           <h2>Credit note</h2>
           <p className="muted small" style={{ marginTop: 0 }}>
-            Takes money off what they owe, as its own document against {i.invoiceNumber}.
+            Takes money off what they owe, as its own document against {i.invoiceNumber}. Type the
+            amount including GCT; the GCT part is worked out for you. For goods returned or damaged,{' '}
+            <Link to={`/credit-notes?new=1&customer=${i.customerId}&invoice=${i.invoiceId}`}>credit by product instead</Link>.
           </p>
           <div className="row">
             <div className="field"><label htmlFor="c-amt">Amount</label>
@@ -392,7 +419,7 @@ export default function InvoiceDetail({ session }: { session: Session }) {
     if (panel === 'edit') {
       return (
         <>
-          <h2>Change quantities</h2>
+          <h2>Change quantities, discount or GCT</h2>
           <p className="muted small" style={{ marginTop: 0 }}>
             Recorded against your name. If the total drops below what is already paid, a credit note is raised for the difference.
           </p>
@@ -413,9 +440,19 @@ export default function InvoiceDetail({ session }: { session: Session }) {
             </tbody>
           </table>
           <div className="row" style={{ marginTop: 10 }}>
-            <div className="field"><label htmlFor="e-pct">Discount %</label>
-              <input id="e-pct" type="number" min="0" max="100" step="0.01" style={{ width: 100 }}
+            <div className="field"><label htmlFor="e-pct">Discount</label>
+              <span className="money-toggle" role="group" aria-label="Discount as">
+                {(['%', '$'] as const).map((k) => (
+                  <button key={k} type="button" className={edit.as === k ? 'on' : ''}
+                          onClick={() => setEdit({ ...edit, as: k, discount: '0' })}>{k === '%' ? '%' : '$ amount'}</button>
+                ))}
+              </span>{' '}
+              <input id="e-pct" type="number" min="0" max={edit.as === '%' ? 100 : undefined} step="0.01" style={{ width: 100 }}
                      value={edit.discount} onChange={(e) => setEdit({ ...edit, discount: e.target.value })} /></div>
+            <label className="check">
+              <input type="checkbox" checked={edit.gct} onChange={(e) => setEdit({ ...edit, gct: e.target.checked })} />
+              Charge GCT
+            </label>
             <div className="field" style={{ flex: '1 1 280px' }}><label htmlFor="e-why">Why (required)</label>
               <input id="e-why" style={{ width: '100%' }} value={edit.reason}
                      onChange={(e) => setEdit({ ...edit, reason: e.target.value })} /></div>
@@ -457,7 +494,7 @@ export default function InvoiceDetail({ session }: { session: Session }) {
                       onClick={(e) => { e.stopPropagation(); setMoreOpen(!moreOpen); }}>More ▾</button>
               {moreOpen && (
                 <div className="deskbar-pop deskbar-pop-right" role="menu">
-                  {isAdmin && <button role="menuitem" className="pop-item pop-button" onClick={() => open('edit')}>Change quantities</button>}
+                  {isAdmin && <button role="menuitem" className="pop-item pop-button" onClick={() => open('edit')}>Change quantities, discount or GCT</button>}
                   <button role="menuitem" className="pop-item pop-button" onClick={() => open('discount')}>Give a discount</button>
                   <div className="pop-rule" />
                   <button role="menuitem" className="pop-item pop-button pop-danger" onClick={() => open('credit')}>Credit note</button>
@@ -472,7 +509,7 @@ export default function InvoiceDetail({ session }: { session: Session }) {
       {msg && <div className="notice ok">{msg}</div>}
       {i.discount_status === 'Pending' && (
         <div className="notice warn">
-          A {Number(i.discount_percent)}% discount on this invoice is waiting in Needs a decision.
+          A {Number(i.discount_fixed_cents) > 0 ? money(Number(i.discount_fixed_cents)) : `${Number(i.discount_percent)}%`} discount on this invoice is waiting in Needs a decision.
           Until it is approved the full amount is owed.
         </div>
       )}
@@ -502,18 +539,28 @@ export default function InvoiceDetail({ session }: { session: Session }) {
             </div>
             <div>
               <div className="paper-label">Terms</div>
-              {i.customer?.payment_terms ?? 'Not set'}
-              {i.due_date && <div>Due {day(i.due_date)} {date(i.due_date).slice(0, 4)}</div>}
+              {i.cycle ? `${i.cycle} invoice, due on receipt` : (i.customer?.payment_terms ?? 'Not set')}
+              {!i.cycle && i.due_date && <div>Due {day(i.due_date)} {date(i.due_date).slice(0, 4)}</div>}
+              {i.period_from && i.period_to && (
+                <div>Deliveries {day(i.period_from)} to {day(i.period_to)}</div>
+              )}
             </div>
           </div>
           <div className="table-scroll">
             <table className="paper-lines">
               <thead>
-                <tr><th>{i.delivery ? 'Delivered' : 'Item'}</th><th>Quantity</th><th className="num">Price</th><th className="num">Amount</th></tr>
+                <tr>
+                  {(i.lines ?? []).some((l) => l.delivered_on) && <><th>Date</th><th>Order</th></>}
+                  <th>{i.delivery ? 'Delivered' : 'Item'}</th><th>Quantity</th><th className="num">Unit price</th><th className="num">Amount</th>
+                </tr>
               </thead>
               <tbody>
                 {(i.lines ?? []).map((l) => (
                   <tr key={l.id}>
+                    {(i.lines ?? []).some((x) => x.delivered_on) && (
+                      <><td className="small">{l.delivered_on ? day(l.delivered_on) : ''}</td>
+                        <td className="small">{l.reference ?? ''}</td></>
+                    )}
                     <td>{l.product_name}</td>
                     <td>{qtyText(l)}</td>
                     <td className="num">{money(unitPrice(l))}</td>
@@ -526,9 +573,9 @@ export default function InvoiceDetail({ session }: { session: Session }) {
           <div className="paper-totals">
             <div className="total-line"><span>Subtotal</span><span>{money(Number(i.subtotal_cents))}</span></div>
             {Number(i.discount_amount_cents) > 0 && (
-              <div className="total-line"><span>Discount {Number(i.discount_percent)}%</span><span>−{money(Number(i.discount_amount_cents))}</span></div>
+              <div className="total-line"><span>Discount{Number(i.discount_fixed_cents) > 0 ? '' : ` ${Number(i.discount_percent)}%`}</span><span>−{money(Number(i.discount_amount_cents))}</span></div>
             )}
-            <div className="total-line"><span>GCT 15%</span><span>{money(Number(i.gct_cents))}</span></div>
+            <div className="total-line"><span>{i.gct_exempt ? 'GCT (exempt)' : 'GCT 15%'}</span><span>{money(Number(i.gct_cents))}</span></div>
             <div className="total-line grand"><span>Total</span><span>{money(i.grandTotalCents)}</span></div>
             {!i.is_credit_note && (
               <>

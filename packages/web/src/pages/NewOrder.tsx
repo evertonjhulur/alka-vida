@@ -21,6 +21,7 @@ interface Product {
   price_per_case_cents: number;
   price_per_bottle_cents: number;
   is_returnable?: boolean;
+  special_price?: boolean;
 }
 
 interface Customer {
@@ -30,6 +31,15 @@ interface Customer {
   delivery_zone: string | null;
   price_tier: string | null;
   balance_cents: number | string | null;
+  delivery_days?: string[] | null;
+  zone_run_days?: string[] | null;
+  invoice_cycle?: string | null;
+  gct_exempt?: boolean;
+}
+
+interface Address {
+  id: string; label: string; is_delivery: boolean; delivery_zone: string | null;
+  address_line1: string | null; city: string | null;
 }
 
 interface History {
@@ -46,6 +56,8 @@ interface Sheet {
 interface Line {
   productId: string;
   qty: number;
+  /** A price typed for this order only, in cents; null = their usual price. */
+  price: number | null;
 }
 
 type Mode = 'Delivery' | 'Pickup' | 'Counter';
@@ -62,6 +74,26 @@ const PATTERNS: Array<[Pattern, string]> = [
   ['Biweekly', 'Every 2 weeks'],
   ['Monthly', 'Every month'],
 ];
+
+const WEEK = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+const WEEKDAY = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+const weekdayOf = (iso: string) => {
+  const [y, m, d] = iso.split('-').map(Number);
+  return WEEKDAY[new Date(Date.UTC(y, m - 1, d)).getUTCDay()];
+};
+const addDays = (iso: string, n: number) => {
+  const [y, m, d] = iso.split('-').map(Number);
+  return new Date(Date.UTC(y, m - 1, d + n)).toISOString().slice(0, 10);
+};
+/** The first date on or after `from` that falls on one of `days`. */
+const nextRunDate = (from: string, days: string[]) => {
+  if (!days.length) return from;
+  for (let i = 0; i < 7; i++) {
+    const d = addDays(from, i);
+    if (days.includes(weekdayOf(d))) return d;
+  }
+  return from;
+};
 
 /** "Alka Vida 500ml" reads as "500ml": every product is Alka Vida. */
 const shortName = (n: string) => n.replace(/^Alka Vida\s+/i, '');
@@ -98,6 +130,11 @@ export default function NewOrder() {
   const [requestedDate, setRequestedDate] = useState(todayInJamaica());
   const [sheets, setSheets] = useState<Sheet[] | null>(null);
   const [discount, setDiscount] = useState('0');
+  const [discountAs, setDiscountAs] = useState<'%' | '$'>('%');
+  const [chargeGct, setChargeGct] = useState(true);
+  const [addresses, setAddresses] = useState<Address[]>([]);
+  const [addressId, setAddressId] = useState('');
+  const [repeatDays, setRepeatDays] = useState<string[]>([]);
   const [lines, setLines] = useState<Line[]>([]);
   const [paidNow, setPaidNow] = useState('');
   const [repeat, setRepeat] = useState(false);
@@ -125,7 +162,23 @@ export default function NewOrder() {
       .then((rows) => setProducts(rows.map((r) => ({ ...r, id: r.product_id }))))
       .catch(() => {});
     api.get<History>(`/api/customers/${customerId}/history`).then(setHistory).catch(() => {});
+    api.get<Address[]>(`/api/customers/${customerId}/addresses`)
+      .then((a) => setAddresses(a.filter((x) => x.is_delivery))).catch(() => setAddresses([]));
+    setAddressId('');
   }, [customerId]);
+
+  // A new customer brings their own GCT position, delivery days and the next
+  // day their round runs (Everton, 30 Sep 2026).
+  useEffect(() => {
+    const c = customers.find((x) => x.id === customerId);
+    if (!c) return;
+    setChargeGct(!c.gct_exempt);
+    const days = (c.delivery_days?.length ? c.delivery_days : c.zone_run_days) ?? [];
+    setRepeatDays(days.length ? [...days] : []);
+    if (deliveryMode === 'Delivery' && days.length) {
+      setRequestedDate(nextRunDate(todayInJamaica(), days));
+    }
+  }, [customerId, customers.length]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Which round the date puts it on.
   useEffect(() => {
@@ -152,8 +205,10 @@ export default function NewOrder() {
     } finally { setBusy(false); }
   }
 
-  const priceOf = (p: Product) => (p.bottles_per_case > 0
+  const listPriceOf = (p: Product) => (p.bottles_per_case > 0
     ? Number(p.price_per_case_cents) : Number(p.price_per_bottle_cents));
+  /** The price on this line: typed for this order, else their usual. */
+  const priceOf = (p: Product, l?: Line) => (l?.price ?? listPriceOf(p));
 
   /**
    * Live totals, mirroring the server calculation exactly: GCT is charged on
@@ -164,22 +219,34 @@ export default function NewOrder() {
     for (const l of lines) {
       const p = productOf(l.productId);
       if (!p || l.qty <= 0) continue;
-      subtotal += l.qty * priceOf(p);
+      subtotal += l.qty * priceOf(p, l);
     }
-    const pct = Math.min(Math.max(Number(discount) || 0, 0), 100);
-    const discountAmount = Math.round(subtotal * (pct / 100));
+    const fixed = discountAs === '$' ? Math.max(0, Math.round((Number(discount) || 0) * 100)) : 0;
+    const pct = discountAs === '%' ? Math.min(Math.max(Number(discount) || 0, 0), 100) : 0;
+    const discountAmount = fixed > 0 ? Math.min(fixed, subtotal) : Math.round(subtotal * (pct / 100));
     const net = subtotal - discountAmount;
-    const gct = Math.round(net * GCT_RATE);
-    return { subtotal, discountAmount, gct, grandTotal: net + gct };
-  }, [lines, discount, products]);
+    const gct = chargeGct ? Math.round(net * GCT_RATE) : 0;
+    return { subtotal, discountAmount, gct, grandTotal: net + gct, fixed, pct };
+  }, [lines, discount, discountAs, chargeGct, products]);
 
   const setQty = (id: string, qty: number) => setLines((cur) => cur.map((l) => (
     l.productId === id ? { ...l, qty: Math.max(0, Math.min(99999, Math.round(qty) || 0)) } : l)));
-  const addProduct = (id: string) => setLines((cur) => [...cur, { productId: id, qty: 1 }]);
+  const setPrice = (id: string, typed: string) => setLines((cur) => cur.map((l) => {
+    if (l.productId !== id) return l;
+    const p = productOf(id);
+    if (typed.trim() === '') return { ...l, price: null };
+    const cents = Math.max(0, Math.round(Number(typed) * 100) || 0);
+    return { ...l, price: p && cents === listPriceOf(p) ? null : cents };
+  }));
+  const addProduct = (id: string) => setLines((cur) => [...cur, { productId: id, qty: 1, price: null }]);
   const removeLine = (id: string) => setLines((cur) => cur.filter((l) => l.productId !== id));
   const notYet = products.filter((p) => !lines.some((l) => l.productId === p.id));
 
-  const zone = history?.customer.delivery_zone ?? customer?.delivery_zone ?? null;
+  const address = addresses.find((a) => a.id === addressId) ?? null;
+  const zone = address?.delivery_zone ?? history?.customer.delivery_zone ?? customer?.delivery_zone ?? null;
+  const zoneDays = address ? [] : (customer?.zone_run_days ?? []);
+  const offDay = deliveryMode === 'Delivery' && zoneDays.length > 0 && requestedDate
+    && !zoneDays.includes(weekdayOf(requestedDate));
   const round = sheets?.find((s) => s.zone === zone && s.status === 'Open') ?? null;
   const canRepeat = deliveryMode !== 'Counter';
 
@@ -188,11 +255,23 @@ export default function NewOrder() {
     setBusy(true); setError(null); setResult(null); setWarnings([]);
 
     // The case-vs-bottle rule decides which field a quantity belongs in.
+    // A price typed on a line travels with it as an override; otherwise the
+    // server charges their usual price, exactly as shown.
     const payloadLines = lines
       .filter((l) => l.qty > 0 && productOf(l.productId))
-      .map((l) => (productOf(l.productId)!.bottles_per_case > 0
-        ? { productId: l.productId, cases: l.qty }
-        : { productId: l.productId, looseBottles: l.qty }));
+      .map((l) => {
+        const cased = productOf(l.productId)!.bottles_per_case > 0;
+        const price = l.price === null ? {}
+          : cased ? { pricePerCaseCents: l.price } : { pricePerBottleCents: l.price };
+        return cased
+          ? { productId: l.productId, cases: l.qty, ...price }
+          : { productId: l.productId, looseBottles: l.qty, ...price };
+      });
+    const money_ = {
+      discountPercent: totals.pct,
+      discountFixedCents: totals.fixed,
+      gctExempt: !chargeGct,
+    };
 
     if (payloadLines.length === 0) {
       setError('Add at least one product.');
@@ -209,7 +288,7 @@ export default function NewOrder() {
         }>('/api/counter-sale', {
           customerId,
           lines: payloadLines,
-          discountPercent: Number(discount) || 0,
+          ...money_,
           amountPaidCents: paidNow ? Math.round(Number(paidNow) * 100) : 0,
           method,
           idempotencyKey: idempotencyKey('counter'),
@@ -227,7 +306,8 @@ export default function NewOrder() {
           customerId,
           deliveryMode,
           requestedDeliveryDate: requestedDate,
-          discountPercent: Number(discount) || 0,
+          addressId: deliveryMode === 'Delivery' ? (addressId || null) : null,
+          ...money_,
           lines: payloadLines,
         });
         const warn = [...(order.warnings ?? [])];
@@ -239,6 +319,26 @@ export default function NewOrder() {
             );
             repeatText = ` It repeats ${PATTERNS.find(([p]) => p === pattern)![1].toLowerCase()}; ` +
               `the next is for ${day(r.nextDeliveryDate)}.`;
+            /*
+             * Several days a week (Everton, 30 Sep 2026): this order is the
+             * standing order for its own day; each other day chosen gets its
+             * own weekly standing order, starting on the next such day.
+             */
+            if (pattern === 'Weekly') {
+              const others = repeatDays.filter((d) => d !== weekdayOf(requestedDate));
+              const extra: string[] = [];
+              for (const d of others) {
+                const first = nextRunDate(addDays(requestedDate, 1), [d]);
+                const o2 = await api.post<{ id: string }>('/api/orders', {
+                  customerId, deliveryMode, requestedDeliveryDate: first,
+                  addressId: deliveryMode === 'Delivery' ? (addressId || null) : null,
+                  ...money_, lines: payloadLines,
+                });
+                await api.post(`/api/orders/${o2.id}/recurring`, { pattern: 'Weekly' });
+                extra.push(`${d} (first ${day(first)})`);
+              }
+              if (extra.length) repeatText += ` Also every ${extra.join(', ')}.`;
+            }
           } catch (err) {
             warn.push(`The order was made, but it could not be set to repeat: ${
               err instanceof Error ? err.message : 'unknown error'}. Use ⋯ on Orders to try again.`);
@@ -256,6 +356,7 @@ export default function NewOrder() {
       setLines([]);
       setPaidNow('');
       setDiscount('0');
+      setDiscountAs('%');
       setRepeat(false);
       window.scrollTo({ top: 0, behavior: 'smooth' });
     } catch (err) {
@@ -272,8 +373,11 @@ export default function NewOrder() {
   const summary = customer ? [
     history?.customer.price_tier_name ? `${history.customer.price_tier_name} price list`
       : customer.price_tier ? `${customer.price_tier} price list` : 'List prices',
-    history?.customer.payment_terms ?? null,
-    zone ? `${zone} zone` : 'No delivery zone',
+    customer.invoice_cycle === 'Weekly' ? 'invoiced weekly'
+      : customer.invoice_cycle === 'Monthly' ? 'invoiced monthly'
+        : history?.customer.payment_terms ?? null,
+    zone ? `${zone} zone${customer.zone_run_days?.length ? ` (${customer.zone_run_days.join(', ')})` : ''}` : 'No delivery zone',
+    customer.gct_exempt ? 'GCT exempt' : null,
   ].filter(Boolean).join(' · ') : '';
 
   const roundNote = (() => {
@@ -341,6 +445,20 @@ export default function NewOrder() {
               <input type="hidden" id="mode" value={deliveryMode} />
             </div>
 
+            {deliveryMode === 'Delivery' && addresses.length > 0 && (
+              <div className="field">
+                <label htmlFor="addr">Deliver to</label>
+                <select id="addr" value={addressId} onChange={(e) => setAddressId(e.target.value)}>
+                  <option value="">Main address{customer?.delivery_zone ? ` (${customer.delivery_zone})` : ''}</option>
+                  {addresses.map((a) => (
+                    <option key={a.id} value={a.id}>
+                      {a.label}{a.address_line1 ? `, ${a.address_line1}` : ''}{a.delivery_zone ? ` (${a.delivery_zone})` : ''}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
+
             {deliveryMode !== 'Counter' ? (
               <div className="row" style={{ alignItems: 'center' }}>
                 <div className="field" style={{ marginBottom: 0 }}>
@@ -349,6 +467,15 @@ export default function NewOrder() {
                          onChange={(e) => setRequestedDate(e.target.value)} />
                 </div>
                 {roundNote && <div className="small round-note">{roundNote}</div>}
+                {offDay && (
+                  <div className="notice warn" style={{ margin: 0, flexBasis: '100%' }}>
+                    The {zone} round runs {zoneDays.join(', ')}, not {weekdayOf(requestedDate)}.{' '}
+                    <button type="button" className="as-link"
+                            onClick={() => setRequestedDate(nextRunDate(requestedDate, zoneDays))}>
+                      Move it to {day(nextRunDate(requestedDate, zoneDays))}
+                    </button>
+                  </div>
+                )}
               </div>
             ) : (
               <>
@@ -406,7 +533,7 @@ export default function NewOrder() {
                 <thead>
                   <tr>
                     <th>Product</th>
-                    <th className="num">{customer ? 'Their price' : 'Price'}</th>
+                    <th className="num">{customer ? 'Unit price (theirs)' : 'Unit price'}</th>
                     <th>How many</th>
                     <th className="num">Line total</th>
                     <th />
@@ -426,7 +553,22 @@ export default function NewOrder() {
                             {p.is_returnable ? ' · returnable' : ''}
                           </div>
                         </td>
-                        <td data-label="Price" className="num">{money(priceOf(p))}</td>
+                        <td data-label="Unit price" className="num">
+                          <input type="number" min="0" step="0.01" inputMode="decimal"
+                                 className={`price-input${l.price !== null ? ' changed' : ''}`}
+                                 aria-label={`Price per ${cased ? 'case' : 'bottle'} of ${p.name}`}
+                                 value={(priceOf(p, l) / 100).toFixed(2)}
+                                 onChange={(e) => setPrice(l.productId, e.target.value)} />
+                          <div className="muted small">
+                            per {cased ? 'case' : 'bottle'}
+                            {p.special_price && l.price === null && ' · special price'}
+                            {l.price !== null && (
+                              <> · <button type="button" className="as-link small"
+                                           onClick={() => setPrice(l.productId, '')}>
+                                usual {money(listPriceOf(p))}</button></>
+                            )}
+                          </div>
+                        </td>
                         <td data-label="How many">
                           <span className="stepper">
                             <button type="button" className="secondary" aria-label={`Fewer ${p.name}`}
@@ -439,7 +581,7 @@ export default function NewOrder() {
                           </span>
                           <span className="muted small unit">{cased ? 'cs' : 'btl'}</span>
                         </td>
-                        <td data-label="Line total" className="num">{money(l.qty * priceOf(p))}</td>
+                        <td data-label="Line total" className="num">{money(l.qty * priceOf(p, l))}</td>
                         <td className="num">
                           <button type="button" className="danger-soft"
                                   onClick={() => removeLine(l.productId)}>Remove</button>
@@ -487,6 +629,29 @@ export default function NewOrder() {
                               aria-pressed={pattern === p} onClick={() => setPattern(p)}>{label}</button>
                     ))}
                   </div>
+                  {pattern === 'Weekly' && (
+                    <div style={{ marginTop: 10 }}>
+                      <span className="label">On these days</span>
+                      <div className="day-picks" role="group" aria-label="Repeat on these days">
+                        {WEEK.map((d) => {
+                          const on = repeatDays.includes(d) || d === weekdayOf(requestedDate);
+                          return (
+                            <button key={d} type="button" aria-pressed={on}
+                                    className={`day-pick${on ? ' on' : ''}`}
+                                    disabled={d === weekdayOf(requestedDate)}
+                                    onClick={() => setRepeatDays((cur) => (cur.includes(d)
+                                      ? cur.filter((x) => x !== d) : WEEK.filter((x) => x === d || cur.includes(x))))}>
+                              {d}
+                            </button>
+                          );
+                        })}
+                      </div>
+                      <div className="muted small" style={{ marginTop: 4 }}>
+                        {weekdayOf(requestedDate)} is this order's own day. Each other day becomes
+                        its own weekly standing order with the same products.
+                      </div>
+                    </div>
+                  )}
                   {requestedDate && (
                     <div className="muted small" style={{ marginTop: 8 }}>
                       Next after this: {day(nextAfter(date(requestedDate), pattern))}
@@ -502,16 +667,32 @@ export default function NewOrder() {
             <div className="total-line">
               <label htmlFor="disc" style={{ margin: 0, color: 'inherit', fontSize: 'inherit' }}>Discount</label>
               <span>
-                <input id="disc" type="number" min="0" max="100" step="0.01"
-                       style={{ width: 64 }} value={discount}
-                       onChange={(e) => setDiscount(e.target.value)} /> %
+                <span className="money-toggle" role="group" aria-label="Discount as">
+                  {(['%', '$'] as const).map((k) => (
+                    <button key={k} type="button" className={discountAs === k ? 'on' : ''}
+                            aria-pressed={discountAs === k}
+                            onClick={() => { setDiscountAs(k); setDiscount('0'); }}>{k === '%' ? '%' : '$ amount'}</button>
+                  ))}
+                </span>{' '}
+                <input id="disc" type="number" min="0" max={discountAs === '%' ? 100 : undefined} step="0.01"
+                       style={{ width: 84 }} value={discount}
+                       onChange={(e) => setDiscount(e.target.value)} />
               </span>
             </div>
             {totals.discountAmount > 0 && (
               <div className="total-line muted"><span /><span>−{money(totals.discountAmount)}</span></div>
             )}
             {/* GCT is charged on the post-discount figure. */}
-            <div className="total-line"><span>GCT 15%</span><span>{money(totals.gct)}</span></div>
+            <div className="total-line">
+              <label className="check" style={{ margin: 0 }}>
+                <input type="checkbox" checked={chargeGct} onChange={(e) => setChargeGct(e.target.checked)} />
+                GCT 15%
+              </label>
+              <span>{chargeGct ? money(totals.gct) : 'none'}</span>
+            </div>
+            {!chargeGct && (
+              <div className="muted small">{customer?.gct_exempt ? 'They are GCT exempt.' : 'No GCT on this order.'}</div>
+            )}
             <div className="total-line grand"><span>Total</span><span>{money(totals.grandTotal)}</span></div>
 
             {deliveryMode === 'Counter' ? (
@@ -532,7 +713,9 @@ export default function NewOrder() {
               </div>
             ) : (
               <p className="muted small" style={{ margin: '8px 0 0' }}>
-                Invoiced from what is actually {deliveryMode === 'Pickup' ? 'collected' : 'delivered'}.
+                {customer?.invoice_cycle === 'Weekly' || customer?.invoice_cycle === 'Monthly'
+                  ? <>Goes on their {customer.invoice_cycle.toLowerCase()} invoice, from what is actually {deliveryMode === 'Pickup' ? 'collected' : 'delivered'}.</>
+                  : <>Invoiced from what is actually {deliveryMode === 'Pickup' ? 'collected' : 'delivered'}.</>}
               </p>
             )}
 

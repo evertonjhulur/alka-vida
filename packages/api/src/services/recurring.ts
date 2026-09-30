@@ -85,11 +85,13 @@ export async function generateDueOrders(
     id: string; customer_id: string; customer_name: string;
     recurrence_pattern: RecurrencePattern; next_delivery_date: string | null;
     recurrence_ends_on: string | null; delivery_mode: string; discount_percent: number;
+    discount_fixed_cents: number; gct_exempt: boolean; address_id: string | null;
   }>(
     `SELECT o.id, o.customer_id, c.name AS customer_name, o.recurrence_pattern,
             o.next_delivery_date::text AS next_delivery_date,
             o.recurrence_ends_on::text AS recurrence_ends_on,
-            o.delivery_mode, o.discount_percent
+            o.delivery_mode, o.discount_percent, o.discount_fixed_cents,
+            o.gct_exempt, o.address_id
      FROM customer_orders o
      JOIN customers c ON c.id = o.customer_id
      WHERE o.is_recurring
@@ -151,6 +153,10 @@ export async function generateDueOrders(
           deliveryMode: s.delivery_mode as never,
           requestedDeliveryDate: date,
           discountPercent: num(s.discount_percent),
+          // A fixed discount repeats as the same amount on every occurrence.
+          discountFixedCents: num(s.discount_fixed_cents),
+          gctExempt: s.gct_exempt ? true : null,
+          addressId: s.address_id,
           parentRecurringId: s.id,
           notes: `Standing order for ${date}`,
           // Quantities carry over; prices re-resolve at today's tier rate.

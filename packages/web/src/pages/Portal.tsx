@@ -1,6 +1,6 @@
 import { Fragment, useEffect, useMemo, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
-import { api, type Session } from '../lib/api';
+import { api, download, type Session } from '../lib/api';
 import { money, date, statusTone, when } from '../lib/format';
 import { StatementView } from './Statement';
 import { ask, askText } from '../components/Dialog';
@@ -34,7 +34,12 @@ interface Schedule {
 const GCT_RATE = 0.15;
 const PATTERNS = ['Weekly', 'Biweekly', 'Monthly'] as const;
 
-type Tab = 'order' | 'orders' | 'repeats' | 'account';
+type Tab = 'order' | 'orders' | 'repeats' | 'account' | 'quotes';
+
+interface MyQuote {
+  id: string; quote_number: string; quote_date: string; valid_until: string | null;
+  status: string; grand_total_cents: number; lines_summary: string | null; expired: boolean;
+}
 
 export default function Portal({ session }: { session: Session }) {
   /*
@@ -45,7 +50,7 @@ export default function Portal({ session }: { session: Session }) {
    */
   const { tab: fromUrl } = useParams();
   const navigate = useNavigate();
-  const tab: Tab = (['order', 'orders', 'repeats', 'account'] as const)
+  const tab: Tab = (['order', 'orders', 'repeats', 'account', 'quotes'] as const)
     .includes(fromUrl as Tab) ? (fromUrl as Tab) : 'order';
   const setTab = (t: Tab) => navigate(`/portal/${t}`);
 
@@ -55,6 +60,7 @@ export default function Portal({ session }: { session: Session }) {
   const [myOrders, setMyOrders] = useState<MyOrder[]>([]);
   const [schedules, setSchedules] = useState<Schedule[]>([]);
   const [repeatFor, setRepeatFor] = useState<string | null>(null);
+  const [quotes, setQuotes] = useState<MyQuote[]>([]);
 
   // How many of each product, keyed by product: every product is on the
   // screen with − / +, rather than a line to add and a product to choose.
@@ -77,6 +83,19 @@ export default function Portal({ session }: { session: Session }) {
     const b = await api.get<{ balanceCents: number }>(`/api/customers/${customerId}/balance`);
     setBalance(b.balanceCents);
     setPrices(await api.get<Priced[]>(`/api/customers/${customerId}/prices`));
+    setQuotes(await api.get<MyQuote[]>('/api/quotations').catch(() => []));
+  }
+
+  /** Accept or decline a quote sent to them (Everton, 30 Sep 2026). */
+  async function answerQuote(q: MyQuote, decision: 'Accepted' | 'Declined') {
+    if (decision === 'Declined' && !await ask(`Decline quotation ${q.quote_number}?`,
+      { confirmLabel: 'Decline it', cancelLabel: 'Keep it', danger: true })) return;
+    await act(async () => {
+      await api.post(`/api/portal/quotations/${q.id}/answer`, { decision });
+      setPlaced(decision === 'Accepted'
+        ? `Thank you. Quotation ${q.quote_number} is accepted; we will be in touch to arrange it.`
+        : `Quotation ${q.quote_number} declined.`);
+    }, 'Could not send your answer');
   }
 
   async function act(what: () => Promise<void>, fallback: string) {
@@ -465,6 +484,40 @@ export default function Portal({ session }: { session: Session }) {
             Pausing keeps the arrangement but sends nothing until you start it again.
             Missed weeks are not made up afterwards.
           </p>
+        </div>
+      )}
+
+      {tab === 'quotes' && (
+        <div className="panel phone-cards">
+          <h2 style={{ marginTop: 0 }}>Quotes from us</h2>
+          <table>
+            <thead><tr><th>Quote</th><th>What</th><th>Valid until</th><th className="num">Total</th><th /></tr></thead>
+            <tbody>
+              {quotes.map((q) => (
+                <tr key={q.id}>
+                  <td className="lead"><span>{q.quote_number}</span><span className="muted small">{when(q.quote_date)}</span></td>
+                  <td data-label="What" className="small">{q.lines_summary}</td>
+                  <td data-label="Valid until">{q.valid_until ? when(q.valid_until) : '—'}</td>
+                  <td data-label="Total" className="num money">{money(Number(q.grand_total_cents))}</td>
+                  <td className="num">
+                    <span className="row" style={{ gap: 6, justifyContent: 'flex-end' }}>
+                      <button type="button" className="secondary" disabled={busy}
+                              onClick={() => download(`/api/quotations/${q.id}/pdf`, `${q.quote_number}.pdf`).catch((e) => setError(e.message))}>PDF</button>
+                      {q.status === 'Sent' && !q.expired ? (
+                        <>
+                          <button type="button" className="approve-soft" disabled={busy} onClick={() => answerQuote(q, 'Accepted')}>Accept</button>
+                          <button type="button" className="danger-soft" disabled={busy} onClick={() => answerQuote(q, 'Declined')}>Decline</button>
+                        </>
+                      ) : (
+                        <span className="chip neutral">{q.expired ? 'Expired' : q.status === 'Converted' ? 'Accepted, ordered' : q.status}</span>
+                      )}
+                    </span>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          {quotes.length === 0 && <p className="muted">No quotes yet.</p>}
         </div>
       )}
 

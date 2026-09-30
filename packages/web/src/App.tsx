@@ -44,6 +44,10 @@ import Zones from './pages/Zones';
 import Employees from './pages/Employees';
 import EmployeeRecord from './pages/EmployeeRecord';
 import CustomerRecord from './pages/CustomerRecord';
+import Quotes from './pages/Quotes';
+import QuoteAccept from './pages/QuoteAccept';
+import CreditNotes from './pages/CreditNotes';
+import AutoEmails from './pages/AutoEmails';
 
 interface NavItem {
   to: string;
@@ -62,10 +66,10 @@ interface NavItem {
   /** Other addresses that belong to this item (its tabs), which keep it lit. */
   also?: string[];
   /** Which pending count, if any, puts a badge on this item. */
-  badge?: 'decisions';
+  badge?: 'decisions' | 'quotes';
 }
 
-interface PendingCounts { applications: number; approvals: number }
+interface PendingCounts { applications: number; approvals: number; acceptedQuotes?: number }
 
 /**
  * Navigation mirrors the Section 10 permission table exactly.
@@ -83,6 +87,7 @@ const NAV: NavItem[] = [
   { to: '/', label: 'Today', roles: ['admin', 'user'] },
 
   { to: '/orders', label: 'Orders', roles: ['admin', 'user'], section: 'Sales' },
+  { to: '/quotes', label: 'Quotes', roles: ['admin', 'user'], section: 'Sales', badge: 'quotes' },
   { to: '/recurring', label: 'Standing orders', roles: ['admin', 'user'], section: 'Sales' },
   { to: '/customers', label: 'Customers', roles: ['admin', 'user'], section: 'Sales' },
 
@@ -91,6 +96,7 @@ const NAV: NavItem[] = [
 
   { to: '/invoices', label: 'Invoices', roles: ['admin', 'user'], section: 'Money' },
   { to: '/payments', label: 'Payments', roles: ['admin', 'user'], section: 'Money' },
+  { to: '/credit-notes', label: 'Credit notes', roles: ['admin', 'user'], section: 'Money' },
   { to: '/statement', label: 'Statements', roles: ['admin', 'user'], section: 'Money' },
 
   { to: '/production', label: 'Production', roles: ['admin', 'user'], section: 'Production & stock' },
@@ -103,6 +109,7 @@ const NAV: NavItem[] = [
   // Set up once, changed rarely. Logins are the administrator's alone.
   { to: '/pricing', label: 'Products & pricing', roles: ['admin', 'user'], section: 'Settings' },
   { to: '/zones', label: 'Delivery zones', roles: ['admin', 'user'], section: 'Settings' },
+  { to: '/auto-emails', label: 'Automatic emails', roles: ['admin', 'user'], section: 'Settings' },
   // Logins are the administrator's alone, so office staff see just Employees.
   { to: '/employees', label: 'People and logins', roles: ['admin'], section: 'Settings', also: ['/users'] },
   { to: '/employees', label: 'Employees', roles: ['user'], section: 'Settings' },
@@ -113,6 +120,7 @@ const NAV: NavItem[] = [
   { to: '/portal/orders', label: 'My orders', roles: ['customer'] },
   { to: '/portal/repeats', label: 'Standing orders', roles: ['customer'] },
   { to: '/portal/account', label: 'Statements & invoices', roles: ['customer'] },
+  { to: '/portal/quotes', label: 'Quotes', roles: ['customer'] },
 
   // Everybody's own password; with Sign out, not in any section.
   { to: '/my-account', label: 'My password', roles: ['admin', 'user', 'driver'], placement: 'account' },
@@ -166,13 +174,16 @@ function Shell({ session }: { session: Session }) {
   const signOut = () => { clearSession(); navigate('/login'); location.reload(); };
 
   const waiting = pending.applications + pending.approvals;
-  const badgeFor = (n: NavItem) => (n.badge === 'decisions' && waiting > 0
-    ? (
-      <span className="nav-badge" title={`${waiting} waiting for you`}>
-        {waiting}
-      </span>
-    )
-    : null);
+  const badgeFor = (n: NavItem) => {
+    if (n.badge === 'decisions' && waiting > 0) {
+      return <span className="nav-badge" title={`${waiting} waiting for you`}>{waiting}</span>;
+    }
+    const q = pending.acceptedQuotes ?? 0;
+    if (n.badge === 'quotes' && q > 0) {
+      return <span className="nav-badge" title={`${q} accepted, waiting to become orders`}>{q}</span>;
+    }
+    return null;
+  };
 
   /*
    * A driver or a customer has a handful of destinations, so on a phone they
@@ -288,6 +299,11 @@ function Shell({ session }: { session: Session }) {
           <Route path="/delivery/:sheetId" element={<RouteDetail session={session} />} />
           <Route path="/delivery/:sheetId/settlement" element={<Settlement session={session} />} />
           <Route path="/invoices" element={<Invoices />} />
+          <Route path="/quotes" element={<Quotes />} />
+          <Route path="/quotes/:quoteId" element={<Quotes />} />
+          <Route path="/quotes/:quoteId/:mode" element={<Quotes />} />
+          <Route path="/credit-notes" element={<Keyed><CreditNotes session={session} /></Keyed>} />
+          <Route path="/auto-emails" element={<AutoEmails session={session} />} />
           <Route path="/payments" element={<Payments />} />
           <Route path="/invoices/:invoiceId" element={<InvoiceDetail session={session} />} />
           <Route path="/statement" element={<Statement />} />
@@ -368,10 +384,14 @@ function Routed({
 }: { session: Session | null; onSignedIn: (s: Session) => void }) {
   const { pathname } = useLocation();
 
-  if (session && !PUBLIC_ROUTES.includes(pathname)) return <Shell session={session} />;
+  // A quotation's accept link opens the same page whether or not anybody is
+  // signed in on this browser.
+  const isPublic = PUBLIC_ROUTES.includes(pathname) || pathname.startsWith('/quote/');
+  if (session && !isPublic) return <Shell session={session} />;
 
   return (
     <Routes>
+      <Route path="/quote/:token" element={<QuoteAccept />} />
       <Route path="/register" element={<Register />} />
       <Route path="/set-password" element={<SetPassword />} />
       <Route path="*" element={<Login onSignedIn={onSignedIn} />} />

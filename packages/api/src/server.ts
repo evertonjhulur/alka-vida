@@ -42,6 +42,8 @@ import * as registration from './services/registration.ts';
 import * as zones from './services/zones.ts';
 import * as labour from './services/labour.ts';
 import { collectOrder, counterSale } from './services/counter.ts';
+import { registerRevisionRoutes } from './routes/revisions.ts';
+import * as paperwork from './services/paperwork.ts';
 
 declare module 'fastify' {
   interface FastifyRequest {
@@ -139,6 +141,9 @@ export async function buildServer(db: Db) {
     if (req.url.startsWith('/api/invitations/')) return;
     // The company logo, shown on the sign-in page before anyone is signed in.
     if (req.url.startsWith('/api/logo')) return;
+    // A quotation's accept link, opened from the customer's email. It answers
+    // only to the unguessable token in the link.
+    if (req.url.startsWith('/api/public/')) return;
     const header = req.headers.authorization;
     const token = header?.startsWith('Bearer ') ? header.slice(7) : null;
     const session = token ? verifyToken(token) : null;
@@ -346,7 +351,13 @@ export async function buildServer(db: Db) {
         `SELECT COUNT(*)::text AS n FROM customer_applications WHERE status = 'Pending'`);
       const approvals = await db.one<{ n: string }>(
         `SELECT COUNT(*)::text AS n FROM approval_requests WHERE status = 'Pending'`);
-      return { applications: Number(apps.n), approvals: Number(approvals.n) };
+      // Quotes a customer has said yes to, waiting to be turned into orders.
+      const quotes = await db.one<{ n: string }>(
+        `SELECT COUNT(*)::text AS n FROM quotations WHERE status = 'Accepted'`);
+      return {
+        applications: Number(apps.n), approvals: Number(approvals.n),
+        acceptedQuotes: Number(quotes.n),
+      };
     });
 
   /* ---------------- delivery zones ---------------- */
@@ -547,23 +558,8 @@ export async function buildServer(db: Db) {
     async (req) => {
       const { id } = req.params as { id: string };
       assertOwnCustomer(req, id);
-      return db.query(
-        `SELECT p.id AS product_id,
-                p.name,
-                p.bottles_per_case,
-                p.is_returnable,
-                COALESCE(pl.price_per_case_cents, p.price_per_case_cents)     AS price_per_case_cents,
-                COALESCE(pl.price_per_bottle_cents, p.price_per_bottle_cents) AS price_per_bottle_cents,
-                pt.name AS price_tier
-         FROM products p
-         LEFT JOIN customers c ON c.id = $1
-         LEFT JOIN price_tiers pt ON pt.id = c.price_tier_id
-         LEFT JOIN price_lists pl
-           ON pl.product_id = p.id AND pl.price_tier_id = c.price_tier_id
-         WHERE p.active
-         ORDER BY p.name`,
-        [id],
-      );
+      // Special price > their price list > list price (customers.customerPrices).
+      return customers.customerPrices(db, id);
     });
 
   app.get('/api/customers/:id/balance', async (req) => {
@@ -738,9 +734,11 @@ export async function buildServer(db: Db) {
 
   app.post('/api/quotations/:id/status', { preHandler: allow('admin', 'user') },
     async (req) => {
-      const body = req.body as { status: 'Draft' | 'Sent' | 'Accepted' | 'Expired' | 'Declined' };
+      const body = req.body as {
+        status: 'Draft' | 'Sent' | 'Accepted' | 'Expired' | 'Declined'; reason?: string;
+      };
       await quotations.setQuotationStatus(db, actorOf(req),
-        (req.params as { id: string }).id, body.status);
+        (req.params as { id: string }).id, body.status, body.reason);
       return { ok: true };
     });
 
@@ -887,15 +885,16 @@ export async function buildServer(db: Db) {
 
   app.post('/api/invoices/:id/credit-note', { preHandler: allow('admin', 'user') },
     async (req) => invoices.createCreditNote(db, actorOf(req), {
+      ...(req.body as { amountCents?: number; reason: string; lines?: never[] }),
       invoiceId: (req.params as { id: string }).id,
-      ...(req.body as { amountCents: number; reason: string }),
     }));
 
   app.post('/api/invoices/:id/discount', { preHandler: allow('admin', 'user') },
     async (req) => {
-      const body = req.body as { discountPercent: number; reason: string };
+      const body = req.body as { discountPercent?: number; discountFixedCents?: number; reason: string };
       return approvals.requestInvoiceDiscount(db, actorOf(req),
-        (req.params as { id: string }).id, body.discountPercent, body.reason);
+        (req.params as { id: string }).id, body.discountPercent ?? 0, body.reason,
+        body.discountFixedCents ?? 0);
     });
 
   /* ---------------- payments ---------------- */
@@ -904,7 +903,28 @@ export async function buildServer(db: Db) {
   // the bank-transfer path: one receipt, several invoices, a remainder on
   // account if it does not land exactly.
   app.post('/api/payments/receive', { preHandler: allow('admin', 'user') },
-    async (req) => payments.receivePayment(db, actorOf(req), req.body as never));
+    async (req) => {
+      const body = req.body as { sendReceipt?: boolean; receiptTo?: string };
+      const r = await payments.receivePayment(db, actorOf(req), req.body as never);
+      return { ...r, ...(await maybeReceipt(req, r.paymentIds, body)) };
+    });
+
+  /**
+   * "Send the customer a receipt" (Everton, 30 Sep 2026, point 18). The
+   * payment is already recorded when this runs, so a receipt that cannot go
+   * (no email set up, no address) is reported, never allowed to undo it.
+   */
+  const maybeReceipt = async (
+    req: { session?: Session }, paymentIds: string[],
+    body: { sendReceipt?: boolean; receiptTo?: string },
+  ): Promise<{ receipt?: { sentTo: string; receiptNumber: string }; receiptError?: string }> => {
+    if (!body?.sendReceipt || paymentIds.length === 0) return {};
+    try {
+      return { receipt: await paperwork.emailReceipt(db, actorOf(req), paymentIds, { to: body.receiptTo }) };
+    } catch (err) {
+      return { receiptError: (err as Error).message };
+    }
+  };
 
   // Money already on their account, put against one invoice (oldest first,
   // split if it is more than needed).
@@ -931,7 +951,11 @@ export async function buildServer(db: Db) {
       (req.query as { customerId?: string }).customerId));
 
   app.post('/api/payments', { preHandler: allow('admin', 'user') },
-    async (req) => payments.recordPayment(db, actorOf(req), req.body as never));
+    async (req) => {
+      const body = req.body as { sendReceipt?: boolean; receiptTo?: string };
+      const r = await payments.recordPayment(db, actorOf(req), req.body as never);
+      return { ...r, ...(await maybeReceipt(req, r.id && !r.replayed ? [r.id] : [], body)) };
+    });
 
   app.post('/api/payments/:id/reverse', { preHandler: allow('admin') },
     async (req) => payments.reversePayment(db, actorOf(req),
@@ -1262,6 +1286,8 @@ export async function buildServer(db: Db) {
   app.get('/api/reports/bottle-pool', { preHandler: allow('admin', 'user') },
     async () => reports.bottlePoolReport(db));
 
+  registerRevisionRoutes(app as never, db, { allow: allow as never, actorOf, assertOwnCustomer });
+
   return app;
 }
 
@@ -1324,8 +1350,31 @@ if (import.meta.filename === process.argv[1]) {
     }
   };
 
+  /**
+   * Weekly/monthly invoices for periods that have closed, then (when switched
+   * on under Settings > Automatic emails) statements and payment reminders.
+   * Same pattern as standing orders: on startup, then hourly, idempotent.
+   */
+  const runAutomatic = async (why: string) => {
+    try {
+      const r = await paperwork.runAutomation(db, generator);
+      const bits = [
+        r.cycleInvoices ? `${r.cycleInvoices} weekly/monthly invoice(s) raised` : '',
+        r.statements ? `${r.statements} statement(s) emailed` : '',
+        r.reminders ? `${r.reminders} payment reminder(s) emailed` : '',
+      ].filter(Boolean);
+      if (bits.length) console.log(`  ${bits.join(', ')} (${why}).`);
+      for (const p of r.problems) console.log(`  Automatic email problem: ${p}`);
+    } catch (err) {
+      console.error(`  Automatic invoicing/emails did not run: ${(err as Error).message}`);
+    }
+  };
+
   await runStandingOrders('on startup');
-  const timer = setInterval(() => { void runStandingOrders('hourly check'); }, 60 * 60 * 1000);
+  await runAutomatic('on startup');
+  const timer = setInterval(() => {
+    void runStandingOrders('hourly check').then(() => runAutomatic('hourly check'));
+  }, 60 * 60 * 1000);
   timer.unref();
 
   const app = await buildServer(db);

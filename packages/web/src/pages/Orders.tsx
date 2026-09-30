@@ -19,6 +19,7 @@ interface Order {
   order_date: string; requested_delivery_date: string | null;
   status: string; delivery_mode: string; grand_total_cents: number;
   discount_percent: number; source: string;
+  discount_fixed_cents?: number; gct_exempt?: boolean;
   is_recurring: boolean; recurrence_pattern: string | null; parent_recurring_id: string | null;
   customer_zone: string | null; today: string; lines_summary: string | null;
   stop_id: string | null; stop_outcome: string | null; sheet_id: string | null;
@@ -32,6 +33,7 @@ interface Product {
 interface OrderLine {
   id: string; product_id: string; product_name: string;
   bottles_per_case: number; cases: number; loose_bottles: number;
+  price_per_case_cents: number; price_per_bottle_cents: number;
 }
 
 type Show = 'waiting' | 'delivered' | 'cancelled' | 'all';
@@ -110,9 +112,12 @@ export default function Orders() {
 
   const [editing, setEditing] = useState<Order | null>(null);
   const [products, setProducts] = useState<Product[]>([]);
-  const [lines, setLines] = useState<Array<{ productId: string; qty: string }>>([]);
+  /** price: the unit price in dollars as typed, '' = their usual price. */
+  const [lines, setLines] = useState<Array<{ productId: string; qty: string; price: string }>>([]);
   const [reqDate, setReqDate] = useState('');
   const [discount, setDiscount] = useState('0');
+  const [discountAs, setDiscountAs] = useState<'%' | '$'>('%');
+  const [chargeGct, setChargeGct] = useState(true);
 
   async function load() {
     setOrders(await api.get<Order[]>('/api/orders?limit=500'));
@@ -136,12 +141,21 @@ export default function Orders() {
       setProducts(priced.map((p) => ({ ...p, id: p.product_id ?? p.id })));
 
       const detail = await api.get<{ lines: OrderLine[] }>(`/api/orders/${o.id}`);
-      setLines(detail.lines.map((l) => ({
-        productId: l.product_id,
-        qty: String(Number(l.bottles_per_case) > 0 ? l.cases : l.loose_bottles),
-      })));
+      // Each line keeps the price it was taken at (repricing never rewrites
+      // an order), shown so it can be seen and changed.
+      setLines(detail.lines.map((l) => {
+        const cased = Number(l.bottles_per_case) > 0;
+        return {
+          productId: l.product_id,
+          qty: String(cased ? l.cases : l.loose_bottles),
+          price: (Number(cased ? l.price_per_case_cents : l.price_per_bottle_cents) / 100).toFixed(2),
+        };
+      }));
       setReqDate(o.requested_delivery_date?.slice(0, 10) ?? '');
-      setDiscount(String(Number(o.discount_percent) || 0));
+      const fixed = Number(o.discount_fixed_cents) || 0;
+      setDiscountAs(fixed > 0 ? '$' : '%');
+      setDiscount(fixed > 0 ? (fixed / 100).toFixed(2) : String(Number(o.discount_percent) || 0));
+      setChargeGct(!o.gct_exempt);
       setEditing(o);
       window.scrollTo({ top: 0, behavior: 'smooth' });
     } catch (e) {
@@ -150,22 +164,26 @@ export default function Orders() {
   }
 
   const productOf = (id: string) => products.find((p) => p.id === id);
+  const usualOf = (p: Product) => (Number(p.bottles_per_case) > 0
+    ? Number(p.price_per_case_cents) : Number(p.price_per_bottle_cents));
+  const unitOf = (l: { productId: string; price: string }) => {
+    const p = productOf(l.productId);
+    if (!p) return 0;
+    return l.price.trim() === '' ? usualOf(p) : Math.max(0, Math.round(Number(l.price) * 100) || 0);
+  };
 
   const totals = (() => {
     let subtotal = 0;
     for (const l of lines) {
-      const p = productOf(l.productId);
       const qty = Math.max(Math.round(Number(l.qty) || 0), 0);
-      if (!p) continue;
-      subtotal += Number(p.bottles_per_case) > 0
-        ? qty * Number(p.price_per_case_cents)
-        : qty * Number(p.price_per_bottle_cents);
+      subtotal += qty * unitOf(l);
     }
-    const pct = Math.min(Math.max(Number(discount) || 0, 0), 100);
-    const discountAmount = Math.round(subtotal * (pct / 100));
+    const fixed = discountAs === '$' ? Math.max(0, Math.round((Number(discount) || 0) * 100)) : 0;
+    const pct = discountAs === '%' ? Math.min(Math.max(Number(discount) || 0, 0), 100) : 0;
+    const discountAmount = fixed > 0 ? Math.min(fixed, subtotal) : Math.round(subtotal * (pct / 100));
     const net = subtotal - discountAmount;
-    const gct = Math.round(net * GCT_RATE);
-    return { subtotal, discountAmount, gct, grandTotal: net + gct };
+    const gct = chargeGct ? Math.round(net * GCT_RATE) : 0;
+    return { subtotal, discountAmount, gct, grandTotal: net + gct, fixed, pct };
   })();
 
   async function saveEdit(e: React.FormEvent) {
@@ -178,16 +196,19 @@ export default function Orders() {
         .map((l) => {
           const p = productOf(l.productId)!;
           const qty = Math.round(Number(l.qty));
+          const unit = unitOf(l);
           return Number(p.bottles_per_case) > 0
-            ? { productId: l.productId, cases: qty }
-            : { productId: l.productId, looseBottles: qty };
+            ? { productId: l.productId, cases: qty, pricePerCaseCents: unit }
+            : { productId: l.productId, looseBottles: qty, pricePerBottleCents: unit };
         });
       if (payload.length === 0) throw new Error('An order needs at least one line.');
 
       const r = await api.patch<{ grandTotalCents: number }>(`/api/orders/${editing.id}`, {
         lines: payload,
         requestedDeliveryDate: reqDate || null,
-        discountPercent: Number(discount) || 0,
+        discountPercent: totals.pct,
+        discountFixedCents: totals.fixed,
+        gctExempt: !chargeGct,
       });
       setMsg(`${editing.order_number} updated. New total ${money(r.grandTotalCents)}.`);
       setEditing(null);
@@ -204,12 +225,14 @@ export default function Orders() {
    */
   async function collect(o: Order) {
     await act(async () => {
-      const out = await api.post<{ invoiceNumber: string; balanceCents: number }>(
+      const out = await api.post<{ invoiceNumber: string | null; balanceCents: number }>(
         `/api/orders/${o.id}/collect`,
         { amountPaidCents: toCents(paidNow || '0'), method: paidHow },
       );
-      return `${o.order_number} collected. Invoice ${out.invoiceNumber} raised, ` +
-        `balance ${money(out.balanceCents)}.`;
+      return out.invoiceNumber
+        ? `${o.order_number} collected. Invoice ${out.invoiceNumber} raised, balance ${money(out.balanceCents)}.`
+        : `${o.order_number} collected. It goes on their weekly/monthly invoice; `
+          + `anything paid now is on their account.`;
     }, 'Could not record the collection');
   }
 
@@ -451,17 +474,28 @@ export default function Orders() {
                        onChange={(e) => setReqDate(e.target.value)} />
               </div>
               <div className="field">
-                <label htmlFor="dp">Discount %</label>
-                <input id="dp" type="number" min="0" max="100" step="0.01"
+                <label htmlFor="dp">Discount</label>
+                <span className="money-toggle" role="group" aria-label="Discount as">
+                  {(['%', '$'] as const).map((k) => (
+                    <button key={k} type="button" className={discountAs === k ? 'on' : ''}
+                            onClick={() => { setDiscountAs(k); setDiscount('0'); }}>{k === '%' ? '%' : '$ amount'}</button>
+                  ))}
+                </span>{' '}
+                <input id="dp" type="number" min="0" max={discountAs === '%' ? 100 : undefined} step="0.01"
                        style={{ width: 100 }} value={discount}
                        onChange={(e) => setDiscount(e.target.value)} />
               </div>
+              <label className="check">
+                <input type="checkbox" checked={chargeGct} onChange={(e) => setChargeGct(e.target.checked)} />
+                Charge GCT
+              </label>
             </div>
 
             <table>
               <thead>
                 <tr>
-                  <th style={{ width: '45%' }}>Product</th><th>Quantity</th>
+                  <th style={{ width: '38%' }}>Product</th><th>Quantity</th>
+                  <th className="num">Unit price</th>
                   <th className="num">Line total</th><th />
                 </tr>
               </thead>
@@ -469,16 +503,13 @@ export default function Orders() {
                 {lines.map((l, i) => {
                   const p = productOf(l.productId);
                   const qty = Math.max(Math.round(Number(l.qty) || 0), 0);
-                  const lineTotal = !p ? 0
-                    : Number(p.bottles_per_case) > 0
-                      ? qty * Number(p.price_per_case_cents)
-                      : qty * Number(p.price_per_bottle_cents);
+                  const lineTotal = !p ? 0 : qty * unitOf(l);
                   return (
                     <tr key={i}>
                       <td>
                         <select value={l.productId} style={{ width: '100%' }}
                                 onChange={(e) => setLines(lines.map((x, j) =>
-                                  j === i ? { productId: e.target.value, qty: '' } : x))}>
+                                  j === i ? { productId: e.target.value, qty: '', price: '' } : x))}>
                           <option value="">Select a product…</option>
                           {products.map((pr) => (
                             <option key={pr.id} value={pr.id}>{pr.name}</option>
@@ -498,6 +529,18 @@ export default function Orders() {
                           </>
                         ) : <span className="muted small">—</span>}
                       </td>
+                      <td className="num">
+                        {p && (
+                          <>
+                            <input type="number" min="0" step="0.01" className="price-input"
+                                   aria-label={`Unit price of ${p.name}`}
+                                   value={l.price === '' ? (usualOf(p) / 100).toFixed(2) : l.price}
+                                   onChange={(e) => setLines(lines.map((x, j) =>
+                                     j === i ? { ...x, price: e.target.value } : x))} />
+                            <div className="muted small">per {Number(p.bottles_per_case) > 0 ? 'case' : 'bottle'}</div>
+                          </>
+                        )}
+                      </td>
                       <td className="num">{money(lineTotal)}</td>
                       <td className="num">
                         {lines.length > 1 && (
@@ -515,7 +558,7 @@ export default function Orders() {
 
             <div style={{ marginTop: 10 }}>
               <button type="button" className="secondary"
-                      onClick={() => setLines([...lines, { productId: '', qty: '' }])}>
+                      onClick={() => setLines([...lines, { productId: '', qty: '', price: '' }])}>
                 Add line
               </button>
             </div>

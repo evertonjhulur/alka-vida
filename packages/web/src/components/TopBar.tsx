@@ -193,6 +193,12 @@ export default function TopBar({
               <Link role="menuitem" className="pop-item" to="/orders/new?mode=Counter">
                 <span>Counter sale</span><span className="pop-meta">walk-in, paid now</span>
               </Link>
+              <Link role="menuitem" className="pop-item" to="/quotes/new">
+                <span>Quote</span><span className="pop-meta">prices for a customer to accept</span>
+              </Link>
+              <Link role="menuitem" className="pop-item" to="/credit-notes?new=1">
+                <span>Credit note</span><span className="pop-meta">money back to a customer</span>
+              </Link>
               <Link role="menuitem" className="pop-item" to="/payments">
                 <span>Payment received</span><span className="pop-meta">transfer, cheque, card</span>
               </Link>

@@ -35,6 +35,7 @@ interface Stop {
   stop_count?: number;
   stop_position?: number;
   payment_terms?: string | null;
+  invoice_cycle?: string | null;
   customer_notes?: string | null;
   driver_notes?: string | null;
   /** Always tax-inclusive: the invoice total, or the order total before one exists. */
@@ -219,7 +220,8 @@ export default function DriverStop() {
   }
 
   const back = office && stop.delivery_sheet_id ? `/delivery/${stop.delivery_sheet_id}` : '/route';
-  const onTerms = !!stop.payment_terms && !/cash on delivery/i.test(stop.payment_terms);
+  const onCycle = stop.invoice_cycle === 'Weekly' || stop.invoice_cycle === 'Monthly';
+  const onTerms = onCycle || (!!stop.payment_terms && !/cash on delivery/i.test(stop.payment_terms));
   const done = stop.stop_outcome !== 'Pending';
   // A delivered stop has raised its invoice and moved bottles; recording it
   // again from here would move them twice. Not home -> Delivered is fine.
@@ -330,7 +332,8 @@ export default function DriverStop() {
           <div className="owed">{money(stop.amountOwedCents)}</div>
         </div>
         <div className="muted small">
-          incl. GCT · {onTerms ? `on ${stop.payment_terms} terms, so paying now is optional` : 'cash on delivery'}
+          incl. GCT · {onCycle ? `billed ${stop.invoice_cycle!.toLowerCase()}, so paying now is optional`
+            : onTerms ? `on ${stop.payment_terms} terms, so paying now is optional` : 'cash on delivery'}
         </div>
         <div className="seg pay-ways" role="group" aria-label="How they paid">
           {PAY_WAYS.map(([v, label]) => (

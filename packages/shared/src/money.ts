@@ -15,6 +15,9 @@ export type Cents = number;
 /** Jamaica General Consumption Tax. */
 export const GCT_RATE = 0.15;
 
+/** Jamaica Environmental Levy on purchases, as a fraction (0.375%). */
+export const ENV_TAX_RATE = 0.00375;
+
 /** Guard: every Cents value crossing a boundary must be a safe integer. */
 export function assertCents(v: number, label = 'amount'): Cents {
   if (!Number.isSafeInteger(v)) {
@@ -70,7 +73,7 @@ export interface DocumentTotals {
  * the prior build drifted because order entry and invoicing each had their
  * own copy and one of them taxed the PRE-discount subtotal.
  *
- *   discountAmount = subtotal * (discountPercent / 100)
+ *   discountAmount = subtotal * (discountPercent / 100), or a fixed amount
  *   gct            = (subtotal - discountAmount) * GCT_RATE
  *   grandTotal     = (subtotal - discountAmount) + gct
  *
@@ -81,12 +84,20 @@ export function computeTotals(
   lines: readonly LineForTotals[],
   discountPercent = 0,
   applyGct = true,
+  discountFixedCents = 0,
 ): DocumentTotals {
   if (!(discountPercent >= 0 && discountPercent <= 100)) {
     throw new RuleViolation(`discountPercent must be 0-100, got ${discountPercent}`);
   }
+  assertCents(discountFixedCents, 'discountFixedCents');
+  if (discountFixedCents < 0) throw new RuleViolation('a discount cannot be negative');
   const subtotal = lines.reduce((acc, l) => acc + assertCents(l.lineTotal, 'lineTotal'), 0);
-  const discountAmount = roundCents(subtotal * (discountPercent / 100));
+  // A discount is EITHER a percentage OR a fixed amount (Everton, 30 Sep 2026).
+  // A fixed amount wins when both are given, and can never take the
+  // document below zero.
+  const discountAmount = discountFixedCents > 0
+    ? Math.min(discountFixedCents, subtotal)
+    : roundCents(subtotal * (discountPercent / 100));
   const net = subtotal - discountAmount;
   const gct = applyGct ? roundCents(net * GCT_RATE) : 0;
   return { subtotal, discountAmount, gct, grandTotal: net + gct };

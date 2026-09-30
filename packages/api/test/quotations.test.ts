@@ -12,27 +12,34 @@ before(async () => { f = await setupFixture(); });
 after(async () => { await f.close(); });
 
 describe('Quotations', () => {
-  test('carry NO GCT - the total is simply subtotal less discount', async () => {
+  test('show the GCT the order will attract, but book nothing (changed 30 Sep 2026)', async () => {
     const q = await createQuotation(f.db, f.office, {
       customerId: f.customerId,
       discountPercent: 10,
       lines: [{ productId: f.casedProductId, cases: 10, pricePerCaseCents: 120_000 }],
     });
     assert.equal(q.subtotalCents, 1_200_000);
-    // 10% off 12,000.00 = 10,800.00 and NOT a cent of tax.
-    assert.equal(q.grandTotalCents, 1_080_000);
+    // 10% off 12,000.00 = 10,800.00, plus 15% GCT = 12,420.00: the price the
+    // customer will actually pay, which is what a quote is for.
+    assert.equal(q.gctCents, 162_000);
+    assert.equal(q.grandTotalCents, 1_242_000);
 
-    const row = await f.db.one<{ grand_total_cents: number }>(
-      `SELECT grand_total_cents FROM quotations WHERE id = $1`, [q.id],
+    // A quote is still not a sale: nothing reaches any balance.
+    const bal = await f.db.one<{ n: string }>(
+      `SELECT COUNT(*)::text AS n FROM invoices WHERE customer_id = $1`, [f.customerId],
     );
-    assert.equal(Number(row.grand_total_cents), 1_080_000);
+    assert.equal(Number(bal.n), 0);
+  });
 
-    // The table has no gct column at all for quotations.
-    const cols = await f.db.query(
-      `SELECT column_name FROM information_schema.columns
-       WHERE table_name = 'quotations' AND column_name LIKE '%gct%'`,
-    );
-    assert.equal(cols.length, 0, 'quotations have no tax column by design');
+  test('a GCT-exempt customer is quoted without GCT', async () => {
+    await f.db.query(`UPDATE customers SET gct_exempt = true WHERE id = $1`, [f.otherCustomerId]);
+    const q = await createQuotation(f.db, f.office, {
+      customerId: f.otherCustomerId,
+      lines: [{ productId: f.casedProductId, cases: 1, pricePerCaseCents: 100_000 }],
+    });
+    assert.equal(q.gctCents, 0);
+    assert.equal(q.grandTotalCents, 100_000);
+    await f.db.query(`UPDATE customers SET gct_exempt = false WHERE id = $1`, [f.otherCustomerId]);
   });
 
   test('accept estimate prices that differ from the customer tier', async () => {
@@ -65,8 +72,8 @@ describe('Quotations', () => {
       requestedDeliveryDate: '2026-12-07',
     });
 
-    // The quotation was 12,000.00 with no tax; the order adds 15% -> 13,800.00
-    assert.equal(q.grandTotalCents, 1_200_000);
+    // Quoted 12,000.00 + GCT = 13,800.00, and the order comes to the same.
+    assert.equal(q.grandTotalCents, 1_380_000);
     assert.equal(converted.grandTotalCents, 1_380_000);
 
     const after = await getQuotation(f.db, q.id) as { status: string; converted_order_id: string };

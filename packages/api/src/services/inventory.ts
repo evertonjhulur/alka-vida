@@ -12,7 +12,7 @@ import type { Actor } from './core.ts';
 import { audit, nextNumber, requireRole, num } from './core.ts';
 import type { Cents } from '@alka/shared';
 import {
-  drawFifo, blendedAverageCost, blendedAverageBySupplier, RuleViolation, type Batch,
+  drawFifo, blendedAverageCost, blendedAverageBySupplier, RuleViolation, type Batch, GCT_RATE,
 } from '@alka/shared';
 
 /**
@@ -49,53 +49,184 @@ export async function lookupSupplierPrice(
   return num(mat?.unit_cost_cents);
 }
 
+export interface PoLineInput {
+  rawMaterialId: string;
+  quantityOrdered: number;
+  unitCostCents?: Cents;
+  /** Overrides the supplier-product tag for this one line. */
+  gctExempt?: boolean;
+  envExempt?: boolean;
+}
+
+/** The Environmental Levy rate as a fraction (0.375% unless changed). */
+export async function envTaxRate(t: Queryable): Promise<number> {
+  const row = await t.maybeOne<{ value: string }>(
+    `SELECT value FROM system_settings WHERE key = 'env_tax_rate_percent'`,
+  );
+  const pct = Number(row?.value ?? 0.375);
+  return Number.isFinite(pct) && pct >= 0 ? pct / 100 : 0.00375;
+}
+
+/**
+ * Price and tax the lines of a PO.
+ *
+ * GCT (15%) and the Environmental Levy (0.375%) are worked out PER LINE, from
+ * how the product is tagged for that supplier (Everton, 30 Sep 2026): a line
+ * tagged GCT-exempt carries no GCT, one tagged Env-exempt no levy. Each is
+ * worked out on the line's own amount, then summed.
+ */
+async function pricePoLines(t: Queryable, supplierId: string, lines: readonly PoLineInput[]) {
+  if (lines.length === 0) throw new RuleViolation('a purchase order needs at least one line');
+  const env = await envTaxRate(t);
+  const out = [];
+  for (const l of lines) {
+    const qty = Number(l.quantityOrdered);
+    if (!(qty > 0)) throw new RuleViolation('each line needs a quantity above zero');
+    const tag = await t.maybeOne<{ gct_exempt: boolean; env_exempt: boolean }>(
+      `SELECT gct_exempt, env_exempt FROM supplier_materials
+       WHERE supplier_id = $1 AND raw_material_id = $2`, [supplierId, l.rawMaterialId],
+    );
+    const unitCost = l.unitCostCents != null && l.unitCostCents !== ('' as unknown)
+      ? Math.round(Number(l.unitCostCents))
+      : await lookupSupplierPrice(t, supplierId, l.rawMaterialId, qty);
+    if (!(unitCost >= 0)) throw new RuleViolation('a unit cost cannot be negative');
+    const gctExempt = l.gctExempt ?? tag?.gct_exempt ?? false;
+    const envExempt = l.envExempt ?? tag?.env_exempt ?? false;
+    const lineTotal = Math.round(unitCost * qty);
+    out.push({
+      rawMaterialId: l.rawMaterialId, qty, unitCost, gctExempt, envExempt, lineTotal,
+      gct: gctExempt ? 0 : Math.round(lineTotal * GCT_RATE),
+      envTax: envExempt ? 0 : Math.round(lineTotal * env),
+    });
+  }
+  return out;
+}
+
+async function writePoLines(t: Queryable, poId: string, priced: Awaited<ReturnType<typeof pricePoLines>>) {
+  let subtotal = 0; let gct = 0; let envTax = 0;
+  for (const l of priced) {
+    await t.query(
+      `INSERT INTO po_line_items
+         (po_id, raw_material_id, quantity_ordered, unit_cost_cents,
+          gct_exempt, env_exempt, line_total_cents, gct_cents, env_tax_cents)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+      [poId, l.rawMaterialId, l.qty, l.unitCost, l.gctExempt, l.envExempt,
+       l.lineTotal, l.gct, l.envTax],
+    );
+    subtotal += l.lineTotal; gct += l.gct; envTax += l.envTax;
+  }
+  await t.query(
+    `UPDATE purchase_orders
+     SET subtotal_cents = $2, gct_cents = $3, env_tax_cents = $4, grand_total_cents = $5,
+         updated_at = now()
+     WHERE id = $1`,
+    [poId, subtotal, gct, envTax, subtotal + gct + envTax],
+  );
+  return { subtotal, gct, envTax, grandTotal: subtotal + gct + envTax };
+}
+
 export async function createPurchaseOrder(
   db: Db,
   actor: Actor,
   input: {
     supplierId: string;
-    lines: Array<{ rawMaterialId: string; quantityOrdered: number; unitCostCents?: Cents }>;
+    lines: PoLineInput[];
     expectedDeliveryDate?: string | null;
-    envTaxCents?: Cents;
     notes?: string | null;
   },
-): Promise<{ id: string; poNumber: string; subtotalCents: Cents; grandTotalCents: Cents }> {
+): Promise<{ id: string; poNumber: string; subtotalCents: Cents; gctCents: Cents;
+             envTaxCents: Cents; grandTotalCents: Cents }> {
   requireRole(actor, 'admin', 'user');
-  if (input.lines.length === 0) throw new RuleViolation('a purchase order needs at least one line');
+  if (!input.lines || input.lines.length === 0) {
+    throw new RuleViolation('a purchase order needs at least one line');
+  }
 
   return db.tx(async (t) => {
+    const priced = await pricePoLines(t, input.supplierId, input.lines);
     const poNumber = await nextNumber(t, 'po_number_seq', 'PO');
     const po = await t.one<{ id: string }>(
       `INSERT INTO purchase_orders (supplier_id, po_number, expected_delivery_date, notes)
        VALUES ($1,$2,$3,$4) RETURNING id`,
-      [input.supplierId, poNumber, input.expectedDeliveryDate ?? null, input.notes ?? null],
+      [input.supplierId, poNumber, input.expectedDeliveryDate || null, input.notes ?? null],
     );
-
-    let subtotal = 0;
-    for (const l of input.lines) {
-      const unitCost = l.unitCostCents
-        ?? await lookupSupplierPrice(t, input.supplierId, l.rawMaterialId, l.quantityOrdered);
-      subtotal += Math.round(unitCost * l.quantityOrdered);
-      await t.query(
-        `INSERT INTO po_line_items (po_id, raw_material_id, quantity_ordered, unit_cost_cents)
-         VALUES ($1,$2,$3,$4)`,
-        [po.id, l.rawMaterialId, l.quantityOrdered, unitCost],
-      );
-    }
-
-    const gct = Math.round(subtotal * 0.15);
-    const envTax = input.envTaxCents ?? 0;
-    await t.query(
-      `UPDATE purchase_orders
-       SET subtotal_cents = $2, gct_cents = $3, env_tax_cents = $4, grand_total_cents = $5
-       WHERE id = $1`,
-      [po.id, subtotal, gct, envTax, subtotal + gct + envTax],
-    );
+    const totals = await writePoLines(t, po.id, priced);
 
     await audit(t, actor, 'create', 'PurchaseOrder', po.id, poNumber,
-      { supplierId: input.supplierId, subtotalCents: subtotal });
+      { supplierId: input.supplierId, subtotalCents: totals.subtotal,
+        gctCents: totals.gct, envTaxCents: totals.envTax });
 
-    return { id: po.id, poNumber, subtotalCents: subtotal, grandTotalCents: subtotal + gct + envTax };
+    return { id: po.id, poNumber, subtotalCents: totals.subtotal, gctCents: totals.gct,
+             envTaxCents: totals.envTax, grandTotalCents: totals.grandTotal };
+  });
+}
+
+/**
+ * Change a PO nothing has been received against yet (Everton, 30 Sep 2026:
+ * POs must be editable). Once goods have come in, the lines are history -
+ * they made FIFO batches at their cost - so it can no longer change.
+ */
+export async function updatePurchaseOrder(
+  db: Db, actor: Actor, poId: string,
+  input: { supplierId?: string; lines: PoLineInput[]; expectedDeliveryDate?: string | null; notes?: string | null },
+): Promise<{ grandTotalCents: Cents }> {
+  requireRole(actor, 'admin', 'user');
+  return db.tx(async (t) => {
+    const po = await t.maybeOne<{ status: string; po_number: string; supplier_id: string }>(
+      `SELECT status, po_number, supplier_id FROM purchase_orders WHERE id = $1 FOR UPDATE`, [poId],
+    );
+    if (!po) throw new RuleViolation('that purchase order no longer exists');
+    const received = await t.one<{ n: number }>(
+      `SELECT COALESCE(SUM(quantity_received),0)::float AS n FROM po_line_items WHERE po_id = $1`, [poId],
+    );
+    if (num(received.n) > 0 || !['Draft', 'Sent'].includes(po.status)) {
+      throw new RuleViolation(`${po.po_number} has goods received against it, so it can no longer be changed`);
+    }
+    const supplierId = input.supplierId || po.supplier_id;
+    const priced = await pricePoLines(t, supplierId, input.lines ?? []);
+    await t.query(`DELETE FROM po_line_items WHERE po_id = $1`, [poId]);
+    await t.query(
+      `UPDATE purchase_orders SET supplier_id = $2, expected_delivery_date = $3, notes = $4 WHERE id = $1`,
+      [poId, supplierId, input.expectedDeliveryDate || null, input.notes ?? null],
+    );
+    const totals = await writePoLines(t, poId, priced);
+    await audit(t, actor, 'update', 'PurchaseOrder', poId, po.po_number,
+      { grandTotalCents: totals.grandTotal, lines: priced.length });
+    return { grandTotalCents: totals.grandTotal };
+  });
+}
+
+/**
+ * Delete a PO (Everton, 30 Sep 2026). Only while nothing has been received:
+ * a PO with goods against it made FIFO batches and must stay. Such a PO can
+ * be cancelled for what is still outstanding instead.
+ */
+export async function deletePurchaseOrder(db: Db, actor: Actor, poId: string): Promise<void> {
+  requireRole(actor, 'admin', 'user');
+  await db.tx(async (t) => {
+    const po = await t.one<{ po_number: string }>(
+      `SELECT po_number FROM purchase_orders WHERE id = $1`, [poId],
+    );
+    const received = await t.one<{ n: number }>(
+      `SELECT COALESCE(SUM(quantity_received),0)::float AS n FROM po_line_items WHERE po_id = $1`, [poId],
+    );
+    if (num(received.n) > 0) {
+      throw new RuleViolation(`goods have been received against ${po.po_number}, so it cannot be deleted. Cancel what is still outstanding instead.`);
+    }
+    await t.query(`DELETE FROM purchase_orders WHERE id = $1`, [poId]);
+    await audit(t, actor, 'delete', 'PurchaseOrder', poId, po.po_number, {});
+  });
+}
+
+/** Close a PO: nothing more is expected against it. What was received stays. */
+export async function cancelPurchaseOrder(db: Db, actor: Actor, poId: string): Promise<void> {
+  requireRole(actor, 'admin', 'user');
+  await db.tx(async (t) => {
+    const po = await t.one<{ po_number: string; status: string }>(
+      `SELECT po_number, status FROM purchase_orders WHERE id = $1`, [poId],
+    );
+    if (po.status === 'Received') throw new RuleViolation(`${po.po_number} is fully received`);
+    await t.query(`UPDATE purchase_orders SET status = 'Cancelled', updated_at = now() WHERE id = $1`, [poId]);
+    await audit(t, actor, 'update', 'PurchaseOrder', poId, po.po_number, { status: 'Cancelled' });
   });
 }
 
@@ -459,7 +590,11 @@ export async function listPurchaseOrders(db: Db, status?: string) {
 
 export async function getPurchaseOrder(db: Db, poId: string) {
   const po = await db.maybeOne(
-    `SELECT po.*, s.name AS supplier_name FROM purchase_orders po
+    `SELECT po.*, po.order_date::text AS order_date,
+            po.expected_delivery_date::text AS expected_delivery_date,
+            s.name AS supplier_name, s.email AS supplier_email, s.contact_person AS supplier_contact,
+            s.phone AS supplier_phone, s.address AS supplier_address
+     FROM purchase_orders po
      JOIN suppliers s ON s.id = po.supplier_id WHERE po.id = $1`, [poId],
   );
   if (!po) return null;

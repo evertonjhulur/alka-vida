@@ -19,11 +19,14 @@ import { createOrder, type OrderLineInput } from './orders.ts';
 import { createInvoice, getInvoiceLedger } from './invoices.ts';
 import { insertPayment } from './payments.ts';
 import { refreshOrderStatus } from './orders.ts';
+import { billedOnCycle } from './delivery.ts';
 
 export interface CounterSaleInput {
   customerId: string;
   lines: OrderLineInput[];
   discountPercent?: number;
+  discountFixedCents?: Cents;
+  gctExempt?: boolean | null;
   /** Omit or pass 0 for an unpaid pickup (e.g. stated bank transfer). */
   amountPaidCents?: Cents;
   method?: PaymentMethod;
@@ -49,6 +52,8 @@ export async function counterSale(
     lines: input.lines,
     deliveryMode: 'Counter',
     discountPercent: input.discountPercent ?? 0,
+    discountFixedCents: input.discountFixedCents ?? 0,
+    gctExempt: input.gctExempt ?? null,
     paymentMethod: input.method === 'Cheque' || input.method === 'Other'
       ? null : (input.method ?? 'Cash'),
     notes: input.notes ?? 'Counter sale',
@@ -58,7 +63,6 @@ export async function counterSale(
     const run = () => invoiceAndTakePayment(t, actor, {
       orderId: order.id,
       customerId: input.customerId,
-      discountPercent: input.discountPercent ?? 0,
       notes: input.notes ?? 'Counter sale',
       amountPaidCents: input.amountPaidCents ?? 0,
       method: input.method ?? 'Cash',
@@ -94,7 +98,7 @@ async function invoiceAndTakePayment(
   t: Queryable,
   actor: Actor,
   args: {
-    orderId: string; customerId: string; discountPercent: number;
+    orderId: string; customerId: string;
     notes: string; amountPaidCents: Cents; method: PaymentMethod;
   },
 ): Promise<{ id: string }> {
@@ -107,6 +111,8 @@ async function invoiceAndTakePayment(
      WHERE order_id = $1`, [args.orderId],
   );
   await refreshOrderStatus(t, args.orderId);
+  await t.query(`UPDATE customer_orders SET fulfilled_on = business_today() WHERE id = $1`,
+    [args.orderId]);
 
   const lines = await t.query<{
     product_id: string; delivered_cases: number; delivered_loose: number;
@@ -117,10 +123,17 @@ async function invoiceAndTakePayment(
      FROM order_line_items WHERE order_id = $1`, [args.orderId],
   );
 
+  // The discount and GCT decided on the order are the ones billed.
+  const order = await t.one<{ discount_percent: number; discount_fixed_cents: number; gct_exempt: boolean }>(
+    `SELECT discount_percent, discount_fixed_cents, gct_exempt FROM customer_orders WHERE id = $1`,
+    [args.orderId],
+  );
   const invoice = await createInvoice(t, actor, {
     customerId: args.customerId,
     orderIds: [args.orderId],
-    discountPercent: args.discountPercent,
+    discountPercent: num(order.discount_percent),
+    discountFixedCents: num(order.discount_fixed_cents),
+    gctExempt: order.gct_exempt,
     notes: args.notes,
     lines: lines.map((l) => ({
       productId: l.product_id,
@@ -204,10 +217,41 @@ export async function collectOrder(
       throw new RuleViolation(`${order.order_number} has already been collected`);
     }
 
+    // Billed weekly or monthly: the collection goes on the account and waits
+    // for the cycle invoice. Anything paid now simply sits on the account and
+    // is applied when that invoice is raised.
+    if (await billedOnCycle(t, order.customer_id)) {
+      await t.query(
+        `UPDATE order_line_items
+         SET delivered_cases = cases, delivered_loose = loose_bottles,
+             delivered_total = total_bottles
+         WHERE order_id = $1`, [input.orderId],
+      );
+      await refreshOrderStatus(t, input.orderId);
+      await t.query(`UPDATE customer_orders SET fulfilled_on = business_today() WHERE id = $1`,
+        [input.orderId]);
+      const paid = input.amountPaidCents ?? 0;
+      if (paid > 0) {
+        await insertPayment(t, actor, {
+          customerId: order.customer_id, invoiceId: null, amountCents: paid,
+          method: input.method ?? 'Cash', status: 'Confirmed',
+          notes: `Paid on collecting ${order.order_number}`,
+        });
+      }
+      const bal = await t.one<{ b: string }>(
+        `SELECT COALESCE(balance_cents,0)::text AS b FROM customer_balances WHERE customer_id = $1`,
+        [order.customer_id],
+      );
+      return {
+        invoiceId: null as unknown as string, invoiceNumber: null as unknown as string,
+        grandTotalCents: 0, amountPaidCents: paid, balanceCents: Number(bal.b),
+        status: 'On the cycle invoice', replayed: false, onCycle: true,
+      };
+    }
+
     const run = () => invoiceAndTakePayment(t, actor, {
       orderId: input.orderId,
       customerId: order.customer_id,
-      discountPercent: num(order.discount_percent),
       notes: input.notes ?? `Collected at the plant`,
       amountPaidCents: input.amountPaidCents ?? 0,
       method: input.method ?? 'Cash',

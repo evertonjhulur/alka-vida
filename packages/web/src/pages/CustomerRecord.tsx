@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link, useParams, useSearchParams } from 'react-router-dom';
-import { api, type Session } from '../lib/api';
+import { api, downloadPost, type Session } from '../lib/api';
 import { money, date, statusTone, toCents, when } from '../lib/format';
 import { StatementView } from './Statement';
+import CustomerForm, { customerToForm, formToPayload, BLANK_CUSTOMER, type CustomerFormValues } from '../components/CustomerForm';
+import { AddressesPanel, SpecialPricesPanel } from '../components/CustomerExtras';
 
 interface Customer {
   id: string; name: string; phone: string; email: string;
@@ -10,6 +12,10 @@ interface Customer {
   delivery_zone: string | null; payment_terms: string | null;
   account_type: string | null; price_tier_name: string | null;
   portal_email: string | null; notes: string | null; active: boolean;
+  invoice_cycle?: string | null; gct_exempt?: boolean; delivery_days?: string[] | null;
+}
+interface Waiting {
+  kind: string; orderNumber: string; date: string; subtotalCents: number;
 }
 interface Order {
   id: string; order_number: string; order_date: string; status: string;
@@ -39,12 +45,7 @@ interface Schedule {
   deliveryZone: string | null; occurrencesRaised: number; lineSummary: string;
 }
 interface Unapplied { id: string; customer_id: string; amount_cents: number | string }
-interface Tier { id: string; name: string }
-interface Zone { id: string; name: string; retired_at: string | null }
-
 const METHODS = ['Cash', 'Cheque', 'Bank Transfer', 'Card'] as const;
-const DAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'] as const;
-const PAYMENT_TERMS = ['Cash on delivery', 'Net 15', 'Net 30', 'Net 60', 'Net 90'] as const;
 const PATTERN_WORDS: Record<Schedule['pattern'], string> = {
   Weekly: 'every week', Biweekly: 'every 2 weeks', Monthly: 'every month',
 };
@@ -60,11 +61,6 @@ const TABS = [
 ] as const;
 type Tab = (typeof TABS)[number][0];
 
-const BLANK_FORM = {
-  name: '', phone: '', email: '', contactPerson: '', deliveryAddress: '',
-  deliveryZone: '', routeSequence: '0', priceTierId: '', paymentTerms: '',
-  defaultDeliveryDay: '', notes: '',
-};
 
 /**
  * One customer, everything about them, on one page.
@@ -96,16 +92,16 @@ export default function CustomerRecord({ session }: { session: Session }) {
   const [busy, setBusy] = useState(false);
 
   const [payOpen, setPayOpen] = useState(false);
-  const [pay, setPay] = useState({ amount: '', method: 'Cash', invoiceId: '', reference: '' });
+  const [pay, setPay] = useState({ amount: '', method: 'Cash', invoiceId: '', reference: '', receipt: true });
+  const [picked, setPicked] = useState<string[]>([]);
+  const [waiting, setWaiting] = useState<Waiting[]>([]);
   const [sendOpen, setSendOpen] = useState(false);
   const [sendTo, setSendTo] = useState('');
   const [moreOpen, setMoreOpen] = useState(false);
   const moreRef = useRef<HTMLDivElement>(null);
 
-  const [form, setForm] = useState({ ...BLANK_FORM });
+  const [form, setForm] = useState<CustomerFormValues>({ ...BLANK_CUSTOMER });
   const [formLoaded, setFormLoaded] = useState(false);
-  const [tiers, setTiers] = useState<Tier[]>([]);
-  const [zones, setZones] = useState<Zone[]>([]);
 
   const load = useCallback(async () => {
     const data = await api.get<History>(`/api/customers/${customerId}/history`);
@@ -121,6 +117,8 @@ export default function CustomerRecord({ session }: { session: Session }) {
         .filter((r) => r.customer_id === customerId)
         .reduce((s, r) => s + Number(r.amount_cents), 0)))
       .catch(() => setOnAccountCents(0));
+    api.get<Waiting[]>(`/api/customers/${customerId}/uninvoiced`)
+      .then(setWaiting).catch(() => setWaiting([]));
   }, [customerId]);
 
   useEffect(() => { load().catch((e) => setError(e.message)); }, [load]);
@@ -138,26 +136,8 @@ export default function CustomerRecord({ session }: { session: Session }) {
   useEffect(() => {
     if (tab !== 'details') return;
     setFormLoaded(false);
-    Promise.all([
-      api.get<Record<string, unknown>>(`/api/customers/${customerId}`),
-      api.get<Tier[]>('/api/price-tiers'),
-      api.get<Zone[]>('/api/zones'),
-    ]).then(([c, t, z]) => {
-      setForm({
-        name: (c.name as string) ?? '',
-        phone: (c.phone as string) ?? '',
-        email: (c.email as string) ?? '',
-        contactPerson: (c.contact_person as string) ?? '',
-        deliveryAddress: (c.delivery_address as string) ?? '',
-        deliveryZone: (c.delivery_zone as string) ?? '',
-        routeSequence: String(c.route_sequence ?? 0),
-        priceTierId: (c.price_tier_id as string) ?? '',
-        paymentTerms: (c.payment_terms as string) ?? '',
-        defaultDeliveryDay: (c.default_delivery_day as string) ?? '',
-        notes: (c.notes as string) ?? '',
-      });
-      setTiers(t);
-      setZones(z);
+    api.get<Record<string, unknown>>(`/api/customers/${customerId}`).then((c) => {
+      setForm(customerToForm(c));
       setFormLoaded(true);
     }).catch((e) => setError(e instanceof Error ? e.message : 'Could not load the details'));
   }, [tab, customerId]);
@@ -172,7 +152,7 @@ export default function CustomerRecord({ session }: { session: Session }) {
   async function takePayment(e: React.FormEvent) {
     e.preventDefault();
     await run(async () => {
-      await api.post('/api/payments', {
+      const r = await api.post<{ receipt?: { sentTo: string; receiptNumber: string }; receiptError?: string }>('/api/payments', {
         customerId,
         // Blank means it is not against any one invoice - which is a real
         // thing here, not a fallback. It simply sits on the account.
@@ -180,9 +160,12 @@ export default function CustomerRecord({ session }: { session: Session }) {
         amountCents: toCents(pay.amount),
         method: pay.method,
         reference: pay.reference || null,
+        sendReceipt: pay.receipt,
       });
-      setMsg(`Payment of ${money(toCents(pay.amount))} recorded.`);
-      setPay({ amount: '', method: 'Cash', invoiceId: '', reference: '' });
+      setMsg(`Payment of ${money(toCents(pay.amount))} recorded.`
+        + (r.receipt ? ` Receipt ${r.receipt.receiptNumber} emailed to ${r.receipt.sentTo}.` : '')
+        + (r.receiptError ? ` No receipt was sent: ${r.receiptError}` : ''));
+      setPay({ amount: '', method: 'Cash', invoiceId: '', reference: '', receipt: true });
       setPayOpen(false);
     }, 'Could not record the payment');
   }
@@ -215,26 +198,33 @@ export default function CustomerRecord({ session }: { session: Session }) {
     }, 'Could not send the statement');
   }
 
-  async function saveDetails(e: React.FormEvent) {
-    e.preventDefault();
+  async function saveDetails(v: CustomerFormValues) {
     await run(async () => {
-      const result = await api.patch<{ warnings: string[] }>(`/api/customers/${customerId}`, {
-        name: form.name,
-        phone: form.phone,
-        email: form.email,
-        contactPerson: form.contactPerson || null,
-        deliveryAddress: form.deliveryAddress || null,
-        deliveryZone: form.deliveryZone || null,
-        routeSequence: Number(form.routeSequence) || 0,
-        priceTierId: form.priceTierId || null,
-        paymentTerms: form.paymentTerms || null,
-        defaultDeliveryDay: form.defaultDeliveryDay || null,
-        notes: form.notes || null,
-      });
-      setMsg(`${form.name} saved.` +
+      const result = await api.patch<{ warnings: string[] }>(`/api/customers/${customerId}`, formToPayload(v));
+      setForm(v);
+      setMsg(`${v.name} saved.` +
         (result.warnings?.length ? ` ${result.warnings.join(' ')}` : ''));
+      window.scrollTo({ top: 0, behavior: 'smooth' });
     }, 'Could not save the details');
   }
+
+  /** Several open invoices: one PDF, or one email with that PDF attached. */
+  const emailPicked = () => run(async () => {
+    const r = await api.post<{ sentTo: string; invoiceNumbers: string[] }>(
+      '/api/invoices/email-batch', { invoiceIds: picked });
+    setMsg(`${r.invoiceNumbers.length} invoice${r.invoiceNumbers.length === 1 ? '' : 's'} `
+      + `(${r.invoiceNumbers.join(', ')}) emailed to ${r.sentTo} in one PDF.`);
+    setPicked([]);
+  }, 'Could not send the invoices');
+  const downloadPicked = () => run(async () => {
+    await downloadPost('/api/invoices/batch.pdf', { invoiceIds: picked },
+      `invoices-${(h?.customer.name ?? 'customer').replace(/\W+/g, '-')}.pdf`);
+  }, 'Could not build the PDF');
+  const invoiceNow = () => run(async () => {
+    const r = await api.post<{ invoiceNumber: string; deliveries: number; totalCents: number }>(
+      `/api/customers/${customerId}/invoice-now`, {});
+    setMsg(`Invoice ${r.invoiceNumber} raised for ${r.deliveries} ${r.deliveries === 1 ? 'delivery' : 'deliveries'}, ${money(r.totalCents)}.`);
+  }, 'Could not raise the invoice');
 
   const pauseSchedule = (s: Schedule) => run(async () => {
     await api.post(`/api/recurring/${s.id}/pause`, { paused: !s.paused });
@@ -256,15 +246,15 @@ export default function CustomerRecord({ session }: { session: Session }) {
   const next = active
     .filter((s) => s.nextDeliveryDate)
     .sort((a, b) => String(a.nextDeliveryDate).localeCompare(String(b.nextDeliveryDate)))[0];
-  const set = (k: keyof typeof BLANK_FORM, v: string) => setForm({ ...form, [k]: v });
 
   /* ---------- pieces, as plain functions returning JSX (never nested components) ---------- */
 
-  const invoiceTable = (rows: Invoice[], empty: string) => (
+  const invoiceTable = (rows: Invoice[], empty: string, tickable = false) => (
     <>
       <table>
         <thead>
           <tr>
+            {tickable && <th className="tick-col" aria-label="Choose" />}
             <th>Invoice</th><th>Date</th><th>Due</th>
             <th className="num">Total</th><th className="num">Outstanding</th><th>Status</th>
           </tr>
@@ -272,6 +262,16 @@ export default function CustomerRecord({ session }: { session: Session }) {
         <tbody>
           {rows.map((i) => (
             <tr key={i.invoice_id}>
+              {tickable && (
+                <td className="tick-col">
+                  {!i.is_credit_note && i.status !== 'Cancelled' && (
+                    <input type="checkbox" aria-label={`Choose ${i.invoice_number}`}
+                           checked={picked.includes(i.invoice_id)}
+                           onChange={(e) => setPicked((cur) => (e.target.checked
+                             ? [...cur, i.invoice_id] : cur.filter((x) => x !== i.invoice_id)))} />
+                  )}
+                </td>
+              )}
               <td className="lead">
                 <Link to={`/invoices/${i.invoice_id}`}>{i.invoice_number}</Link>
                 <span className={`chip ${statusTone(i.status)} phone-only`}>{i.status}</span>
@@ -384,7 +384,11 @@ export default function CustomerRecord({ session }: { session: Session }) {
               c.contact_person ? `Contact: ${c.contact_person}` : null,
               c.delivery_zone ? `${c.delivery_zone} zone` : 'No delivery zone',
               c.price_tier_name ? `${c.price_tier_name} price list` : 'List price',
-              c.payment_terms ? `Terms: ${c.payment_terms}` : null,
+              c.invoice_cycle === 'Weekly' ? 'Invoiced weekly'
+                : c.invoice_cycle === 'Monthly' ? 'Invoiced monthly'
+                  : c.payment_terms ? `Terms: ${c.payment_terms}` : null,
+              c.delivery_days?.length ? `Delivers ${c.delivery_days.join(', ')}` : null,
+              c.gct_exempt ? 'GCT exempt' : null,
             ].filter(Boolean).join(' · ')}
           </p>
         </div>
@@ -414,6 +418,12 @@ export default function CustomerRecord({ session }: { session: Session }) {
                         onClick={() => { setTab('details'); setMoreOpen(false); }}>
                   <span>Edit details</span>
                 </button>
+                <Link role="menuitem" className="pop-item" to={`/quotes/new?customer=${c.id}`}>
+                  <span>New quote</span>
+                </Link>
+                <Link role="menuitem" className="pop-item" to={`/credit-notes?new=1&customer=${c.id}`}>
+                  <span>New credit note</span>
+                </Link>
                 {session.role === 'admin' && (
                   <Link role="menuitem" className="pop-item" to="/customers">
                     <span>Merge with a duplicate</span>
@@ -497,6 +507,11 @@ export default function CustomerRecord({ session }: { session: Session }) {
                 </button>
               </div>
             </div>
+            <label className="check">
+              <input type="checkbox" checked={pay.receipt}
+                     onChange={(e) => setPay({ ...pay, receipt: e.target.checked })} />
+              Email a receipt to {c.email || 'them (no address on file)'}
+            </label>
             {!pay.invoiceId && (
               <p className="muted small" style={{ margin: 0 }}>
                 Money left on the account is not applied to anything until somebody
@@ -633,9 +648,62 @@ export default function CustomerRecord({ session }: { session: Session }) {
 
       {tab === 'invoices' && (
         <>
+          {(waiting.length > 0 || (c.invoice_cycle && c.invoice_cycle !== 'PerDelivery')) && (
+            <div className="panel">
+              <div className="panel-head">
+                <h2>Delivered, waiting for their {c.invoice_cycle === 'Weekly' ? 'weekly' : c.invoice_cycle === 'Monthly' ? 'monthly' : ''} invoice</h2>
+                {waiting.length > 0 && (
+                  <button type="button" className="secondary" disabled={busy} onClick={invoiceNow}>Invoice now</button>
+                )}
+              </div>
+              {waiting.length === 0 ? (
+                <p className="muted small" style={{ margin: 0 }}>Nothing waiting. Deliveries collect here until the
+                  {c.invoice_cycle === 'Weekly' ? ' week (Mon–Sun) closes; the invoice is raised on the Monday.'
+                    : ' month closes; the invoice is raised on the 1st.'}</p>
+              ) : (
+                <>
+                  <table>
+                    <thead><tr><th>Date</th><th>Order</th><th>How</th><th className="num">Before GCT</th></tr></thead>
+                    <tbody>
+                      {waiting.map((w) => (
+                        <tr key={`${w.orderNumber}-${w.date}`}>
+                          <td>{when(w.date)}</td><td>{w.orderNumber}</td><td className="small">{w.kind}</td>
+                          <td className="num">{money(w.subtotalCents)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                  <p className="muted small" style={{ marginBottom: 0 }}>
+                    Raised automatically when the {c.invoice_cycle === 'Weekly' ? 'week' : 'month'} closes, due on
+                    receipt. Money they pay in the meantime is applied to it straight away.
+                    "Invoice now" raises it today for everything listed.
+                  </p>
+                </>
+              )}
+            </div>
+          )}
           <div className="panel phone-cards">
             <h2 style={{ marginTop: 0 }}>Invoices</h2>
-            {invoiceTable(h.invoices, 'No invoices yet.')}
+            {picked.length > 0 ? (
+              <div className="batch-bar">
+                <span>{picked.length} chosen · {money(h.invoices.filter((i) => picked.includes(i.invoice_id))
+                  .reduce((a, i) => a + Number(i.balance_cents), 0))} still owed on them</span>
+                <span className="row" style={{ gap: 6 }}>
+                  <button type="button" disabled={busy} onClick={emailPicked}>Email them together</button>
+                  <button type="button" className="secondary" disabled={busy} onClick={downloadPicked}>One PDF</button>
+                  <button type="button" className="secondary" onClick={() => setPicked([])}>Clear</button>
+                </span>
+              </div>
+            ) : open.length > 1 && (
+              <p className="muted small" style={{ marginTop: 0 }}>
+                Tick invoices to send them in one email with one PDF.{' '}
+                <button type="button" className="as-link small"
+                        onClick={() => setPicked(open.filter((i) => !i.is_credit_note).map((i) => i.invoice_id))}>
+                  Tick every open one
+                </button>
+              </p>
+            )}
+            {invoiceTable(h.invoices, 'No invoices yet.', true)}
             {onAccountNotice()}
           </div>
           <StatementView customerId={c.id} />
@@ -654,7 +722,7 @@ export default function CustomerRecord({ session }: { session: Session }) {
             <thead>
               <tr>
                 <th>Date</th><th>Against</th><th>How</th>
-                <th>Reference</th><th className="num">Amount</th>
+                <th>Reference</th><th className="num">Amount</th><th />
               </tr>
             </thead>
             <tbody>
@@ -670,6 +738,14 @@ export default function CustomerRecord({ session }: { session: Session }) {
                   <td data-label="How">{p.method ?? '—'}</td>
                   <td data-label="Reference" className="small muted">{p.reference ?? '—'}</td>
                   <td data-label="Amount" className="num money">{money(Number(p.amount_cents))}</td>
+                  <td className="num">
+                    {!p.is_reversal && Number(p.amount_cents) > 0 && (
+                      <button type="button" className="as-link small" disabled={busy}
+                              onClick={() => run(async () => {
+                                await downloadPost('/api/receipts.pdf', { paymentIds: [p.id] }, `receipt-${p.id.slice(0, 8)}.pdf`);
+                              }, 'Could not build the receipt')}>Receipt</button>
+                    )}
+                  </td>
                 </tr>
               ))}
             </tbody>
@@ -702,104 +778,16 @@ export default function CustomerRecord({ session }: { session: Session }) {
       )}
 
       {tab === 'details' && (
-        <div className="panel">
-          <h2 style={{ marginTop: 0 }}>Details</h2>
-          {!formLoaded ? <p className="muted">Loading…</p> : (
-            <form onSubmit={saveDetails}>
-              <div className="row">
-                <div className="field" style={{ flex: '1 1 240px' }}>
-                  <label htmlFor="d-name">Name</label>
-                  <input id="d-name" required style={{ width: '100%' }} value={form.name}
-                         onChange={(e) => set('name', e.target.value)} />
-                </div>
-                <div className="field">
-                  <label htmlFor="d-phone">Phone</label>
-                  <input id="d-phone" required value={form.phone}
-                         onChange={(e) => set('phone', e.target.value)} />
-                </div>
-                <div className="field" style={{ flex: '1 1 220px' }}>
-                  <label htmlFor="d-email">Email</label>
-                  <input id="d-email" type="email" required style={{ width: '100%' }}
-                         value={form.email} onChange={(e) => set('email', e.target.value)} />
-                </div>
-                <div className="field">
-                  <label htmlFor="d-contact">Contact person</label>
-                  <input id="d-contact" value={form.contactPerson}
-                         onChange={(e) => set('contactPerson', e.target.value)} />
-                </div>
-              </div>
-              <div className="row">
-                <div className="field" style={{ flex: '1 1 300px' }}>
-                  <label htmlFor="d-addr">Delivery address</label>
-                  <input id="d-addr" style={{ width: '100%' }} value={form.deliveryAddress}
-                         onChange={(e) => set('deliveryAddress', e.target.value)} />
-                </div>
-                <div className="field">
-                  <label htmlFor="d-zone">Delivery zone</label>
-                  <select id="d-zone" value={form.deliveryZone}
-                          onChange={(e) => set('deliveryZone', e.target.value)}>
-                    <option value="">None (collects or walks in)</option>
-                    {zones.filter((z) => !z.retired_at || z.name === form.deliveryZone)
-                      .map((z) => <option key={z.id} value={z.name}>{z.name}</option>)}
-                    {/* A zone typed before zones became a managed list keeps
-                        showing, rather than silently reading as None. */}
-                    {form.deliveryZone && !zones.some((z) => z.name === form.deliveryZone) && (
-                      <option value={form.deliveryZone}>{form.deliveryZone} (not a listed zone)</option>
-                    )}
-                  </select>
-                </div>
-                <div className="field">
-                  <label htmlFor="d-seq">Visit order on the round</label>
-                  <input id="d-seq" type="number" min="0" style={{ width: 110 }}
-                         value={form.routeSequence}
-                         onChange={(e) => set('routeSequence', e.target.value)} />
-                </div>
-                <div className="field">
-                  <label htmlFor="d-day">Usual delivery day</label>
-                  <select id="d-day" value={form.defaultDeliveryDay}
-                          onChange={(e) => set('defaultDeliveryDay', e.target.value)}>
-                    <option value="">—</option>
-                    {DAYS.map((d) => <option key={d} value={d}>{d}</option>)}
-                  </select>
-                </div>
-              </div>
-              <div className="row">
-                <div className="field">
-                  <label htmlFor="d-tier">Price list</label>
-                  <select id="d-tier" value={form.priceTierId}
-                          onChange={(e) => set('priceTierId', e.target.value)}>
-                    <option value="">List price</option>
-                    {tiers.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
-                  </select>
-                </div>
-                <div className="field">
-                  <label htmlFor="d-terms">Payment terms</label>
-                  <select id="d-terms" value={form.paymentTerms}
-                          onChange={(e) => set('paymentTerms', e.target.value)}>
-                    <option value="">Not set</option>
-                    {PAYMENT_TERMS.map((t) => <option key={t} value={t}>{t}</option>)}
-                    {form.paymentTerms
-                      && !PAYMENT_TERMS.includes(form.paymentTerms as typeof PAYMENT_TERMS[number])
-                      && <option value={form.paymentTerms}>{form.paymentTerms}</option>}
-                  </select>
-                </div>
-                <div className="field" style={{ flex: '1 1 260px' }}>
-                  <label htmlFor="d-notes">Notes</label>
-                  <input id="d-notes" style={{ width: '100%' }} value={form.notes}
-                         onChange={(e) => set('notes', e.target.value)} />
-                </div>
-              </div>
-              {!form.deliveryZone && (
-                <div className="notice warn">
-                  Without a delivery zone, their delivery orders cannot be put on a
-                  round automatically. Leave it blank only for customers who collect
-                  or walk in.
-                </div>
-              )}
-              <button disabled={busy}>{busy ? 'Saving…' : 'Save changes'}</button>
-            </form>
-          )}
-        </div>
+        <>
+          <div className="panel">
+            <h2 style={{ marginTop: 0 }}>Details</h2>
+            {!formLoaded ? <p className="muted">Loading…</p> : (
+              <CustomerForm initial={form} isNew={false} busy={busy} onSubmit={saveDetails} />
+            )}
+          </div>
+          <AddressesPanel customerId={c.id} />
+          <SpecialPricesPanel customerId={c.id} priceList={c.price_tier_name} />
+        </>
       )}
     </>
   );

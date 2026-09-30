@@ -150,3 +150,46 @@ export function planSchedule(
 
   return { due, skipped, nextDate: cursor };
 }
+
+/* ------------------------------------------------------------------ */
+/* Weekdays, zone run days and invoice cycles (30 Sep 2026)            */
+/* ------------------------------------------------------------------ */
+
+const WEEKDAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'] as const;
+
+/** 'Mon'..'Sun' for a calendar date. */
+export function weekdayOf(date: string): string {
+  const { y, m, day } = parts(date);
+  return WEEKDAY_NAMES[new Date(Date.UTC(y, m - 1, day)).getUTCDay()];
+}
+
+/**
+ * The first date on or after `from` that falls on one of `days`.
+ * With no days given, `from` itself - a zone with no run days set runs any day.
+ */
+export function nextRunDate(from: string, days: readonly string[]): string {
+  if (!days || days.length === 0) return from;
+  let d = from;
+  for (let i = 0; i < 7; i++) {
+    if (days.includes(weekdayOf(d))) return d;
+    d = addDays(d, 1);
+  }
+  return from;
+}
+
+export type InvoiceCycle = 'PerDelivery' | 'Weekly' | 'Monthly';
+
+/**
+ * The billing period a date belongs to. A week runs Monday to Sunday; a
+ * month is the calendar month.
+ */
+export function cyclePeriod(date: string, cycle: 'Weekly' | 'Monthly'): { from: string; to: string } {
+  if (cycle === 'Weekly') {
+    const back = (['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'] as const)
+      .indexOf(weekdayOf(date) as 'Mon');
+    const from = addDays(date, -back);
+    return { from, to: addDays(from, 6) };
+  }
+  const { y, m } = parts(date);
+  return { from: format(y, m, 1), to: format(y, m, daysInMonth(y, m)) };
+}

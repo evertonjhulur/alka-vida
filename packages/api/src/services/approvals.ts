@@ -31,6 +31,7 @@ export interface PendingApproval {
   customerName: string | null;
   amountCents: Cents;
   discountPercent: number | null;
+  discountFixedCents?: number | null;
   reason: string | null;
   requestedByName: string | null;
   requestedDate: string;
@@ -43,8 +44,11 @@ export async function requestInvoiceDiscount(
   invoiceId: string,
   discountPercent: number,
   reason: string,
+  discountFixedCents = 0,
 ): Promise<{ approvalRequestId: string; appliedImmediately: boolean }> {
   requireRole(actor, 'admin', 'user');
+  const fixed = Math.max(0, Math.round(Number(discountFixedCents) || 0));
+  const pct = fixed > 0 ? 0 : (Number(discountPercent) || 0);
 
   return db.tx(async (t) => {
     const inv = await t.one<{
@@ -55,47 +59,48 @@ export async function requestInvoiceDiscount(
     );
 
     const impact = computeTotals(
-      [{ lineTotal: num(inv.subtotal_cents) }], discountPercent,
+      [{ lineTotal: num(inv.subtotal_cents) }], pct, true, fixed,
     ).discountAmount;
 
     // An Admin approves their own action inherently; a User's is queued.
     if (actor.role === 'admin') {
-      await applyDiscountToInvoice(t, invoiceId, discountPercent);
+      await applyDiscountToInvoice(t, invoiceId, pct, fixed);
       await audit(t, actor, 'update', 'Invoice', invoiceId, inv.invoice_number, {
-        discountPercent, reason, approvedInline: true,
+        discountPercent: pct, discountFixedCents: fixed, reason, approvedInline: true,
       });
       const req = await t.one<{ id: string }>(
         `INSERT INTO approval_requests
            (request_type, status, entity_type, entity_id, entity_label, customer_id,
             amount_cents, discount_percent, reason, requested_by_id,
-            reviewed_by_id, reviewed_date)
-         VALUES ('Discount','Approved','Invoice',$1,$2,$3,$4,$5,$6,$7,$7,now())
+            reviewed_by_id, reviewed_date, discount_fixed_cents)
+         VALUES ('Discount','Approved','Invoice',$1,$2,$3,$4,$5,$6,$7,$7,now(),$8)
          RETURNING id`,
         [invoiceId, inv.invoice_number, inv.customer_id, impact,
-         discountPercent, reason, actor.id],
+         pct, reason, actor.id, fixed],
       );
       return { approvalRequestId: req.id, appliedImmediately: true };
     }
 
     // Record the intent; the money does NOT move yet.
     await t.query(
-      `UPDATE invoices SET discount_percent = $2, discount_status = 'Pending'
-       WHERE id = $1`, [invoiceId, discountPercent],
+      `UPDATE invoices SET discount_percent = $2, discount_fixed_cents = $3,
+         discount_status = 'Pending'
+       WHERE id = $1`, [invoiceId, pct, fixed],
     );
     const req = await t.one<{ id: string }>(
       `INSERT INTO approval_requests
          (request_type, entity_type, entity_id, entity_label, customer_id,
-          amount_cents, discount_percent, reason, requested_by_id)
-       VALUES ('Discount','Invoice',$1,$2,$3,$4,$5,$6,$7)
+          amount_cents, discount_percent, reason, requested_by_id, discount_fixed_cents)
+       VALUES ('Discount','Invoice',$1,$2,$3,$4,$5,$6,$7,$8)
        RETURNING id`,
       [invoiceId, inv.invoice_number, inv.customer_id, impact,
-       discountPercent, reason, actor.id],
+       pct, reason, actor.id, fixed],
     );
     await t.query(`UPDATE invoices SET approval_request_id = $2 WHERE id = $1`,
       [invoiceId, req.id]);
 
     await audit(t, actor, 'create', 'ApprovalRequest', req.id, inv.invoice_number, {
-      requestType: 'Discount', discountPercent, reason,
+      requestType: 'Discount', discountPercent: pct, discountFixedCents: fixed, reason,
       note: 'saved immediately; does not reduce the amount owed until approved',
     });
     return { approvalRequestId: req.id, appliedImmediately: false };
@@ -107,21 +112,27 @@ async function applyDiscountToInvoice(
   t: Parameters<typeof audit>[0],
   invoiceId: string,
   discountPercent: number,
+  discountFixedCents = 0,
 ): Promise<void> {
   const lines = await t.query<{ line_total_cents: number }>(
     `SELECT line_total_cents FROM invoice_line_items WHERE invoice_id = $1`, [invoiceId],
   );
+  const inv = await t.one<{ gct_exempt: boolean }>(
+    `SELECT gct_exempt FROM invoices WHERE id = $1`, [invoiceId],
+  );
+  const fixed = Math.max(0, num(discountFixedCents));
+  const pct = fixed > 0 ? 0 : discountPercent;
   const totals = computeTotals(
-    lines.map((l) => ({ lineTotal: num(l.line_total_cents) })), discountPercent,
+    lines.map((l) => ({ lineTotal: num(l.line_total_cents) })), pct, !inv.gct_exempt, fixed,
   );
   await t.query(
     `UPDATE invoices
      SET subtotal_cents = $2, discount_percent = $3, discount_amount_cents = $4,
-         gct_cents = $5, grand_total_cents = $6,
+         gct_cents = $5, grand_total_cents = $6, discount_fixed_cents = $7,
          discount_status = 'Approved', updated_at = now()
      WHERE id = $1`,
-    [invoiceId, totals.subtotal, discountPercent, totals.discountAmount,
-     totals.gct, totals.grandTotal],
+    [invoiceId, totals.subtotal, pct, totals.discountAmount,
+     totals.gct, totals.grandTotal, fixed],
   );
 }
 
@@ -147,6 +158,7 @@ export async function listPendingApprovals(db: Db): Promise<PendingApproval[]> {
     customerName: (r.customer_name as string) ?? null,
     amountCents: num(r.amount_cents),
     discountPercent: r.discount_percent === null ? null : num(r.discount_percent),
+    discountFixedCents: r.discount_fixed_cents == null ? null : num(r.discount_fixed_cents),
     reason: (r.reason as string) ?? null,
     requestedByName: (r.requested_by_name as string) ?? null,
     requestedDate: String(r.requested_on),
@@ -173,10 +185,10 @@ export async function reviewApproval(
     const req = await t.one<{
       id: string; request_type: string; entity_id: string; status: string;
       discount_percent: number | null; amount_cents: number;
-      payload: StopCorrection | null; reason: string | null;
+      payload: StopCorrection | null; reason: string | null; discount_fixed_cents: number | null;
     }>(
       `SELECT id, request_type, entity_id, status, discount_percent, amount_cents,
-              payload, reason
+              payload, reason, discount_fixed_cents
        FROM approval_requests WHERE id = $1 FOR UPDATE`, [requestId],
     );
     if (req.status !== 'Pending') {
@@ -190,15 +202,21 @@ export async function reviewApproval(
         await applyStopCorrection(t, actor, req.entity_id, req.payload ?? {},
           req.reason ?? 'approved correction');
       } else if (req.request_type === 'Discount') {
-        await applyDiscountToInvoice(t, req.entity_id, num(req.discount_percent));
+        await applyDiscountToInvoice(t, req.entity_id, num(req.discount_percent),
+          num(req.discount_fixed_cents ?? 0));
       } else {
-        // A credit note becomes live: its value posts to the ledger.
+        // A credit note becomes live: its value posts to the ledger, with the
+        // GCT split it was raised with (older requests carry none).
+        const p = (req.payload ?? {}) as unknown as { subtotalCents?: number; gctCents?: number };
+        const total = num(req.amount_cents);
+        const gct = p.gctCents !== undefined ? num(p.gctCents) : 0;
+        const subtotal = p.subtotalCents !== undefined ? num(p.subtotalCents) : total;
         await t.query(
           `UPDATE invoices
            SET credit_status = 'Approved',
-               subtotal_cents = $2, grand_total_cents = $2, updated_at = now()
+               subtotal_cents = $2, gct_cents = $3, grand_total_cents = $4, updated_at = now()
            WHERE id = $1`,
-          [req.entity_id, num(req.amount_cents)],
+          [req.entity_id, subtotal, gct, total],
         );
       }
     } else if (req.request_type === 'StopCorrection') {
@@ -206,7 +224,8 @@ export async function reviewApproval(
     } else if (req.request_type === 'Discount') {
       // Rejected: the invoice reverts to no discount, unchanged in value.
       await t.query(
-        `UPDATE invoices SET discount_status = 'Rejected', discount_percent = 0
+        `UPDATE invoices SET discount_status = 'Rejected', discount_percent = 0,
+           discount_fixed_cents = 0
          WHERE id = $1`, [req.entity_id],
       );
     } else {

@@ -39,7 +39,7 @@ export default function Payments() {
   const [customers, setCustomers] = useState<PickerCustomer[]>([]);
   const [unapplied, setUnapplied] = useState<Unapplied[]>([]);
   const [open, setOpen] = useState<Invoice[]>([]);
-  const [form, setForm] = useState({ customerId: '', amount: '', method: 'Bank Transfer', reference: '', notes: '' });
+  const [form, setForm] = useState({ customerId: '', amount: '', method: 'Bank Transfer', reference: '', notes: '', receipt: true });
   const [ticked, setTicked] = useState<string[] | null>(null); // null = follow the amount, oldest first
   const [applyTo, setApplyTo] = useState<Record<string, string>>({});
   const [error, setError] = useState<string | null>(null);
@@ -103,7 +103,10 @@ export default function Payments() {
     e.preventDefault();
     const who = customers.find((c) => c.id === form.customerId)?.name ?? 'them';
     act(async () => {
-      const out = await api.post<{ allocatedCents: number; unappliedCents: number }>('/api/payments/receive', {
+      const out = await api.post<{
+        allocatedCents: number; unappliedCents: number;
+        receipt?: { sentTo: string; receiptNumber: string }; receiptError?: string;
+      }>('/api/payments/receive', {
         customerId: form.customerId,
         amountCents: received,
         method: form.method,
@@ -111,11 +114,14 @@ export default function Payments() {
         notes: form.notes || null,
         allocations: plan.rows.map((r) => ({ invoiceId: r.inv.invoice_id, amountCents: r.cents })),
         idempotencyKey: idempotencyKey('receive'),
+        sendReceipt: form.receipt,
       });
       setForm({ ...form, amount: '', reference: '', notes: '' });
       setTicked(null);
       return `${money(received)} from ${who} recorded. ${money(out.allocatedCents)} against invoices` +
-        (out.unappliedCents > 0 ? `, ${money(out.unappliedCents)} on their account.` : '.');
+        (out.unappliedCents > 0 ? `, ${money(out.unappliedCents)} on their account.` : '.') +
+        (out.receipt ? ` Receipt ${out.receipt.receiptNumber} emailed to ${out.receipt.sentTo}.`
+          : out.receiptError ? ` No receipt was sent: ${out.receiptError}` : '');
     }, 'Could not record the payment');
   };
 
@@ -215,6 +221,12 @@ export default function Payments() {
           <input aria-label="Note" style={{ width: '100%', marginTop: 6 }} value={form.notes}
                  onChange={(e) => setForm({ ...form, notes: e.target.value })} />
         </details>
+
+        <label className="check">
+          <input type="checkbox" checked={form.receipt}
+                 onChange={(e) => setForm({ ...form, receipt: e.target.checked })} />
+          Email the customer a receipt
+        </label>
 
         <div className="pay-foot">
           <span className="small">{form.customerId ? summary : 'Choose who it is from.'}</span>

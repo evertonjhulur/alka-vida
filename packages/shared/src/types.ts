@@ -53,6 +53,8 @@ export type MaterialCategory = string;
 export const RECURRENCE_PATTERNS = ['Weekly', 'Biweekly', 'Monthly'] as const;
 export type RecurrencePattern = (typeof RECURRENCE_PATTERNS)[number];
 
+export const INVOICE_CYCLES = ['PerDelivery', 'Weekly', 'Monthly'] as const;
+
 export const WEEKDAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'] as const;
 export type Weekday = (typeof WEEKDAYS)[number];
 

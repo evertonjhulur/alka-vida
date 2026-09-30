@@ -153,3 +153,34 @@ export async function download(path: string, filename: string): Promise<void> {
 export function idempotencyKey(prefix: string): string {
   return `${prefix}-${crypto.randomUUID()}`;
 }
+
+/**
+ * A file the server builds from a list sent to it (several invoices in one
+ * PDF, a receipt for several payments), handed to the browser as a download.
+ */
+export async function downloadPost(path: string, body: unknown, filename: string): Promise<void> {
+  const token = getToken();
+  const res = await fetch(path, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      ...(token ? { authorization: `Bearer ${token}` } : {}),
+    },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    let message = `Could not download (${res.status})`;
+    try { message = JSON.parse(text).error ?? message; } catch { /* not JSON */ }
+    throw new ApiError(res.status, message);
+  }
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}

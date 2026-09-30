@@ -9,7 +9,7 @@ import type { Db, Queryable } from '../db/index.ts';
 import type { Actor } from './core.ts';
 import { audit, businessToday, nextNumber, num, requireRole } from './core.ts';
 import type { Cents, DeliveryMode, PaymentMethod, RecurrencePattern } from '@alka/shared';
-import { computeTotals, computeLineTotal, totalBottles, RuleViolation } from '@alka/shared';
+import { computeTotals, computeLineTotal, totalBottles, RuleViolation, composeAddress } from '@alka/shared';
 
 export interface OrderLineInput {
   productId: string;
@@ -27,6 +27,13 @@ export interface CreateOrderInput {
   requestedDeliveryDate?: string | null;
   orderDate?: string;
   discountPercent?: number;
+  /** A discount as an amount rather than a percentage (wins over percent). */
+  discountFixedCents?: Cents;
+  /** No GCT on this order. Defaults to the customer's own exemption. */
+  gctExempt?: boolean | null;
+  /** One of the customer's extra delivery addresses; blank = main address. */
+  addressId?: string | null;
+  quotationId?: string | null;
   paymentMethod?: PaymentMethod | null;
   notes?: string | null;
   source?: 'Admin' | 'Portal';
@@ -98,6 +105,12 @@ export async function resolveLines(
     if (!product) throw new RuleViolation(`product ${line.productId} not found`);
     if (!product.active) throw new RuleViolation(`product ${product.name} is no longer sold`);
 
+    // The customer's own special price for this product, if the office set one.
+    const special = await t.maybeOne<{ price_per_case_cents: number; price_per_bottle_cents: number }>(
+      `SELECT price_per_case_cents, price_per_bottle_cents FROM customer_prices
+       WHERE customer_id = $1 AND product_id = $2`, [customerId, line.productId],
+    );
+
     const tierPrice = customer.price_tier_id
       ? await t.maybeOne<{ price_per_case_cents: number; price_per_bottle_cents: number; tier: string }>(
           `SELECT pl.price_per_case_cents, pl.price_per_bottle_cents, pt.name AS tier
@@ -107,13 +120,16 @@ export async function resolveLines(
         )
       : null;
 
-    // Precedence: explicit override > customer tier rate > product list price.
-    const pricePerCaseCents = line.pricePerCaseCents
+    // Precedence: explicit override > customer special price > customer tier
+    // rate > product list price.
+    const pricePerCaseCents = num(line.pricePerCaseCents
+      ?? special?.price_per_case_cents
       ?? tierPrice?.price_per_case_cents
-      ?? product.price_per_case_cents;
-    const pricePerBottleCents = line.pricePerBottleCents
+      ?? product.price_per_case_cents);
+    const pricePerBottleCents = num(line.pricePerBottleCents
+      ?? special?.price_per_bottle_cents
       ?? tierPrice?.price_per_bottle_cents
-      ?? product.price_per_bottle_cents;
+      ?? product.price_per_bottle_cents);
 
     const cases = line.cases ?? 0;
     const looseBottles = line.looseBottles ?? 0;
@@ -131,7 +147,7 @@ export async function resolveLines(
       cases, looseBottles,
       totalBottles: totalBottles(product.bottles_per_case, cases, looseBottles),
       pricePerCaseCents, pricePerBottleCents,
-      priceTier: tierPrice?.tier ?? null,
+      priceTier: special ? 'Special price' : tierPrice?.tier ?? null,
       lineTotal,
     });
   }
@@ -147,11 +163,28 @@ export async function createOrder(
     const warnings: string[] = [];
     const lines = await resolveLines(t, input.customerId, input.lines);
 
+    const cust = await t.one<{ gct_exempt: boolean }>(
+      `SELECT gct_exempt FROM customers WHERE id = $1`, [input.customerId],
+    );
+    const gctExempt = input.gctExempt ?? cust.gct_exempt;
+    const fixed = Math.max(0, Math.round(Number(input.discountFixedCents) || 0));
+    const pct = fixed > 0 ? 0 : (input.discountPercent ?? 0);
+
+    if (input.addressId) {
+      const a = await t.maybeOne<{ customer_id: string; is_delivery: boolean; active: boolean }>(
+        `SELECT customer_id, is_delivery, active FROM customer_addresses WHERE id = $1`,
+        [input.addressId],
+      );
+      if (!a || a.customer_id !== input.customerId || !a.active || !a.is_delivery) {
+        throw new RuleViolation('that delivery address is not one of this customer\'s');
+      }
+    }
+
     // Order totals are calculated live at entry, mirroring the invoice
     // calculation exactly, so staff and customer see a real tax-inclusive
     // expected total immediately. This is REFERENCE ONLY - the invoice
     // generated at delivery recalculates from actual delivered quantities.
-    const totals = computeTotals(lines, input.discountPercent ?? 0);
+    const totals = computeTotals(lines, pct, !gctExempt, fixed);
     const orderNumber = await nextNumber(t, 'order_number_seq', 'SO');
 
     const order = await t.one<{ id: string }>(
@@ -159,16 +192,19 @@ export async function createOrder(
          (order_number, customer_id, order_date, requested_delivery_date, notes,
           is_recurring, recurrence_pattern, parent_recurring_id, payment_method,
           source, delivery_mode, discount_percent,
-          subtotal_cents, discount_amount_cents, gct_cents, grand_total_cents)
-       VALUES ($1,$2,COALESCE($3::date, business_today()),$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
+          subtotal_cents, discount_amount_cents, gct_cents, grand_total_cents,
+          discount_fixed_cents, gct_exempt, address_id, quotation_id)
+       VALUES ($1,$2,COALESCE($3::date, business_today()),$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,
+               $17,$18,$19,$20)
        RETURNING id`,
       [
         orderNumber, input.customerId, input.orderDate ?? null,
         input.requestedDeliveryDate ?? null, input.notes ?? null,
         input.isRecurring ?? false, input.recurrencePattern ?? null,
         input.parentRecurringId ?? null, input.paymentMethod ?? null,
-        input.source ?? 'Admin', input.deliveryMode, input.discountPercent ?? 0,
+        input.source ?? 'Admin', input.deliveryMode, pct,
         totals.subtotal, totals.discountAmount, totals.gct, totals.grandTotal,
+        fixed, gctExempt, input.addressId ?? null, input.quotationId ?? null,
       ],
     );
 
@@ -190,7 +226,7 @@ export async function createOrder(
     // recurring orders. Pickup orders never touch a delivery sheet at all.
     if (input.deliveryMode === 'Delivery') {
       const placement = await placeOnDeliverySheet(t, order.id, input.customerId,
-        input.requestedDeliveryDate ?? null);
+        input.requestedDeliveryDate ?? null, input.addressId ?? null);
       sheetId = placement.sheetId;
       stopId = placement.stopId;
       warnings.push(...placement.warnings);
@@ -220,6 +256,8 @@ export interface PortalOrderInput {
   deliveryMode?: 'Delivery' | 'Pickup';
   requestedDeliveryDate?: string | null;
   notes?: string | null;
+  /** One of their own delivery addresses (createOrder checks it is theirs). */
+  addressId?: string | null;
 }
 
 /**
@@ -263,6 +301,7 @@ export async function createPortalOrder(
     deliveryMode,
     requestedDeliveryDate: requested,
     notes: input.notes?.trim() || null,
+    addressId: deliveryMode === 'Delivery' ? (input.addressId || null) : null,
     source: 'Portal',
     // Not the customer's to decide. A discount is the office's to give, a
     // standing order is an arrangement rather than an order, how it will be
@@ -319,6 +358,47 @@ export async function cancelOwnOrder(
 }
 
 /**
+ * Where an order goes and which round carries it: an extra delivery address
+ * (its own zone, falling back to the customer's) or the main address.
+ */
+export async function deliveryTarget(
+  t: Queryable, customerId: string, addressId: string | null,
+): Promise<{
+  name: string; delivery_zone: string | null; delivery_address: string | null;
+  phone: string | null; route_sequence: number;
+}> {
+  const customer = await t.one<{
+    name: string; delivery_zone: string | null; delivery_address: string | null;
+    phone: string | null; route_sequence: number;
+  }>(
+    `SELECT name, delivery_zone, delivery_address, phone, route_sequence
+     FROM customers WHERE id = $1`,
+    [customerId],
+  );
+  if (!addressId) return customer;
+  const a = await t.maybeOne<{
+    label: string; address_line1: string | null; address_line2: string | null;
+    city: string | null; parish: string | null; delivery_zone: string | null;
+    route_sequence: number; phone: string | null;
+  }>(
+    `SELECT label, address_line1, address_line2, city, parish, delivery_zone,
+            route_sequence, phone
+     FROM customer_addresses WHERE id = $1 AND customer_id = $2`,
+    [addressId, customerId],
+  );
+  if (!a) return customer;
+  const line = composeAddress({ addressLine1: a.address_line1, addressLine2: a.address_line2,
+    city: a.city, parish: a.parish });
+  return {
+    name: customer.name,
+    delivery_zone: a.delivery_zone ?? customer.delivery_zone,
+    delivery_address: line ? `${a.label}: ${line}` : customer.delivery_address,
+    phone: a.phone ?? customer.phone,
+    route_sequence: num(a.route_sequence) || num(customer.route_sequence),
+  };
+}
+
+/**
  * Place an order as a stop on the delivery sheet matching the customer's zone
  * and the requested date, creating that sheet if it does not exist.
  *
@@ -331,16 +411,10 @@ export async function placeOnDeliverySheet(
   orderId: string,
   customerId: string,
   requestedDate: string | null,
+  addressId: string | null = null,
 ): Promise<{ sheetId: string | null; stopId: string | null; warnings: string[] }> {
   const warnings: string[] = [];
-  const customer = await t.one<{
-    name: string; delivery_zone: string | null; delivery_address: string | null;
-    phone: string | null; route_sequence: number;
-  }>(
-    `SELECT name, delivery_zone, delivery_address, phone, route_sequence
-     FROM customers WHERE id = $1`,
-    [customerId],
-  );
+  const customer = await deliveryTarget(t, customerId, addressId);
 
   // Warn rather than silently proceeding, so the office is prompted to set one.
   if (!customer.delivery_zone) {
@@ -417,6 +491,8 @@ export async function editOrder(
     lines?: OrderLineInput[];
     requestedDeliveryDate?: string | null;
     discountPercent?: number;
+    discountFixedCents?: Cents;
+    gctExempt?: boolean;
     notes?: string | null;
   },
 ): Promise<{ subtotalCents: Cents; gctCents: Cents; grandTotalCents: Cents; warnings: string[] }> {
@@ -426,9 +502,10 @@ export async function editOrder(
     const order = await t.maybeOne<{
       id: string; customer_id: string; status: string; order_number: string;
       discount_percent: number; requested_delivery_date: string | null;
+      discount_fixed_cents: number; gct_exempt: boolean;
     }>(
       `SELECT id, customer_id, status, order_number, discount_percent,
-              requested_delivery_date
+              requested_delivery_date, discount_fixed_cents, gct_exempt
        FROM customer_orders WHERE id = $1 FOR UPDATE`,
       [orderId],
     );
@@ -470,9 +547,13 @@ export async function editOrder(
        WHERE oli.order_id = $1`,
       [orderId],
     );
-    const discountPercent = changes.discountPercent ?? num(order.discount_percent);
+    const fixed = changes.discountFixedCents !== undefined
+      ? Math.max(0, Math.round(Number(changes.discountFixedCents) || 0))
+      : (changes.discountPercent !== undefined ? 0 : num(order.discount_fixed_cents));
+    const discountPercent = fixed > 0 ? 0 : (changes.discountPercent ?? num(order.discount_percent));
+    const gctExempt = changes.gctExempt ?? order.gct_exempt;
     const totals = computeTotals(
-      current.map((l) => ({ lineTotal: num(l.line_total) })), discountPercent,
+      current.map((l) => ({ lineTotal: num(l.line_total) })), discountPercent, !gctExempt, fixed,
     );
 
     await t.query(
@@ -480,11 +561,12 @@ export async function editOrder(
        SET requested_delivery_date = COALESCE($2::date, requested_delivery_date),
            discount_percent = $3, notes = COALESCE($4, notes),
            subtotal_cents = $5, discount_amount_cents = $6,
-           gct_cents = $7, grand_total_cents = $8
+           gct_cents = $7, grand_total_cents = $8,
+           discount_fixed_cents = $9, gct_exempt = $10
        WHERE id = $1`,
       [orderId, changes.requestedDeliveryDate ?? null, discountPercent,
        changes.notes ?? null, totals.subtotal, totals.discountAmount,
-       totals.gct, totals.grandTotal],
+       totals.gct, totals.grandTotal, fixed, gctExempt],
     );
 
     // Keep the driver's stop description in step with the change.

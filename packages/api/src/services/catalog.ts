@@ -96,7 +96,8 @@ export async function listSuppliers(db: Db) {
   const out = [];
   for (const s of suppliers) {
     const materials = await db.query<Record<string, unknown>>(
-      `SELECT sm.raw_material_id, rm.name, rm.unit_of_measure, sm.unit_cost_cents
+      `SELECT sm.raw_material_id, rm.name, rm.unit_of_measure, sm.unit_cost_cents,
+              sm.gct_exempt, sm.env_exempt
        FROM supplier_materials sm JOIN raw_materials rm ON rm.id = sm.raw_material_id
        WHERE sm.supplier_id = $1 ORDER BY rm.name`,
       [s.id],
@@ -114,6 +115,8 @@ export async function listSuppliers(db: Db) {
         name: m.name as string,
         unitOfMeasure: m.unit_of_measure as string,
         unitCostCents: num(m.unit_cost_cents),
+        gctExempt: !!m.gct_exempt,
+        envExempt: !!m.env_exempt,
         priceBreaks: breaks
           .filter((b) => b.raw_material_id === m.raw_material_id)
           .map((b) => ({ minQty: num(b.min_qty), unitCostCents: num(b.unit_cost_cents) })),
@@ -138,6 +141,10 @@ export async function setSupplierMaterial(
     rawMaterialId: string;
     unitCostCents: Cents;
     priceBreaks?: Array<{ minQty: number; unitCostCents: Cents }>;
+    /** No GCT is charged on this product by this supplier. */
+    gctExempt?: boolean;
+    /** No Environmental Levy on this product (Everton, 30 Sep 2026). */
+    envExempt?: boolean;
   },
 ): Promise<void> {
   requireRole(actor, 'admin', 'user');
@@ -145,11 +152,15 @@ export async function setSupplierMaterial(
 
   await db.tx(async (t) => {
     await t.query(
-      `INSERT INTO supplier_materials (supplier_id, raw_material_id, unit_cost_cents)
-       VALUES ($1,$2,$3)
+      `INSERT INTO supplier_materials
+         (supplier_id, raw_material_id, unit_cost_cents, gct_exempt, env_exempt)
+       VALUES ($1,$2,$3,COALESCE($4,false),COALESCE($5,false))
        ON CONFLICT (supplier_id, raw_material_id)
-         DO UPDATE SET unit_cost_cents = EXCLUDED.unit_cost_cents`,
-      [input.supplierId, input.rawMaterialId, input.unitCostCents],
+         DO UPDATE SET unit_cost_cents = EXCLUDED.unit_cost_cents,
+           gct_exempt = COALESCE($4, supplier_materials.gct_exempt),
+           env_exempt = COALESCE($5, supplier_materials.env_exempt)`,
+      [input.supplierId, input.rawMaterialId, input.unitCostCents,
+       input.gctExempt ?? null, input.envExempt ?? null],
     );
 
     await t.query(
@@ -170,6 +181,7 @@ export async function setSupplierMaterial(
       rawMaterialId: input.rawMaterialId,
       unitCostCents: input.unitCostCents,
       priceBreaks: input.priceBreaks ?? [],
+      gctExempt: input.gctExempt ?? null, envExempt: input.envExempt ?? null,
       note: 'affects future purchase orders only',
     });
   });

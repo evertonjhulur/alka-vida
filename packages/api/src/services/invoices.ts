@@ -16,7 +16,7 @@ import type { Db, Queryable } from '../db/index.ts';
 import type { Actor } from './core.ts';
 import { audit, nextNumber, requireRole, num } from './core.ts';
 import type { Cents, InvoiceStatus } from '@alka/shared';
-import { computeTotals, computeLineTotal, RuleViolation } from '@alka/shared';
+import { computeTotals, computeLineTotal, RuleViolation, GCT_RATE } from '@alka/shared';
 
 export interface InvoiceLineInput {
   productId: string;
@@ -24,6 +24,10 @@ export interface InvoiceLineInput {
   looseBottles: number;
   pricePerCaseCents: Cents;
   pricePerBottleCents: Cents;
+  /** On an invoice covering several deliveries: which one this line is. */
+  deliveredOn?: string | null;
+  orderId?: string | null;
+  reference?: string | null;
 }
 
 export interface InvoiceLedgerRow {
@@ -43,6 +47,8 @@ const LEDGER_COLUMNS = `
   invoice_id, invoice_number, customer_id, grand_total_cents,
   amount_paid_cents, balance_cents, status, is_credit_note, invoice_date, due_date`;
 
+const isoDay = (v: unknown) => (v instanceof Date ? v.toISOString().slice(0, 10) : String(v).slice(0, 10));
+
 function toLedgerRow(r: Record<string, unknown>): InvoiceLedgerRow {
   return {
     invoiceId: r.invoice_id as string,
@@ -53,8 +59,10 @@ function toLedgerRow(r: Record<string, unknown>): InvoiceLedgerRow {
     balanceCents: num(r.balance_cents),
     status: r.status as InvoiceStatus,
     isCreditNote: r.is_credit_note as boolean,
-    invoiceDate: String(r.invoice_date),
-    dueDate: r.due_date ? String(r.due_date) : null,
+    // A DATE arrives as a Date at UTC midnight; its ISO form is the day.
+    // String(date) printed it in local time and a day early on the PDF.
+    invoiceDate: isoDay(r.invoice_date),
+    dueDate: r.due_date ? isoDay(r.due_date) : null,
   };
 }
 
@@ -96,10 +104,15 @@ export async function createInvoice(
     lines: readonly InvoiceLineInput[];
     orderIds?: readonly string[];
     discountPercent?: number;
+    discountFixedCents?: Cents;
+    gctExempt?: boolean | null;
     discountStatus?: 'Approved' | 'Pending' | 'Rejected';
     dueDate?: string | null;
     notes?: string | null;
     invoiceDate?: string | null;
+    cycle?: 'Weekly' | 'Monthly' | null;
+    periodFrom?: string | null;
+    periodTo?: string | null;
   },
 ): Promise<{ id: string; invoiceNumber: string; grandTotalCents: Cents }> {
   if (args.lines.length === 0) {
@@ -112,32 +125,33 @@ export async function createInvoice(
   // (Section 5). The percent is recorded, but the money is calculated at 0%
   // until an Admin approves it.
   const discountStatus = args.discountStatus ?? 'Approved';
-  const effectiveDiscount = discountStatus === 'Approved' ? (args.discountPercent ?? 0) : 0;
-  const totals = computeTotals(priced, effectiveDiscount);
+  const fixed = Math.max(0, Math.round(Number(args.discountFixedCents) || 0));
+  const pct = fixed > 0 ? 0 : (args.discountPercent ?? 0);
+  const effectivePct = discountStatus === 'Approved' ? pct : 0;
+  const effectiveFixed = discountStatus === 'Approved' ? fixed : 0;
+  // GCT follows the customer's exemption unless the caller says otherwise.
+  const gctExempt = args.gctExempt ?? (await t.one<{ gct_exempt: boolean }>(
+    `SELECT gct_exempt FROM customers WHERE id = $1`, [args.customerId],
+  )).gct_exempt;
+  const totals = computeTotals(priced, effectivePct, !gctExempt, effectiveFixed);
 
   const invoiceNumber = await nextNumber(t, 'invoice_number_seq', 'INV');
   const invoice = await t.one<{ id: string }>(
     `INSERT INTO invoices
        (invoice_number, customer_id, invoice_date, due_date, subtotal_cents,
         discount_percent, discount_amount_cents, discount_status,
-        gct_cents, grand_total_cents, notes)
-     VALUES ($1,$2,COALESCE($3::date,business_today()),$4,$5,$6,$7,$8,$9,$10,$11)
+        gct_cents, grand_total_cents, notes,
+        discount_fixed_cents, gct_exempt, cycle, period_from, period_to)
+     VALUES ($1,$2,COALESCE($3::date,business_today()),$4,$5,$6,$7,$8,$9,$10,$11,
+             $12,$13,$14,$15,$16)
      RETURNING id`,
     [invoiceNumber, args.customerId, args.invoiceDate ?? null, args.dueDate ?? null,
-     totals.subtotal, args.discountPercent ?? 0, totals.discountAmount, discountStatus,
-     totals.gct, totals.grandTotal, args.notes ?? null],
+     totals.subtotal, pct, totals.discountAmount, discountStatus,
+     totals.gct, totals.grandTotal, args.notes ?? null,
+     fixed, gctExempt, args.cycle ?? null, args.periodFrom ?? null, args.periodTo ?? null],
   );
 
-  for (const l of priced) {
-    await t.query(
-      `INSERT INTO invoice_line_items
-         (invoice_id, product_id, cases, loose_bottles,
-          price_per_case_cents, price_per_bottle_cents, line_total_cents)
-       VALUES ($1,$2,$3,$4,$5,$6,$7)`,
-      [invoice.id, l.productId, l.cases, l.looseBottles,
-       l.pricePerCaseCents, l.pricePerBottleCents, l.lineTotal],
-    );
-  }
+  await insertLines(t, invoice.id, priced);
   for (const orderId of args.orderIds ?? []) {
     await t.query(
       `INSERT INTO invoice_orders (invoice_id, order_id) VALUES ($1,$2)
@@ -157,6 +171,21 @@ export async function createInvoice(
 }
 
 interface PricedLine extends InvoiceLineInput { lineTotal: Cents }
+
+async function insertLines(t: Queryable, invoiceId: string, lines: readonly PricedLine[]) {
+  for (const l of lines) {
+    await t.query(
+      `INSERT INTO invoice_line_items
+         (invoice_id, product_id, cases, loose_bottles,
+          price_per_case_cents, price_per_bottle_cents, line_total_cents,
+          delivered_on, order_id, reference)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+      [invoiceId, l.productId, l.cases, l.looseBottles,
+       l.pricePerCaseCents, l.pricePerBottleCents, l.lineTotal,
+       l.deliveredOn ?? null, l.orderId ?? null, l.reference ?? null],
+    );
+  }
+}
 
 async function priceLines(
   t: Queryable,
@@ -196,7 +225,10 @@ export async function editInvoice(
   db: Db,
   actor: Actor,
   invoiceId: string,
-  changes: { lines?: readonly InvoiceLineInput[]; discountPercent?: number; reason?: string },
+  changes: {
+    lines?: readonly InvoiceLineInput[]; discountPercent?: number;
+    discountFixedCents?: Cents; gctExempt?: boolean; reason?: string;
+  },
 ): Promise<{ invoice: InvoiceLedgerRow; creditNoteId: string | null }> {
   requireRole(actor, 'admin');
 
@@ -205,17 +237,24 @@ export async function editInvoice(
     if (!before) throw new RuleViolation(`invoice ${invoiceId} not found`);
     if (before.isCreditNote) throw new RuleViolation('a credit note cannot be edited');
 
-    const existing = await t.one<{ discount_percent: number; customer_id: string }>(
-      `SELECT discount_percent, customer_id FROM invoices WHERE id = $1`, [invoiceId],
+    const existing = await t.one<{
+      discount_percent: number; customer_id: string; discount_fixed_cents: number; gct_exempt: boolean;
+    }>(
+      `SELECT discount_percent, customer_id, discount_fixed_cents, gct_exempt
+       FROM invoices WHERE id = $1`, [invoiceId],
     );
 
     const lines = changes.lines
       ? await priceLines(t, changes.lines)
       : (await t.query<Record<string, unknown>>(
           `SELECT product_id, cases, loose_bottles, price_per_case_cents,
-                  price_per_bottle_cents, line_total_cents
+                  price_per_bottle_cents, line_total_cents, delivered_on::text AS delivered_on,
+                  order_id, reference
            FROM invoice_line_items WHERE invoice_id = $1`, [invoiceId],
         )).map((r) => ({
+          deliveredOn: (r.delivered_on as string) ?? null,
+          orderId: (r.order_id as string) ?? null,
+          reference: (r.reference as string) ?? null,
           productId: r.product_id as string,
           cases: num(r.cases),
           looseBottles: num(r.loose_bottles),
@@ -224,30 +263,25 @@ export async function editInvoice(
           lineTotal: num(r.line_total_cents),
         }));
 
-    const discountPercent = changes.discountPercent ?? num(existing.discount_percent);
-    const totals = computeTotals(lines, discountPercent);
+    const fixed = changes.discountFixedCents !== undefined
+      ? Math.max(0, Math.round(Number(changes.discountFixedCents) || 0))
+      : (changes.discountPercent !== undefined ? 0 : num(existing.discount_fixed_cents));
+    const discountPercent = fixed > 0 ? 0 : (changes.discountPercent ?? num(existing.discount_percent));
+    const gctExempt = changes.gctExempt ?? existing.gct_exempt;
+    const totals = computeTotals(lines, discountPercent, !gctExempt, fixed);
 
     if (changes.lines) {
       await t.query(`DELETE FROM invoice_line_items WHERE invoice_id = $1`, [invoiceId]);
-      for (const l of lines) {
-        await t.query(
-          `INSERT INTO invoice_line_items
-             (invoice_id, product_id, cases, loose_bottles,
-              price_per_case_cents, price_per_bottle_cents, line_total_cents)
-           VALUES ($1,$2,$3,$4,$5,$6,$7)`,
-          [invoiceId, l.productId, l.cases, l.looseBottles,
-           l.pricePerCaseCents, l.pricePerBottleCents, l.lineTotal],
-        );
-      }
+      await insertLines(t, invoiceId, lines);
     }
 
     await t.query(
       `UPDATE invoices SET subtotal_cents = $2, discount_percent = $3,
          discount_amount_cents = $4, gct_cents = $5, grand_total_cents = $6,
-         updated_at = now()
+         discount_fixed_cents = $7, gct_exempt = $8, updated_at = now()
        WHERE id = $1`,
       [invoiceId, totals.subtotal, discountPercent, totals.discountAmount,
-       totals.gct, totals.grandTotal],
+       totals.gct, totals.grandTotal, fixed, gctExempt],
     );
 
     let creditNoteId: string | null = null;
@@ -283,6 +317,7 @@ export async function editInvoice(
     // Always logged with before/after, regardless of whether a reason exists.
     await audit(t, actor, 'update', 'Invoice', invoiceId, before.invoiceNumber, {
       reason: changes.reason ?? null,
+      gctExempt, discountFixedCents: fixed,
       before: {
         grandTotalCents: before.grandTotalCents,
         status: before.status,
@@ -300,47 +335,111 @@ export async function editInvoice(
   });
 }
 
-/** Raise a credit note explicitly. A User's goes to the approval queue. */
+/**
+ * Raise a credit note (Everton's revisions, 30 Sep 2026: its own screen).
+ *
+ * For a customer, optionally against one of their invoices, either
+ *   - by PRODUCT: lines priced like an invoice, GCT worked out the same way,
+ *     for goods returned, short-delivered or damaged; or
+ *   - by AMOUNT: a GCT-inclusive figure, split back into its GCT portion so
+ *     the tax on the credit is right (unless the customer is GCT-exempt).
+ *
+ * Stored as a negative invoice (is_credit_note), so it reduces the ONE
+ * customer balance exactly as before. A User's credit note is saved at once
+ * but does not count until an admin approves it; an admin's counts at once.
+ */
 export async function createCreditNote(
   db: Db,
   actor: Actor,
-  args: { invoiceId: string; amountCents: Cents; reason: string },
-): Promise<{ id: string; invoiceNumber: string; approvalRequestId: string | null }> {
+  args: {
+    invoiceId?: string | null;
+    customerId?: string | null;
+    amountCents?: Cents | null;
+    lines?: readonly InvoiceLineInput[] | null;
+    reason: string;
+  },
+): Promise<{ id: string; invoiceNumber: string; approvalRequestId: string | null; totalCents: Cents }> {
   requireRole(actor, 'admin', 'user');
-  if (args.amountCents <= 0) throw new RuleViolation('a credit note amount must be positive');
+  const reason = (args.reason ?? '').trim();
+  if (!reason) throw new RuleViolation('say why the credit is being given');
+  const byLines = (args.lines?.length ?? 0) > 0;
+  if (!byLines && !(Number(args.amountCents) > 0)) {
+    throw new RuleViolation('a credit note needs products or an amount');
+  }
 
   return db.tx(async (t) => {
-    const target = await t.one<{ customer_id: string; invoice_number: string }>(
-      `SELECT customer_id, invoice_number FROM invoices WHERE id = $1`, [args.invoiceId],
+    let customerId = args.customerId ?? null;
+    let linkedNumber: string | null = null;
+    let gctExempt = false;
+    if (args.invoiceId) {
+      const target = await t.maybeOne<{
+        customer_id: string; invoice_number: string; is_credit_note: boolean; gct_exempt: boolean;
+      }>(
+        `SELECT customer_id, invoice_number, is_credit_note, gct_exempt FROM invoices WHERE id = $1`,
+        [args.invoiceId],
+      );
+      if (!target) throw new RuleViolation('that invoice no longer exists');
+      if (target.is_credit_note) throw new RuleViolation('a credit note cannot be credited');
+      if (customerId && customerId !== target.customer_id) {
+        throw new RuleViolation('that invoice belongs to a different customer');
+      }
+      customerId = target.customer_id;
+      linkedNumber = target.invoice_number;
+      gctExempt = target.gct_exempt;
+    }
+    if (!customerId) throw new RuleViolation('choose the customer the credit is for');
+    const cust = await t.one<{ gct_exempt: boolean }>(
+      `SELECT gct_exempt FROM customers WHERE id = $1`, [customerId],
     );
+    if (!args.invoiceId) gctExempt = cust.gct_exempt;
+
+    let subtotal: Cents;
+    let gct: Cents;
+    let priced: PricedLine[] = [];
+    if (byLines) {
+      priced = await priceLines(t, args.lines!);
+      const totals = computeTotals(priced, 0, !gctExempt);
+      subtotal = totals.subtotal;
+      gct = totals.gct;
+    } else {
+      const amount = Math.round(Number(args.amountCents));
+      // The amount given is what the customer is credited, GCT included.
+      subtotal = gctExempt ? amount : Math.round(amount / (1 + GCT_RATE));
+      gct = amount - subtotal;
+    }
+    const total = subtotal + gct;
+    if (total <= 0) throw new RuleViolation('a credit note must be for more than nothing');
 
     // An Admin's credit note is approved on their own authority; a User's is
     // saved immediately but does not reduce what is owed until approved.
     const isAdmin = actor.role === 'admin';
     const creditStatus = isAdmin ? 'Approved' : 'Pending';
-    const effective = isAdmin ? -args.amountCents : 0;
 
     const number = await nextNumber(t, 'invoice_number_seq', 'CN');
     const cn = await t.one<{ id: string }>(
       `INSERT INTO invoices
          (invoice_number, customer_id, invoice_date, subtotal_cents,
           gct_cents, grand_total_cents, is_credit_note, credit_status,
-          linked_invoice_id, notes)
-       VALUES ($1,$2,business_today(),$3,0,$4,true,$5,$6,$7)
+          linked_invoice_id, notes, gct_exempt)
+       VALUES ($1,$2,business_today(),$3,$4,$5,true,$6,$7,$8,$9)
        RETURNING id`,
-      [number, target.customer_id, effective, effective, creditStatus,
-       args.invoiceId, args.reason],
+      [number, customerId,
+       isAdmin ? -subtotal : 0, isAdmin ? -gct : 0, isAdmin ? -total : 0,
+       creditStatus, args.invoiceId ?? null, reason, gctExempt],
     );
+    if (priced.length) await insertLines(t, cn.id, priced);
 
     let approvalRequestId: string | null = null;
     if (!isAdmin) {
       const req = await t.one<{ id: string }>(
         `INSERT INTO approval_requests
            (request_type, entity_type, entity_id, entity_label, customer_id,
-            amount_cents, reason, requested_by_id)
-         VALUES ('CreditNote','Invoice',$1,$2,$3,$4,$5,$6)
+            amount_cents, reason, requested_by_id, payload)
+         VALUES ('CreditNote','Invoice',$1,$2,$3,$4,$5,$6,$7)
          RETURNING id`,
-        [cn.id, number, target.customer_id, -args.amountCents, args.reason, actor.id],
+        [cn.id, number, customerId, -total, reason, actor.id,
+         JSON.stringify({ subtotalCents: -subtotal, gctCents: -gct, totalCents: -total,
+           linkedInvoiceNumber: linkedNumber })],
       );
       approvalRequestId = req.id;
       await t.query(`UPDATE invoices SET approval_request_id = $2 WHERE id = $1`,
@@ -348,12 +447,32 @@ export async function createCreditNote(
     }
 
     await audit(t, actor, 'create', 'Invoice', cn.id, number, {
-      isCreditNote: true, creditStatus, linkedInvoiceId: args.invoiceId,
-      amountCents: -args.amountCents, reason: args.reason,
+      isCreditNote: true, creditStatus, linkedInvoiceId: args.invoiceId ?? null,
+      amountCents: -total, gctCents: -gct, byProduct: byLines, reason,
     });
 
-    return { id: cn.id, invoiceNumber: number, approvalRequestId };
+    return { id: cn.id, invoiceNumber: number, approvalRequestId, totalCents: total };
   });
+}
+
+/** Every credit note, newest first, for the Credit notes screen. */
+export async function listCreditNotes(db: Db, customerId?: string | null) {
+  return db.query(
+    `SELECT i.id, i.invoice_number, i.invoice_date::text AS invoice_date, i.customer_id,
+            c.name AS customer_name, i.grand_total_cents, i.gct_cents, i.credit_status,
+            i.notes AS reason, li.invoice_number AS linked_invoice_number,
+            i.linked_invoice_id, i.sent_date::text AS sent_date,
+            (SELECT COUNT(*)::int FROM invoice_line_items l WHERE l.invoice_id = i.id) AS line_count,
+            ar.amount_cents AS pending_amount_cents
+     FROM invoices i
+     JOIN customers c ON c.id = i.customer_id
+     LEFT JOIN invoices li ON li.id = i.linked_invoice_id
+     LEFT JOIN approval_requests ar ON ar.id = i.approval_request_id
+     WHERE i.is_credit_note AND ($1::uuid IS NULL OR i.customer_id = $1::uuid)
+     ORDER BY i.created_at DESC
+     LIMIT 300`,
+    [customerId ?? null],
+  );
 }
 
 /** Mark an invoice as sent to the customer. */

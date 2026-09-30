@@ -178,7 +178,10 @@ describe('Purchase orders', () => {
 
     // 20,000 x 8.50 + 20,000 x 4.00 = 170,000.00 + 80,000.00
     assert.equal(po.subtotalCents, 20_000 * 850 + 20_000 * 400);
-    assert.equal(po.grandTotalCents, po.subtotalCents + Math.round(po.subtotalCents * 0.15));
+    // GCT 15% and, since 30 Sep 2026, the Environmental Levy (0.375%) on
+    // every line not tagged Env-exempt for this supplier.
+    assert.equal(po.grandTotalCents, po.subtotalCents + Math.round(po.subtotalCents * 0.15)
+      + Math.round(20_000 * 850 * 0.00375) + Math.round(20_000 * 400 * 0.00375));
   });
 
   test('receiving creates a FIFO batch and raises stock', async () => {

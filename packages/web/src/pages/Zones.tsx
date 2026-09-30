@@ -1,10 +1,27 @@
 import { useEffect, useState } from 'react';
 import { api, type Session } from '../lib/api';
-import { ask, askText } from '../components/Dialog';
+import { ask } from '../components/Dialog';
+
+const WEEK = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+
+/** Tap the days a round runs. A plain function, never a nested component. */
+function dayPicker(days: string[], onChange: (d: string[]) => void, label: string) {
+  return (
+    <div className="day-picks" role="group" aria-label={label}>
+      {WEEK.map((d) => (
+        <button key={d} type="button" aria-pressed={days.includes(d)}
+                className={`day-pick${days.includes(d) ? ' on' : ''}`}
+                onClick={() => onChange(days.includes(d) ? days.filter((x) => x !== d)
+                  : WEEK.filter((x) => x === d || days.includes(x)))}>{d}</button>
+      ))}
+    </div>
+  );
+}
 
 interface Zone {
   id: string; name: string; covers: string | null;
   retired_at: string | null; sort_order: number; customer_count: number;
+  run_days: string[] | null;
 }
 
 /**
@@ -22,10 +39,10 @@ export default function Zones({ session }: { session: Session }) {
   const [busy, setBusy] = useState(false);
 
   const [showNew, setShowNew] = useState(false);
-  const [nw, setNw] = useState({ name: '', covers: '' });
+  const [nw, setNw] = useState<{ name: string; covers: string; runDays: string[] }>({ name: '', covers: '', runDays: [] });
 
   const [editFor, setEditFor] = useState<string | null>(null);
-  const [ed, setEd] = useState({ name: '', covers: '' });
+  const [ed, setEd] = useState<{ name: string; covers: string; runDays: string[] }>({ name: '', covers: '', runDays: [] });
 
   const isAdmin = session.role === 'admin';
 
@@ -44,7 +61,7 @@ export default function Zones({ session }: { session: Session }) {
     return run(async () => {
       await api.post('/api/zones', nw);
       setMsg(`${nw.name} added.`);
-      setNw({ name: '', covers: '' });
+      setNw({ name: '', covers: '', runDays: [] });
       setShowNew(false);
     }, 'Could not add the zone');
   };
@@ -88,8 +105,9 @@ export default function Zones({ session }: { session: Session }) {
     <>
       <h1>Delivery zones</h1>
       <p className="subtitle">
-        The rounds deliveries are grouped into. An order goes on the sheet for its
-        customer&rsquo;s zone and requested date.
+        The rounds deliveries are grouped into, and the days each one runs. An order goes
+        on the round for its customer&rsquo;s zone and date; New order suggests the next day
+        the round runs.
       </p>
 
       {error && <div className="notice error">{error}</div>}
@@ -119,6 +137,10 @@ export default function Zones({ session }: { session: Session }) {
                        onChange={(e) => setNw({ ...nw, covers: e.target.value })} />
               </div>
               <div className="field">
+                <span className="label">Days it runs</span>
+                {dayPicker(nw.runDays, (d) => setNw({ ...nw, runDays: d }), 'Days it runs')}
+              </div>
+              <div className="field">
                 <button disabled={busy || !nw.name.trim()}>Add</button>
               </div>
             </div>
@@ -128,7 +150,7 @@ export default function Zones({ session }: { session: Session }) {
         <table>
           <thead>
             <tr>
-              <th>Zone</th><th>Covers</th><th className="num">Customers</th><th />
+              <th>Zone</th><th>Runs on</th><th>Covers</th><th className="num">Customers</th><th />
             </tr>
           </thead>
           <tbody>
@@ -139,6 +161,7 @@ export default function Zones({ session }: { session: Session }) {
                     <input value={ed.name}
                            onChange={(e) => setEd({ ...ed, name: e.target.value })} />
                   </td>
+                  <td>{dayPicker(ed.runDays, (d) => setEd({ ...ed, runDays: d }), `Days ${z.name} runs`)}</td>
                   <td>
                     <input style={{ width: '100%' }} value={ed.covers}
                            onChange={(e) => setEd({ ...ed, covers: e.target.value })} />
@@ -156,13 +179,15 @@ export default function Zones({ session }: { session: Session }) {
               ) : (
                 <tr key={z.id}>
                   <td><strong>{z.name}</strong></td>
+                  <td>{z.run_days?.length ? z.run_days.join(', ')
+                    : <span className="chip warn">any day</span>}</td>
                   <td className="small muted">{z.covers ?? '—'}</td>
                   <td className="num">{z.customer_count}</td>
                   <td className="num">
                     <button className="secondary" disabled={busy}
                             onClick={() => {
                               setEditFor(z.id);
-                              setEd({ name: z.name, covers: z.covers ?? '' });
+                              setEd({ name: z.name, covers: z.covers ?? '', runDays: z.run_days ?? [] });
                             }}>
                       Edit
                     </button>{' '}
