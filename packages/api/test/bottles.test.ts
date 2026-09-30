@@ -129,6 +129,15 @@ describe('Movement history', () => {
     assert.ok(kinds.has('BottleWash'), 'washes are recorded');
   });
 
+  test('every movement carries the business date the screen shows', async () => {
+    // The screen reads txn_day. Without it every row printed its date as a dash.
+    const history = await poolHistory(f.db) as Array<{ txn_day: string | null }>;
+    assert.ok(history.length > 0);
+    for (const h of history) {
+      assert.match(String(h.txn_day), /^\d{4}-\d{2}-\d{2}$/, 'a YYYY-MM-DD business date');
+    }
+  });
+
   test('a loss entry says plainly that it is not charged to the customer', async () => {
     const history = await poolHistory(f.db) as Array<{ notes: string }>;
     const loss = history.find((h) => h.notes?.includes('lost or damaged'));

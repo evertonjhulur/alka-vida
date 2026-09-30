@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api, type Session } from '../lib/api';
-import { money, toCents, date, todayInJamaica } from '../lib/format';
+import { money, toCents, date, todayInJamaica, when } from '../lib/format';
+import { ask, askText } from '../components/Dialog';
 
 interface Employee {
   id: string; name: string; job_title: string | null;
@@ -150,10 +151,11 @@ export default function Employees({ session }: { session: Session }) {
     }, 'Could not record the work');
   };
 
-  const removeEntry = (en: Entry) => {
-    if (!window.confirm(
+  const removeEntry = async (en: Entry) => {
+    if (!await ask(
       `Remove ${en.employee_name}'s ${unit(en.basis, Number(en.quantity))} `
-      + `on ${date(en.work_date)}, worth ${money(Number(en.amount_cents))}?`,
+      + `on ${when(en.work_date)}, worth ${money(Number(en.amount_cents))}?`,
+      { confirmLabel: 'Remove', danger: true },
     )) return;
     return run(async () => {
       await api.del(`/api/labour/${en.id}`);
@@ -518,7 +520,7 @@ export default function Employees({ session }: { session: Session }) {
                           <div className="muted small">{p.job_title ?? ''}</div>
                         </span>
                       </td>
-                      <td data-label="Left">{date(p.ended_on)}</td>
+                      <td data-label="Left">{when(p.ended_on)}</td>
                       <td data-label="Recorded to date" className="num money">
                         {money(Number(p.lifetime_cents))}
                       </td>
@@ -557,7 +559,7 @@ export default function Employees({ session }: { session: Session }) {
                   <tr key={en.id}>
                     <td className="lead">
                       <span>
-                        {date(en.work_date)}
+                        {when(en.work_date)}
                         <div className="muted small phone-only">{en.employee_name}</div>
                       </span>
                       <span className="chip neutral phone-only">
@@ -580,7 +582,7 @@ export default function Employees({ session }: { session: Session }) {
                     </td>
                     <td className="num actions">
                       {isAdmin && (
-                        <button className="secondary" disabled={busy}
+                        <button className="danger-soft" disabled={busy}
                                 onClick={() => removeEntry(en)}>
                           Remove
                         </button>

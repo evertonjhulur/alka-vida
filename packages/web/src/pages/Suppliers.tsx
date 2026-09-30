@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { api } from '../lib/api';
 import { money, toCents } from '../lib/format';
+import { ask, askText } from '../components/Dialog';
 
 interface SuppliedMaterial {
   rawMaterialId: string;
@@ -152,7 +153,7 @@ export default function Suppliers() {
   }
 
   async function unlink(supplierId: string, materialId: string, materialName: string) {
-    if (!window.confirm(`Stop buying ${materialName} from this supplier?`)) return;
+    if (!(await ask(`Stop buying ${materialName} from this supplier?`, { confirmLabel: 'Stop buying', danger: true }))) return;
     setBusy(true);
     try {
       await api.del(`/api/suppliers/${supplierId}/materials/${materialId}`);
@@ -411,7 +412,7 @@ export default function Suppliers() {
                             onClick={() => openPricing(s.id, m)}>
                       Edit price
                     </button>{' '}
-                    <button className="secondary" disabled={busy}
+                    <button className="danger-soft" disabled={busy}
                             onClick={() => unlink(s.id, m.rawMaterialId, m.name)}>
                       Remove
                     </button>

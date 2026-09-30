@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, type ReactNode } from 'react';
 import {
   HashRouter, Routes, Route, NavLink, Navigate, useNavigate, useLocation,
 } from 'react-router-dom';
@@ -16,7 +16,6 @@ import Settlement from './pages/Settlement';
 import Invoices from './pages/Invoices';
 import InvoiceDetail from './pages/InvoiceDetail';
 import Statement from './pages/Statement';
-import Approvals from './pages/Approvals';
 import Reports from './pages/Reports';
 import DriverRoute from './pages/DriverRoute';
 import DriverStop from './pages/DriverStop';
@@ -28,6 +27,9 @@ import Bom from './pages/Bom';
 import Payments from './pages/Payments';
 import ErrorBoundary from './components/ErrorBoundary';
 import StaleServerNotice from './components/StaleServerNotice';
+import TopBar from './components/TopBar';
+import SectionTabs from './components/SectionTabs';
+import { DialogHost } from './components/Dialog';
 import PurchaseOrders from './pages/PurchaseOrders';
 import Production from './pages/Production';
 import Stock from './pages/Stock';
@@ -37,7 +39,7 @@ import Users from './pages/Users';
 import MyAccount from './pages/MyAccount';
 import Register from './pages/Register';
 import SetPassword from './pages/SetPassword';
-import Applications from './pages/Applications';
+import Decisions from './pages/Decisions';
 import Zones from './pages/Zones';
 import Employees from './pages/Employees';
 import EmployeeRecord from './pages/EmployeeRecord';
@@ -47,38 +49,63 @@ interface NavItem {
   to: string;
   label: string;
   roles: Role[];
-  /** Groups the sidebar into Sales and Operations. */
+  /** The menu section it sits under: Sales, Deliveries, Money... */
   section?: string;
+  /**
+   * Where it sits in the office menu, if not in the list. 'action' is the
+   * button under the brand (New order: the thing the office does most);
+   * 'account' sits with Sign out (My password belongs to the person, not
+   * to any part of the business). Drivers' and customers' short tab strips
+   * show every item as a tab regardless.
+   */
+  placement?: 'action' | 'account' | 'decide';
+  /** Other addresses that belong to this item (its tabs), which keep it lit. */
+  also?: string[];
   /** Which pending count, if any, puts a badge on this item. */
-  badge?: 'applications' | 'approvals';
+  badge?: 'decisions';
 }
 
 interface PendingCounts { applications: number; approvals: number }
 
-/** Navigation mirrors the Section 10 permission table exactly. */
+/**
+ * Navigation mirrors the Section 10 permission table exactly.
+ *
+ * Grouped by the job being done (UX review, 28 Sep 2026), not by table:
+ * seven sections instead of one list of twenty-four. Order within a section
+ * is how often the office reaches for it.
+ */
 const NAV: NavItem[] = [
-  { to: '/', label: 'Dashboard', roles: ['admin', 'user'] },
+  { to: '/orders/new', label: 'New order', roles: ['admin', 'user'], placement: 'action' },
+  // Approvals and account requests in one list. On a desktop the top bar's
+  // "Needs a decision" button leads here; on a phone it heads the menu.
+  { to: '/decisions', label: 'Needs a decision', roles: ['admin', 'user'], placement: 'decide', badge: 'decisions' },
 
-  { to: '/orders/new', label: 'New order', roles: ['admin', 'user'], section: 'Sales' },
+  { to: '/', label: 'Today', roles: ['admin', 'user'] },
+
   { to: '/orders', label: 'Orders', roles: ['admin', 'user'], section: 'Sales' },
   { to: '/recurring', label: 'Standing orders', roles: ['admin', 'user'], section: 'Sales' },
   { to: '/customers', label: 'Customers', roles: ['admin', 'user'], section: 'Sales' },
-  { to: '/pricing', label: 'Products & pricing', roles: ['admin', 'user'], section: 'Sales' },
-  { to: '/delivery', label: 'Delivery sheets', roles: ['admin', 'user'], section: 'Sales' },
-  { to: '/invoices', label: 'Invoices', roles: ['admin', 'user'], section: 'Sales' },
-  { to: '/payments', label: 'Payments', roles: ['admin', 'user'], section: 'Sales' },
-  { to: '/statement', label: 'Statements', roles: ['admin', 'user'], section: 'Sales' },
-  { to: '/approvals', label: 'Approvals', roles: ['admin', 'user'], section: 'Sales', badge: 'approvals' },
 
-  { to: '/materials', label: 'Raw materials', roles: ['admin', 'user'], section: 'Operations' },
-  { to: '/suppliers', label: 'Suppliers', roles: ['admin', 'user'], section: 'Operations' },
-  { to: '/purchase-orders', label: 'Purchase orders', roles: ['admin', 'user'], section: 'Operations' },
-  { to: '/production', label: 'Production', roles: ['admin', 'user'], section: 'Operations' },
-  { to: '/stock', label: 'Stock on hand', roles: ['admin', 'user'], section: 'Operations' },
-  { to: '/stock-count', label: 'Stock count', roles: ['admin', 'user'], section: 'Operations' },
-  { to: '/bottle-pool', label: 'Bottle pool', roles: ['admin', 'user'], section: 'Operations' },
+  { to: '/delivery', label: 'Delivery rounds', roles: ['admin', 'user'], section: 'Deliveries' },
+  { to: '/bottle-pool', label: 'Bottle pool', roles: ['admin', 'user'], section: 'Deliveries' },
 
-  { to: '/reports', label: 'Reports', roles: ['admin', 'user'] },
+  { to: '/invoices', label: 'Invoices', roles: ['admin', 'user'], section: 'Money' },
+  { to: '/payments', label: 'Payments', roles: ['admin', 'user'], section: 'Money' },
+  { to: '/statement', label: 'Statements', roles: ['admin', 'user'], section: 'Money' },
+
+  { to: '/production', label: 'Production', roles: ['admin', 'user'], section: 'Production & stock' },
+  { to: '/stock', label: 'Stock and counts', roles: ['admin', 'user'], section: 'Production & stock', also: ['/stock-count'] },
+  { to: '/materials', label: 'Raw materials', roles: ['admin', 'user'], section: 'Production & stock' },
+  { to: '/purchase-orders', label: 'Purchasing', roles: ['admin', 'user'], section: 'Production & stock', also: ['/suppliers'] },
+
+  { to: '/reports', label: 'Reports', roles: ['admin', 'user'], section: 'Reports' },
+
+  // Set up once, changed rarely. Logins are the administrator's alone.
+  { to: '/pricing', label: 'Products & pricing', roles: ['admin', 'user'], section: 'Settings' },
+  { to: '/zones', label: 'Delivery zones', roles: ['admin', 'user'], section: 'Settings' },
+  // Logins are the administrator's alone, so office staff see just Employees.
+  { to: '/employees', label: 'People and logins', roles: ['admin'], section: 'Settings', also: ['/users'] },
+  { to: '/employees', label: 'Employees', roles: ['user'], section: 'Settings' },
 
   { to: '/route', label: 'My route', roles: ['driver'] },
   // The portal, as separate modules rather than tabs inside one screen.
@@ -87,18 +114,34 @@ const NAV: NavItem[] = [
   { to: '/portal/repeats', label: 'Standing orders', roles: ['customer'] },
   { to: '/portal/account', label: 'Statements & invoices', roles: ['customer'] },
 
-  // Administration. Logins are the administrator's alone; changing your own
-  // password belongs to everybody, which is why it is not in that section.
-  { to: '/applications', label: 'Account requests', roles: ['admin', 'user'], section: 'Administration', badge: 'applications' },
-  { to: '/zones', label: 'Delivery zones', roles: ['admin', 'user'], section: 'Administration' },
-  { to: '/employees', label: 'Employees', roles: ['admin', 'user'], section: 'Administration' },
-  { to: '/users', label: 'Logins', roles: ['admin'], section: 'Administration' },
-  { to: '/my-account', label: 'My password', roles: ['admin', 'user', 'driver'] },
+  // Everybody's own password; with Sign out, not in any section.
+  { to: '/my-account', label: 'My password', roles: ['admin', 'user', 'driver'], placement: 'account' },
 ];
+
+/** The tabs of the three screens that merge two menu items each. */
+const STOCK: Array<[string, string]> = [['/stock', 'Stock'], ['/stock-count', 'Stock count']];
+const PURCHASING: Array<[string, string]> = [['/purchase-orders', 'Purchase orders'], ['/suppliers', 'Suppliers']];
+const PEOPLE: Array<[string, string]> = [['/employees', 'Employees'], ['/users', 'Logins']];
+
+/**
+ * Whether a menu link lights up only on its own address.
+ *
+ * By default a link is also active on every address beneath it, which is what
+ * keeps Customers lit on a customer's record. But /orders/new sits beneath
+ * /orders AND is its own menu item, so on New order both were lit. A link is
+ * exact when another menu item lives beneath it.
+ */
+function exactMatch(to: string): boolean {
+  return to === '/' || NAV.some((o) => o.to !== to && o.to.startsWith(`${to}/`));
+}
 
 function Shell({ session }: { session: Session }) {
   const navigate = useNavigate();
   const items = NAV.filter((n) => n.roles.includes(session.role));
+  const listed = items.filter((n) => !n.placement);
+  const actions = items.filter((n) => n.placement === 'action');
+  const account = items.filter((n) => n.placement === 'account');
+  const decide = items.filter((n) => n.placement === 'decide');
   const { pathname } = useLocation();
 
   /**
@@ -122,10 +165,11 @@ function Shell({ session }: { session: Session }) {
 
   const signOut = () => { clearSession(); navigate('/login'); location.reload(); };
 
-  const badgeFor = (n: NavItem) => (n.badge && pending[n.badge] > 0
+  const waiting = pending.applications + pending.approvals;
+  const badgeFor = (n: NavItem) => (n.badge === 'decisions' && waiting > 0
     ? (
-      <span className="nav-badge" title={`${pending[n.badge]} waiting for you`}>
-        {pending[n.badge]}
+      <span className="nav-badge" title={`${waiting} waiting for you`}>
+        {waiting}
       </span>
     )
     : null);
@@ -142,6 +186,40 @@ function Shell({ session }: { session: Session }) {
    */
   const compactNav = items.length <= 5;
 
+  /** The grouped list, shared by the desktop sidebar and the phone drawer. */
+  const groupedLinks = (withActions: boolean) => (
+    <>
+      {withActions && actions.map((n) => (
+        <NavLink key={n.to} to={n.to} end={exactMatch(n.to)} className="nav-action">
+          + {n.label}
+        </NavLink>
+      ))}
+      {withActions && decide.map((n) => (
+        <NavLink key={n.to} to={n.to} end className="nav-decide">
+          {n.label}{badgeFor(n)}
+        </NavLink>
+      ))}
+      {listed.map((n, i) => (
+        <div key={n.to}>
+          {/* Print a heading the first time a section appears. */}
+          {n.section && n.section !== listed[i - 1]?.section && (
+            <div className="nav-section">{n.section}</div>
+          )}
+          <NavLink to={n.to} end={exactMatch(n.to)}
+                   className={({ isActive }) => (isActive || n.also?.some((a) => pathname.startsWith(a)) ? 'active' : '')}>
+            {n.label}{badgeFor(n)}
+          </NavLink>
+        </div>
+      ))}
+    </>
+  );
+
+  const accountLinks = () => account.map((n) => (
+    <NavLink key={n.to} to={n.to} end={exactMatch(n.to)} className="nav-account">
+      {n.label}
+    </NavLink>
+  ));
+
   return (
     <div className="app">
       {/* Phone only. The desktop sidebar below is untouched. */}
@@ -152,8 +230,8 @@ function Shell({ session }: { session: Session }) {
             <button className="topbar-menu" aria-expanded={menuOpen}
                     onClick={() => setMenuOpen(!menuOpen)}>
               {menuOpen ? 'Close' : 'Menu'}
-              {!menuOpen && (pending.applications + pending.approvals > 0) && (
-                <span className="nav-badge">{pending.applications + pending.approvals}</span>
+              {!menuOpen && waiting > 0 && (
+                <span className="nav-badge">{waiting}</span>
               )}
             </button>
           )}
@@ -165,7 +243,7 @@ function Shell({ session }: { session: Session }) {
         {compactNav && (
           <nav className="topbar-tabs">
             {items.map((n) => (
-              <NavLink key={n.to} to={n.to} end={n.to === '/'}>
+              <NavLink key={n.to} to={n.to} end={exactMatch(n.to)}>
                 {n.label}{badgeFor(n)}
               </NavLink>
             ))}
@@ -174,57 +252,35 @@ function Shell({ session }: { session: Session }) {
 
         {!compactNav && menuOpen && (
           <nav className="topbar-drawer" onClick={() => setMenuOpen(false)}>
-            {items.map((n, i) => (
-              <div key={n.to}>
-                {n.section && n.section !== items[i - 1]?.section && (
-                  <div className="nav-section">{n.section}</div>
-                )}
-                <NavLink to={n.to} end={n.to === '/'}>
-                  {n.label}{badgeFor(n)}
-                </NavLink>
-              </div>
-            ))}
+            {groupedLinks(true)}
             <div className="signout">
+              {accountLinks()}
               <button className="secondary" onClick={signOut}>Sign out</button>
             </div>
           </nav>
         )}
       </header>
 
+      {/* Desktop. New order, search, what is waiting and the person's own
+          account live in the top bar beside it, so the sidebar is only the
+          way round the business. */}
       <aside className="sidebar">
         <div className="brand">Alka Vida</div>
-        <div className="who">
-          {session.name}
-          <br />
-          <span style={{ textTransform: 'capitalize' }}>{session.role}</span>
-        </div>
-        <nav>
-          {items.map((n, i) => (
-            <div key={n.to}>
-              {/* Print a heading the first time a section appears. */}
-              {n.section && n.section !== items[i - 1]?.section && (
-                <div className="nav-section">{n.section}</div>
-              )}
-              <NavLink to={n.to} end={n.to === '/'}>
-                {n.label}{badgeFor(n)}
-              </NavLink>
-            </div>
-          ))}
-        </nav>
-        <div className="signout">
-          <button className="secondary" onClick={signOut}>Sign out</button>
-        </div>
+        <nav>{groupedLinks(false)}</nav>
       </aside>
 
+      <DialogHost />
+      <div className="content-col">
+      <TopBar session={session} pending={pending} onSignOut={signOut} />
       <main className="main">
         <StaleServerNotice />
         <ErrorBoundary>
         <Routes>
           <Route path="/" element={<HomeFor session={session} />} />
-          <Route path="/orders/new" element={<NewOrder />} />
+          <Route path="/orders/new" element={<Keyed><NewOrder /></Keyed>} />
           <Route path="/orders" element={<Orders />} />
           <Route path="/recurring" element={<Recurring />} />
-          <Route path="/customers" element={<Customers session={session} />} />
+          <Route path="/customers" element={<Keyed><Customers session={session} /></Keyed>} />
           <Route path="/customers/:customerId" element={<CustomerRecord session={session} />} />
           <Route path="/pricing" element={<Pricing session={session} />} />
           <Route path="/products/:productId/bom" element={<Bom />} />
@@ -235,13 +291,16 @@ function Shell({ session }: { session: Session }) {
           <Route path="/payments" element={<Payments />} />
           <Route path="/invoices/:invoiceId" element={<InvoiceDetail session={session} />} />
           <Route path="/statement" element={<Statement />} />
-          <Route path="/approvals" element={<Approvals session={session} />} />
+          <Route path="/decisions" element={<Decisions session={session} />} />
+          {/* The two screens it replaced; old links and bookmarks still land. */}
+          <Route path="/approvals" element={<Navigate to="/decisions" replace />} />
+          <Route path="/applications" element={<Navigate to="/decisions?show=accounts" replace />} />
           <Route path="/materials" element={<RawMaterials session={session} />} />
-          <Route path="/suppliers" element={<Suppliers />} />
-          <Route path="/purchase-orders" element={<PurchaseOrders />} />
+          <Route path="/suppliers" element={<><SectionTabs tabs={PURCHASING} /><Suppliers /></>} />
+          <Route path="/purchase-orders" element={<><SectionTabs tabs={PURCHASING} /><PurchaseOrders /></>} />
           <Route path="/production" element={<Production />} />
-          <Route path="/stock" element={<Stock />} />
-          <Route path="/stock-count" element={<StockCount session={session} />} />
+          <Route path="/stock" element={<><SectionTabs tabs={STOCK} /><Stock /></>} />
+          <Route path="/stock-count" element={<><SectionTabs tabs={STOCK} /><StockCount session={session} /></>} />
           <Route path="/bottle-pool" element={<BottlePool session={session} />} />
           <Route path="/reports" element={<Reports />} />
           <Route path="/route" element={<DriverRoute session={session} />} />
@@ -249,18 +308,28 @@ function Shell({ session }: { session: Session }) {
           {/* Four modules, one screen behind them. */}
           <Route path="/portal" element={<Navigate to="/portal/order" replace />} />
           <Route path="/portal/:tab" element={<Portal session={session} />} />
-          <Route path="/users" element={<Users session={session} />} />
-          <Route path="/applications" element={<Applications session={session} />} />
+          <Route path="/users" element={<>{session.role === 'admin' && <SectionTabs tabs={PEOPLE} />}<Users session={session} /></>} />
           <Route path="/zones" element={<Zones session={session} />} />
-          <Route path="/employees" element={<Employees session={session} />} />
+          <Route path="/employees" element={<>{session.role === 'admin' && <SectionTabs tabs={PEOPLE} />}<Employees session={session} /></>} />
           <Route path="/employees/:employeeId" element={<EmployeeRecord session={session} />} />
           <Route path="/my-account" element={<MyAccount session={session} />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
         </ErrorBoundary>
       </main>
+      </div>
     </div>
   );
+}
+
+/**
+ * Remounts a screen when only its query string changes. "+ New > Counter
+ * sale" while already on New order changes ?mode= but not the path, and the
+ * screen reads its starting state once; the key makes it start again.
+ */
+function Keyed({ children }: { children: ReactNode }) {
+  const { search } = useLocation();
+  return <div key={search} style={{ display: 'contents' }}>{children}</div>;
 }
 
 /** Each role lands on the screen that matches their job. */

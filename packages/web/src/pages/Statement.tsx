@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { api } from '../lib/api';
-import { money, date } from '../lib/format';
+import { money, date, when } from '../lib/format';
 
 interface Entry {
   date: string;
@@ -198,7 +198,7 @@ export function StatementView(
               </tr>
               {data.entries.map((e, i) => (
                 <tr key={i}>
-                  <td>{date(e.date)}</td>
+                  <td>{when(e.date)}</td>
                   <td>
                     <span className={`chip ${
                       e.type === 'Invoice' ? 'neutral'

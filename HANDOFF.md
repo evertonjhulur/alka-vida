@@ -4,7 +4,7 @@ State of the Alka Vida rebuild. Read `README.md` first for what the system
 does and the rules behind it; this file covers where things stand, what is
 left, and what will bite you.
 
-Last updated after the phone layout pass, on branch `operations-fixes`.
+Last updated after the UX review defect fixes (28 Sep 2026), on branch `operations-fixes`.
 
 ---
 
@@ -324,3 +324,237 @@ rather than only calling service functions:
 
 The pattern that kept repeating: **the business logic was right and the
 delivery layer was wrong.** Test in the browser, not just through the services.
+
+### UX review fixes, 28 Sep 2026
+
+Found by walking every screen with a week of trading in it. Tests: 412 passing.
+
+- Sidebar lit both New order and Orders on the New order screen (`exactMatch` in `App.tsx`).
+- Dashboard showed every open round under "Today's rounds", whatever its date.
+  Now three groups: on the road today, back and waiting to settle, coming up.
+- Driver stop card: the outcome chip stretched into a tall blob (flex stretch).
+- Driver badge showed the zone sort key (0, 10, 20) instead of the visit number.
+- Driver screen listed yesterday's finished round in full above today's; finished
+  rounds now fold away underneath.
+- "Started 03:16" was the UTC time sliced off the timestamp; `time()` in
+  `format.ts` gives Jamaica time. Same fix on the office round page.
+- Round page: "Settle route" was the filled button before the round had started.
+  The filled button now follows the round: Start, then Settle once every stop is worked.
+- Bottle pool: the headline count out with customers disagreed with the holdings
+  table (opening balance belongs to no customer). The gap is now its own line.
+  Its movement history also printed every date as a dash - `poolHistory` never
+  returned `txn_day`.
+- Customer record header labelled ("Business account · Kingston zone ·
+  Corporate price list · Terms: Net 30"); bare, two parts both read "Corporate".
+- Phone tab strip hid the portal's fourth module off-screen; it is a two-column grid now.
+
+### Logo colours, 28 Sep 2026
+
+Evert chose the logo's colours over the old teal (#0b7285, not in the logo).
+`styles.css` `:root` now carries them: ALKA blue `--brand` #0e76bc, VIDA cyan
+`--cyan` for the current menu item, indigo `--nav` #2d3590 for the menu, top bar
+and sign-in, pH yellow `--badge` for waiting counts and the menu focus ring.
+Input and secondary-button borders use `--line-control`; ok/warn status text
+darkened to pass 4.5:1. The full palette and its rules live in the Alka Vida
+Design System artifact.
+
+### Menu regrouped, 28 Sep 2026
+
+The office menu is seven sections by job - Sales, Deliveries, Money,
+Production & stock, Reports, Settings, under Today - instead of Sales /
+Operations / Administration. New order is a button under the brand
+(`placement: 'action'`), My password sits with Sign out (`placement:
+'account'`). Delivery sheets are called Delivery rounds on screen; the routes
+and the API keep `/delivery` and "sheet". Agreed with Evert from the UX review.
+
+### Red for destructive buttons, 29 Sep 2026
+
+Every button that deletes, removes, cancels, reverses, retires, ends,
+declines, merges away or withdraws access is `className="danger-soft"`:
+white, red text and red edge, pale red on hover, same size as the rest.
+Where one button toggles (Withdraw access / Give access back, Retire /
+Restore, Mark as left / Bring back) only the destructive state is red.
+Buttons that merely close a form ("Cancel") stay plain. Evert's request.
+Its green partner, `className="approve-soft"`, marks Approve (Approvals),
+Approve… and Approve and invite (Account requests): green text and edge, pale
+green on hover.
+
+### Top bar and the customer page as a hub, 29 Sep 2026
+
+Built from the mockups Evert approved.
+
+- `components/TopBar.tsx`, desktop only (hidden under 760px, where the phone
+  top bar and drawer carry on): search across customers, orders and invoices
+  (reads `/api/customers`, `/api/orders`, `/api/invoices` once per page and
+  filters in the browser; Enter opens the first hit), a "+ New" menu (order,
+  counter sale `?mode=Counter`, payment received, customer `?new=1`), "Needs
+  a decision" with the approvals + account-request count, and the account
+  menu (My password, Sign out). The sidebar is now brand + menu only.
+- `/orders/new` reads `?mode=` and `?customer=`; `/customers` reads `?new=1`.
+  Both routes are wrapped in `Keyed` so a new query string starts the form
+  again.
+- `CustomerRecord.tsx` is the customer's hub with tabs in the address
+  (`?tab=orders|standing|invoices|payments|bottles|details`): Overview (open
+  invoices, money on account not yet applied, recent orders, standing order,
+  delivery and contact), Orders, Standing orders (pause / resume / end),
+  Invoices & statement (reuses `StatementView`), Payments, Bottles, and
+  Details, which edits the record in place with zones from the managed list.
+  Header: Statement PDF, New order, Take a payment, More (send statement,
+  edit details, merge link for admins).
+- Mock-only and not built yet: "Needs a decision" as its own screen replacing
+  Approvals + Account requests in the menu; merged menu items (Stock and
+  counts, Purchasing, People and logins); the round page steps; driver stop
+  and portal redesigns.
+
+
+### Overnight build from the second set of mockups, 29 Sep 2026
+
+Built unattended from the mockups Evert approved ("I like it").
+
+**Needs a decision** (`pages/Decisions.tsx`, `/decisions`). One list of
+everything waiting on an administrator: money changes (discount, credit
+note, stop correction; green Approve, red Reject) and requests to open an
+account (Approve… opens price list, zone, terms inline; the zone is chosen
+from the parish when a zone's "covers" names it; Decline… asks for a reason
+inline, no browser prompt). Filter pills, also reachable as `?show=money` /
+`?show=accounts`. Approvals and Account requests are gone from the sidebar;
+`/approvals` and `/applications` redirect here, and `Approvals.tsx` /
+`Applications.tsx` were removed. The top bar's "Needs a decision" is now a
+link here with the count; on a phone it heads the menu drawer (`placement:
+'decide'` in `NAV`).
+
+**Orders** (`pages/Orders.tsx`). Status in words from `standing()`: Collect
+today, To collect, Not collected yet, On a round, On the road, Late, Missed
+<day>, Needs a round, Part delivered, Delivered/Collected/Sold, Cancelled.
+Rows show what is on the order and the round it is on; the customer links to
+their page. Filters: find (number or customer), Waiting/Delivered/Cancelled/
+All pills (Waiting sorted soonest first), How, For (today, this week, late).
+"Collected" sits on a collection's row; ⋯ holds Change the order, Make it a
+standing order, Take it off the round (`DELETE /api/stops/:id`, only while
+the round has not started) and a red Cancel order. All former
+`window.prompt`/`confirm` calls are now panels under the row.
+API: `listOrders` also returns `lines_summary`, the latest stop and its
+round (`stop_id`, `stop_outcome`, `sheet_zone`, `sheet_date`, `sheet_status`,
+`sheet_started`), `customer_zone` and `today`; `GET /api/orders?limit=` up
+to 500. Test added in `maintenance.test.ts`. `format.ts` gained `day()`
+("Tue 29 Sep") and `relDay()` ("yesterday").
+
+**New order** (`pages/NewOrder.tsx`). Customer picker you type into (name or
+phone, Enter takes the first match) with their price list, terms, zone and
+what they owe (from `/api/customers/:id/history`) underneath. "We deliver /
+They collect / Counter sale, paid now" buttons; for a delivery the date
+shows which round it lands on (`/api/delivery-sheets?date=`), or that it
+starts one, or that the customer has no zone. Products are added with one
+tap and counted with − / +; unit follows `bottles_per_case`. Right column:
+"Repeat this order" switch (every week / 2 weeks / month, next date shown)
+which, after the order is saved, calls `POST /api/orders/:id/recurring`;
+totals with discount and GCT; counter sales take method and amount there.
+`/api/customers/:id/prices` now also returns `is_returnable`. `#mode` is kept
+as a hidden input so older checks still read it.
+
+**Invoice page** (`pages/InvoiceDetail.tsx`). The invoice laid out as the
+customer receives it (logo from the new public `GET /api/logo`, which serves
+the same "Alka Vida logo.png" beside the launcher that the PDFs use, and
+falls back to the name in type; `components/Logo.tsx`). Beside it: a green
+"$X is on their account … Apply $Y here" when the customer has unattached
+money, a "What has happened" timeline (raised / emailed / discount waiting /
+credit notes / payments / still owed, due or late) with an inline Reverse…
+for admins, and "Something wrong with it?" (Change quantities for admins,
+Give a discount, red Credit note). Every former prompt is a panel.
+API: new `payments.applyToInvoice` (oldest unattached payment first; a
+larger payment is split, the rest stays unattached; office or admin) behind
+`POST /api/invoices/:id/apply-on-account` and `POST /api/payments/:id/apply`,
+tests in `test/apply.test.ts`. `getInvoiceDetail` also returns `delivery`,
+`creditNotes`, `history` (the invoice's audit rows), `onAccountCents`,
+address fields, and `reverses_payment_id` on payments.
+
+**Payments** (`pages/Payments.tsx`). One form: From (the new shared
+`components/CustomerPicker.tsx`, also used by New order), Amount, How, Bank
+ref. Their open invoices appear as tick-boxes, ticked oldest first as the
+amount is typed (untick/tick to choose), with a sentence saying what it
+does ("Clears 2 invoices exactly. Nothing left over.") and "Record $X".
+Below, "On account, not yet against an invoice": each row pre-selects an
+exact-match invoice (or the oldest) and Apply uses `POST
+/api/payments/:id/apply` (office can do it now; it used to be the admin-only
+reassign), and "Apply every exact match" does the lot. Unapplied payments
+now say which round they came in on (`round_zone`).
+
+**Reports** (`pages/Reports.tsx`), tabs in the address (`?tab=`): Sales,
+Margin, Money owed, Bottles, Discounts, Material cost, over one period
+(this month, last month, this year, all time, chosen dates). "Export for
+accountant" downloads the open tab as a CSV; Print hides the menus. New API:
+`GET /api/reports/sales` (before GCT, after approved discounts; by product,
+by the round it went out on or "Collected or counter", top customers,
+returnable bottles out/back; credit notes shown separately, not deducted)
+and `GET /api/reports/margin` (sales less bill-of-materials cost at the
+quantity-weighted average price paid for each material across every batch
+received; the returnable 5 gallon bottle itself is left out of each fill;
+labelled "labour, delivery and overheads not included"). Tests in
+`test/reports-sales.test.ts`. Money owed and Bottles reuse the existing
+receivables and bottle-pool reports.
+
+**Sign in and Open an account.** Sign in is the logo on white (headline in
+Anton from Google Fonts, falling back to Arial Narrow/Impact offline) with
+the form on the indigo; the seeded passwords are no longer printed on the
+page (they still show in the start-up window). Fixed: a wrong password used
+to say "Your session has expired" (`lib/api.ts` treated every 401 as an
+expired session); it now says the email and password do not match. Open an
+account: header with logo, "A business / My home" buttons, a details card
+and a "Where we deliver" card, big "Send my request". `.login-page` (also
+used by Choose a password) finally has styles.
+
+**Delivery round page** (`pages/RouteDetail.tsx`). Title "Kingston · Mon
+28 Sep 2026" with a status chip (Not started / On the road / Back, ready to
+settle / Settled), then four steps: Assigned (driver chooser), Started
+(Start round button until it is), Delivering (x of y worked), Settle (a
+"Settle now" button once every stop has an outcome). Stops table with
+numbered badges, "Next stop", invoice links and "on account"; the add-order
+chooser sits under the stops; a side card totals what is on the truck, cash
+collected, full bottles out and empties back, with Settle round (early).
+API: `delivery.getSheet` stops also carry `order_total_cents`,
+`delivery_mode` and `invoice_number`.
+
+**Driver stop** (`pages/DriverStop.tsx`), phone first: "‹ My route · Stop 3
+of 5 · Kingston" bar, the customer with Call and Notes (their standing notes
+plus the driver's own), "What you dropped" with big − / + per line (full
+bottles out follows them until typed over), empties and lost, "To collect"
+with the terms ("on Net 30 terms, so paying now is optional" / "cash on
+delivery") and Not paid / Cash / Cheque / Card / Transfer buttons (amount
+prefilled with what is owed), then a big green Delivered with Not home,
+Refused, Another day under it, each recording the stop at once. The cash
+split is folded away and only offered when money was taken. A stop already
+Delivered no longer shows the buttons (recording it again would move the
+bottles twice); Not home can still be changed to Delivered. API:
+`getStopForDriver` also returns `stop_position`, `stop_count`, `sheet_zone`,
+`payment_terms`, `customer_notes`.
+
+**Portal: Order water.** Every product listed with its price for this
+customer and − / + (no more "add a line, choose a product"), Deliver to me /
+I'll collect, optional date and note, then the total with GCT and a big
+Place order. Same `POST /api/orders` payload as before.
+
+### Leftovers from the mockups, 30 Sep 2026
+
+**Rounds and cash** tab on Reports (`GET /api/reports/rounds`,
+`reports.roundsReport`): every round in the period with driver, stops
+delivered of total, invoiced, cash recorded by the driver, cash handed in at
+settlement (short/over in red/grey), bottles out and back; totals across the
+top; CSV export. Test in `test/reports-sales.test.ts`.
+
+**Readable dates everywhere.** New `when()` in `lib/format.ts`: "Tue 29 Sep"
+this year, "29 Sep 2025" otherwise. Every screen's displayed dates use it
+(22 files); `date()` is kept for comparisons, date boxes and exports.
+Delivery rounds list: "Open route" now "Open round".
+
+**Menu items merged** (as in the mockups): "Stock and counts" (tabs Stock,
+Stock count), "Purchasing" (Purchase orders, Suppliers), and for
+administrators "People and logins" (Employees, Logins); office staff still
+see "Employees". Each tab keeps its own address. `components/SectionTabs.tsx`;
+`NavItem.also` keeps the menu item lit on its other tab.
+
+**No more browser pop-ups.** `components/Dialog.tsx` gives `ask()` (yes/no,
+red confirm button for anything destructive) and `askText()` (a short note),
+drawn by `<DialogHost />` in the shell. All 14 remaining `window.confirm` /
+`window.prompt` calls (logins, price lists, raw materials, suppliers, stock
+count, employees, portal orders and repeats, standing orders, zones) use it,
+each with a button that says what it does ("Cancel the order" / "Keep it").

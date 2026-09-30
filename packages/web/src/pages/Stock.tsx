@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { api } from '../lib/api';
-import { money, date } from '../lib/format';
+import { money, date, when } from '../lib/format';
 
 interface FinishedGood {
   product_id: string; name: string; size: string | null;
@@ -122,7 +122,7 @@ export default function Stock() {
           <tbody>
             {txns.map((t) => (
               <tr key={t.id}>
-                <td>{date(t.txn_day)}</td>
+                <td>{when(t.txn_day)}</td>
                 <td>
                   {t.item_name}
                   <div className="muted small">{t.item_type}</div>

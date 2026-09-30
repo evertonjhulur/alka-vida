@@ -1,8 +1,9 @@
 import { Fragment, useEffect, useMemo, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { api, type Session } from '../lib/api';
-import { money, date, statusTone } from '../lib/format';
+import { money, date, statusTone, when } from '../lib/format';
 import { StatementView } from './Statement';
+import { ask, askText } from '../components/Dialog';
 
 interface Row {
   invoice_id: string; invoice_number: string; invoice_date: string;
@@ -22,7 +23,6 @@ interface MyOrder {
   delivery_mode: string; grand_total_cents: number; source: string;
 }
 
-interface Line { productId: string; qty: string }
 
 /** One of the customer's own standing orders. */
 interface Schedule {
@@ -32,7 +32,6 @@ interface Schedule {
 }
 
 const GCT_RATE = 0.15;
-const BLANK_LINE: Line = { productId: '', qty: '' };
 const PATTERNS = ['Weekly', 'Biweekly', 'Monthly'] as const;
 
 type Tab = 'order' | 'orders' | 'repeats' | 'account';
@@ -57,7 +56,9 @@ export default function Portal({ session }: { session: Session }) {
   const [schedules, setSchedules] = useState<Schedule[]>([]);
   const [repeatFor, setRepeatFor] = useState<string | null>(null);
 
-  const [lines, setLines] = useState<Line[]>([{ ...BLANK_LINE }]);
+  // How many of each product, keyed by product: every product is on the
+  // screen with − / +, rather than a line to add and a product to choose.
+  const [qty, setQty] = useState<Record<string, number>>({});
   const [mode, setMode] = useState<'Delivery' | 'Pickup'>('Delivery');
   const [wanted, setWanted] = useState('');
   const [notes, setNotes] = useState('');
@@ -90,8 +91,9 @@ export default function Portal({ session }: { session: Session }) {
 
   /** Cancel an order that has not gone out yet. */
   async function cancelOrder(o: MyOrder) {
-    if (!window.confirm(
+    if (!await ask(
       `Cancel order ${o.order_number}?\n\nIt will not be delivered.`,
+      { confirmLabel: 'Cancel the order', cancelLabel: 'Keep it', danger: true },
     )) return;
     await act(async () => {
       await api.post(`/api/portal/orders/${o.id}/cancel`, {});
@@ -122,10 +124,11 @@ export default function Portal({ session }: { session: Session }) {
   }
 
   async function stopRepeat(s: Schedule) {
-    if (!window.confirm(
+    if (!await ask(
       'Stop this repeat order for good?\n\n'
       + 'Anything already delivered is unaffected. To pause it for a while instead, '
       + 'use Pause.',
+      { confirmLabel: 'Stop it', cancelLabel: 'Keep it', danger: true },
     )) return;
     await act(async () => {
       await api.post(`/api/portal/recurring/${s.id}/cancel`, {});
@@ -151,18 +154,16 @@ export default function Portal({ session }: { session: Session }) {
    */
   const totals = useMemo(() => {
     let subtotal = 0;
-    for (const l of lines) {
-      const p = productOf(l.productId);
-      const qty = Number(l.qty);
-      if (!p || !Number.isFinite(qty) || qty <= 0) continue;
-      subtotal += Math.round(qty) * rateOf(p);
+    for (const p of prices) {
+      const n = qty[p.product_id] ?? 0;
+      if (n > 0) subtotal += n * rateOf(p);
     }
     const gct = Math.round(subtotal * GCT_RATE);
     return { subtotal, gct, grandTotal: subtotal + gct };
-  }, [lines, prices]);
+  }, [qty, prices]);
 
-  const setLine = (i: number, patch: Partial<Line>) =>
-    setLines(lines.map((l, j) => (j === i ? { ...l, ...patch } : l)));
+  const bump = (id: string, by: number) =>
+    setQty((q) => ({ ...q, [id]: Math.max(0, Math.min(9999, (q[id] ?? 0) + by)) }));
 
   async function place(e: React.FormEvent) {
     e.preventDefault();
@@ -170,15 +171,11 @@ export default function Portal({ session }: { session: Session }) {
 
     // Whether a quantity means cases or loose bottles is the product's rule,
     // not the customer's.
-    const payload = lines
-      .filter((l) => l.productId && Number(l.qty) > 0)
-      .map((l) => {
-        const p = productOf(l.productId)!;
-        const qty = Math.round(Number(l.qty));
-        return p.bottles_per_case > 0
-          ? { productId: l.productId, cases: qty }
-          : { productId: l.productId, looseBottles: qty };
-      });
+    const payload = prices
+      .filter((p) => (qty[p.product_id] ?? 0) > 0)
+      .map((p) => (p.bottles_per_case > 0
+        ? { productId: p.product_id, cases: qty[p.product_id] }
+        : { productId: p.product_id, looseBottles: qty[p.product_id] }));
 
     if (payload.length === 0) {
       setError('Choose at least one product and say how many you want.');
@@ -202,7 +199,7 @@ export default function Portal({ session }: { session: Session }) {
           ? 'We will have it ready for you to collect.'
           : 'It will go out on the next round for your area.'),
       );
-      setLines([{ ...BLANK_LINE }]);
+      setQty({});
       setWanted(''); setNotes('');
       await load();
       setTab('orders');
@@ -220,44 +217,6 @@ export default function Portal({ session }: { session: Session }) {
    * declared inside another gets a new type on every render, so the inputs
    * unmount and lose focus on every keystroke.
    */
-  const orderLine = (l: Line, i: number) => {
-    const p = productOf(l.productId);
-    return (
-      <div className="row" key={i} style={{ alignItems: 'flex-end' }}>
-        <div className="field" style={{ flex: '1 1 280px' }}>
-          <label htmlFor={`p${i}`}>Product</label>
-          <select id={`p${i}`} value={l.productId} style={{ width: '100%' }}
-                  onChange={(e) => setLine(i, { productId: e.target.value })}>
-            <option value="">Choose…</option>
-            {prices.map((x) => (
-              <option key={x.product_id} value={x.product_id}>
-                {x.name} — {money(rateOf(x))} per {unitOf(x)}
-              </option>
-            ))}
-          </select>
-        </div>
-        <div className="field">
-          <label htmlFor={`q${i}`}>How many {p ? `${unitOf(p)}s` : ''}</label>
-          <input id={`q${i}`} type="number" min="1" step="1" style={{ width: 130 }}
-                 value={l.qty} onChange={(e) => setLine(i, { qty: e.target.value })} />
-        </div>
-        <div className="field">
-          <div className="muted">
-            {p && Number(l.qty) > 0 ? money(Math.round(Number(l.qty)) * rateOf(p)) : ''}
-          </div>
-        </div>
-        {lines.length > 1 && (
-          <div className="field">
-            <button type="button" className="secondary"
-                    onClick={() => setLines(lines.filter((_, j) => j !== i))}>
-              Remove
-            </button>
-          </div>
-        )}
-      </div>
-    );
-  };
-
   return (
     <>
       <h1>My account</h1>
@@ -272,64 +231,73 @@ export default function Portal({ session }: { session: Session }) {
       </div>
 
       {tab === 'order' && (
-        <div className="panel">
-          <h2 style={{ marginTop: 0 }}>Place an order</h2>
-          <p className="muted small">
-            These are your own agreed rates
-            {prices[0]?.price_tier ? ` (${prices[0].price_tier})` : ''}. The total
-            below includes GCT. We confirm the exact amount when it is delivered,
-            from what actually goes off the truck.
-          </p>
+        <form onSubmit={place} className="portal-order">
+          <div>
+            <h2 style={{ margin: 0 }}>Order water</h2>
+            <p className="muted small" style={{ margin: '4px 0 0' }}>
+              Your {prices[0]?.price_tier ? `${prices[0].price_tier} ` : ''}prices. We confirm the amount
+              from what is actually delivered.
+            </p>
+          </div>
 
-          <form onSubmit={place}>
-            {lines.map(orderLine)}
+          <section className="panel">
+            {prices.map((p) => {
+              const n = qty[p.product_id] ?? 0;
+              const cased = p.bottles_per_case > 0;
+              return (
+                <div key={p.product_id} className={`drop-row${n > 0 ? ' picked' : ''}`}>
+                  <div>
+                    <strong>{p.name.replace(/^Alka Vida\s+/i, '')}</strong>
+                    <div className="muted small">
+                      {money(rateOf(p))} {cased ? `a case of ${p.bottles_per_case}` : 'a bottle'}
+                      {n > 0 ? ` · ${money(n * rateOf(p))}` : ''}
+                    </div>
+                  </div>
+                  <div className="stepper big">
+                    <button type="button" className="secondary" disabled={n === 0}
+                            aria-label={`Fewer ${p.name}${cased ? ' cases' : ''}`} onClick={() => bump(p.product_id, -1)}>−</button>
+                    <input type="number" min="0" inputMode="numeric" aria-label={`How many ${p.name}${cased ? ' cases' : ' bottles'}`}
+                           value={n || ''} placeholder="0"
+                           onChange={(e) => setQty((q) => ({ ...q, [p.product_id]: Math.max(0, Math.round(Number(e.target.value) || 0)) }))} />
+                    <button type="button" className="secondary"
+                            aria-label={`More ${p.name}${cased ? ' cases' : ''}`} onClick={() => bump(p.product_id, 1)}>+</button>
+                  </div>
+                </div>
+              );
+            })}
+          </section>
 
-            <button type="button" className="secondary"
-                    onClick={() => setLines([...lines, { ...BLANK_LINE }])}>
-              Add another product
-            </button>
-
-            <div className="row" style={{ marginTop: 16 }}>
+          <section className="panel">
+            <div className="seg seg-even" role="group" aria-label="Delivery or collection">
+              <button type="button" className={mode === 'Delivery' ? 'active' : ''} aria-pressed={mode === 'Delivery'}
+                      onClick={() => setMode('Delivery')}>Deliver to me</button>
+              <button type="button" className={mode === 'Pickup' ? 'active' : ''} aria-pressed={mode === 'Pickup'}
+                      onClick={() => setMode('Pickup')}>I&rsquo;ll collect</button>
+            </div>
+            <div className="two" style={{ marginTop: 10 }}>
               <div className="field">
-                <label htmlFor="dm">How would you like it?</label>
-                <select id="dm" value={mode}
-                        onChange={(e) => setMode(e.target.value as 'Delivery' | 'Pickup')}>
-                  <option value="Delivery">Delivered to me</option>
-                  <option value="Pickup">I will collect it</option>
-                </select>
+                <label htmlFor="wd">{mode === 'Pickup' ? 'When will you collect?' : 'When would you like it? (optional)'}</label>
+                <input id="wd" type="date" value={wanted} onChange={(e) => setWanted(e.target.value)} />
               </div>
               <div className="field">
-                <label htmlFor="wd">
-                  {mode === 'Pickup' ? 'When will you collect?' : 'When would you like it?'}
-                </label>
-                <input id="wd" type="date" value={wanted}
-                       onChange={(e) => setWanted(e.target.value)} />
-              </div>
-              <div className="field" style={{ flex: '1 1 280px' }}>
                 <label htmlFor="nt">Anything we should know?</label>
-                <input id="nt" style={{ width: '100%' }} value={notes}
-                       placeholder="e.g. leave at the back gate"
+                <input id="nt" value={notes} placeholder="e.g. leave at the back gate"
                        onChange={(e) => setNotes(e.target.value)} />
               </div>
             </div>
+            <p className="muted small" style={{ margin: 0 }}>
+              {mode === 'Pickup' ? 'We will have it ready for you.' : 'Left blank, it goes on the next round for your area.'}
+            </p>
+          </section>
 
-            <div className="panel" style={{ background: '#f9fafb', marginTop: 12 }}>
-              <div className="total-line">
-                <span>Subtotal</span><span>{money(totals.subtotal)}</span>
-              </div>
-              <div className="total-line">
-                <span>GCT 15%</span><span>{money(totals.gct)}</span>
-              </div>
-              <div className="total-line">
-                <strong>Total</strong><strong>{money(totals.grandTotal)}</strong>
-              </div>
-            </div>
-
-            <button disabled={busy || totals.grandTotal === 0} style={{ marginTop: 12 }}>
-              {busy ? 'Placing…' : 'Place order'}
-            </button>
-          </form>
-        </div>
+          <div className="portal-total">
+            <span className="muted small">{money(totals.subtotal)} + GCT {money(totals.gct)}</span>
+            <strong>{money(totals.grandTotal)}</strong>
+          </div>
+          <button className="wide big" disabled={busy || totals.grandTotal === 0}>
+            {busy ? 'Placing…' : 'Place order'}
+          </button>
+        </form>
       )}
 
       {tab === 'orders' && (
@@ -361,10 +329,10 @@ export default function Portal({ session }: { session: Session }) {
                         {o.status}
                       </span>
                     </td>
-                    <td data-label="Placed">{date(o.order_date)}</td>
+                    <td data-label="Placed">{when(o.order_date)}</td>
                     <td data-label="Wanted"
                         className={o.requested_delivery_date ? undefined : 'empty'}>
-                      {o.requested_delivery_date ? date(o.requested_delivery_date) : '—'}
+                      {o.requested_delivery_date ? when(o.requested_delivery_date) : '—'}
                     </td>
                     <td data-label="How" className="small">
                       {o.delivery_mode === 'Pickup' ? 'Collection' : 'Delivery'}
@@ -387,7 +355,7 @@ export default function Portal({ session }: { session: Session }) {
                                   onClick={() => setRepeatFor(repeatFor === o.id ? null : o.id)}>
                             {repeatFor === o.id ? 'Cancel' : 'Repeat this'}
                           </button>{' '}
-                          <button className="secondary" disabled={busy}
+                          <button className="danger-soft" disabled={busy}
                                   onClick={() => cancelOrder(o)}>
                             Cancel order
                           </button>
@@ -465,7 +433,7 @@ export default function Portal({ session }: { session: Session }) {
                   </td>
                   <td data-label="Next one"
                       className={s.nextDeliveryDate ? undefined : 'empty'}>
-                    {s.nextDeliveryDate ? date(s.nextDeliveryDate) : '—'}
+                    {s.nextDeliveryDate ? when(s.nextDeliveryDate) : '—'}
                   </td>
                   <td data-label="Sent so far" className="num">{s.occurrencesRaised}</td>
                   <td className="on-desktop">
@@ -478,7 +446,7 @@ export default function Portal({ session }: { session: Session }) {
                             onClick={() => pauseRepeat(s)}>
                       {s.paused ? 'Start again' : 'Pause'}
                     </button>{' '}
-                    <button className="secondary" disabled={busy}
+                    <button className="danger-soft" disabled={busy}
                             onClick={() => stopRepeat(s)}>
                       Stop for good
                     </button>
@@ -520,7 +488,7 @@ export default function Portal({ session }: { session: Session }) {
                         {r.status}
                       </span>
                     </td>
-                    <td data-label="Date">{date(r.invoice_date)}</td>
+                    <td data-label="Date">{when(r.invoice_date)}</td>
                     <td data-label="Total" className="num">
                       {money(Number(r.grand_total_cents))}
                     </td>

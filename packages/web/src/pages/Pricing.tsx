@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api, type Session } from '../lib/api';
 import { money, toCents } from '../lib/format';
+import { ask, askText } from '../components/Dialog';
 
 interface Tier { id: string; name: string; customerCount: number }
 interface Product {
@@ -75,7 +76,7 @@ export default function Pricing({ session }: { session: Session }) {
   }
 
   async function removeTier(t: Tier) {
-    if (!window.confirm(`Delete the ${t.name} price list?`)) return;
+    if (!(await ask(`Delete the ${t.name} price list?`, { confirmLabel: 'Delete', danger: true }))) return;
     setBusy(true); setError(null);
     try {
       await api.del(`/api/price-tiers/${t.id}`);
@@ -218,7 +219,7 @@ export default function Pricing({ session }: { session: Session }) {
                     {/* A product with no bill of materials cannot be costed or
                         produced, so the way in belongs next to the product. */}
                     <Link to={`/products/${p.id}/bom`}>Materials</Link>{' '}
-                    <button className="secondary" disabled={busy}
+                    <button className={p.active ? 'danger-soft' : 'secondary'} disabled={busy}
                             onClick={() => toggleActive(p)}>
                       {p.active ? 'Retire' : 'Restore'}
                     </button>
@@ -264,7 +265,7 @@ export default function Pricing({ session }: { session: Session }) {
             <span key={t.id} className="chip neutral" style={{ padding: '6px 12px' }}>
               {t.name} — {t.customerCount} customer{t.customerCount === 1 ? '' : 's'}
               {session.role === 'admin' && t.customerCount === 0 && (
-                <button className="secondary"
+                <button className="danger-soft"
                         style={{ marginLeft: 8, padding: '1px 7px', fontSize: 12 }}
                         disabled={busy} onClick={() => removeTier(t)}>×</button>
               )}

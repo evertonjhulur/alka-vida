@@ -281,10 +281,18 @@ export async function customerHoldings(db: Db) {
   );
 }
 
-/** The pool's own movement history. */
+/**
+ * The pool's own movement history.
+ *
+ * `txn_day` is the business date the screen shows. It was missing, so every
+ * row of the movement history printed its date as a dash - the screen read
+ * `txn_day`, the same name the stock ledger uses, and this query only
+ * returned the raw timestamp.
+ */
 export async function poolHistory(db: Db, limit = 100) {
   return db.query(
-    `SELECT id, quantity, direction, reference, reference_type, txn_date, notes
+    `SELECT id, quantity, direction, reference, reference_type, txn_date,
+            business_date(txn_date)::text AS txn_day, notes
      FROM inventory_transactions
      WHERE item_type = 'BottlePool'
      ORDER BY txn_date DESC

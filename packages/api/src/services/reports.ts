@@ -275,3 +275,251 @@ export async function bottlesNotRecorded(db: Db) {
      ORDER BY sh.delivery_date DESC, c.name`,
   );
 }
+
+/* ------------------------------------------------------------------ */
+/* Sales and a first look at margin (Reports screen, 29 Sep 2026)      */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Invoices that count as sales: real invoices (not credit notes), not
+ * cancelled, dated inside the period. Sales are before GCT and after any
+ * approved discount; a discount still waiting for a decision has not
+ * reduced anything, so it is not taken off.
+ */
+const SALES_WHERE = `
+  NOT i.is_credit_note AND i.lifecycle <> 'Cancelled'
+  AND ($1::date IS NULL OR i.invoice_date >= $1::date)
+  AND ($2::date IS NULL OR i.invoice_date <= $2::date)`;
+const NET = `(i.subtotal_cents - CASE WHEN i.discount_status = 'Approved' THEN i.discount_amount_cents ELSE 0 END)`;
+
+export async function salesReport(db: Db, from?: string | null, to?: string | null) {
+  const p = [from ?? null, to ?? null];
+
+  const totals = await db.one<{
+    net: number; gross: number; invoices: number; customers: number; new_customers: number;
+  }>(
+    `SELECT COALESCE(SUM(${NET}),0)::bigint AS net,
+            COALESCE(SUM(i.grand_total_cents),0)::bigint AS gross,
+            COUNT(*)::int AS invoices,
+            COUNT(DISTINCT i.customer_id)::int AS customers,
+            COUNT(DISTINCT i.customer_id) FILTER (
+              WHERE NOT EXISTS (SELECT 1 FROM invoices e
+                                 WHERE e.customer_id = i.customer_id AND NOT e.is_credit_note
+                                   AND e.lifecycle <> 'Cancelled'
+                                   AND $1::date IS NOT NULL AND e.invoice_date < $1::date))::int AS new_customers
+     FROM invoices i WHERE ${SALES_WHERE}`, p,
+  );
+
+  const credits = await db.one<{ cents: number; n: number }>(
+    `SELECT COALESCE(SUM(ABS(i.grand_total_cents)),0)::bigint AS cents, COUNT(*)::int AS n
+     FROM invoices i
+     WHERE i.is_credit_note AND i.credit_status = 'Approved' AND i.lifecycle <> 'Cancelled'
+       AND ($1::date IS NULL OR i.invoice_date >= $1::date)
+       AND ($2::date IS NULL OR i.invoice_date <= $2::date)`, p,
+  );
+
+  const byProduct = await db.query<{
+    product_id: string; name: string; bottles_per_case: number; cases: number; bottles: number; cents: number;
+  }>(
+    `SELECT pr.id AS product_id, pr.name, pr.bottles_per_case,
+            COALESCE(SUM(l.cases),0)::int AS cases, COALESCE(SUM(l.loose_bottles),0)::int AS bottles,
+            COALESCE(SUM(l.line_total_cents),0)::bigint AS cents
+     FROM invoice_line_items l
+     JOIN invoices i ON i.id = l.invoice_id
+     JOIN products pr ON pr.id = l.product_id
+     WHERE ${SALES_WHERE}
+     GROUP BY pr.id, pr.name, pr.bottles_per_case
+     ORDER BY cents DESC`, p,
+  );
+
+  // Where it went: the round an invoice was delivered on, or "Collected or
+  // counter" when no round raised it.
+  const byZone = await db.query<{ zone: string; invoices: number; cents: number }>(
+    `SELECT COALESCE(ds.zone, 'Collected or counter') AS zone,
+            COUNT(DISTINCT i.id)::int AS invoices,
+            COALESCE(SUM(${NET}),0)::bigint AS cents
+     FROM invoices i
+     LEFT JOIN LATERAL (
+       SELECT d.zone FROM delivery_stops st JOIN delivery_sheets d ON d.id = st.delivery_sheet_id
+        WHERE st.invoice_id = i.id LIMIT 1) ds ON true
+     WHERE ${SALES_WHERE}
+     GROUP BY 1 ORDER BY cents DESC`, p,
+  );
+
+  const topCustomers = await db.query<{ customer_id: string; name: string; invoices: number; cents: number }>(
+    `SELECT i.customer_id, c.name, COUNT(*)::int AS invoices, COALESCE(SUM(${NET}),0)::bigint AS cents
+     FROM invoices i JOIN customers c ON c.id = i.customer_id
+     WHERE ${SALES_WHERE}
+     GROUP BY i.customer_id, c.name ORDER BY cents DESC LIMIT 8`, p,
+  );
+
+  // Returnable bottles out and back on rounds dated in the period.
+  const bottles = await db.one<{ out: number; back: number; lost: number }>(
+    `SELECT COALESCE(SUM(st.bottles_delivered_full),0)::int AS out,
+            COALESCE(SUM(st.bottles_empties_picked_up),0)::int AS back,
+            COALESCE(SUM(st.bottles_lost_damaged),0)::int AS lost
+     FROM delivery_stops st JOIN delivery_sheets d ON d.id = st.delivery_sheet_id
+     WHERE ($1::date IS NULL OR d.delivery_date >= $1::date)
+       AND ($2::date IS NULL OR d.delivery_date <= $2::date)`, p,
+  );
+
+  return {
+    from: from ?? null,
+    to: to ?? null,
+    totals: {
+      netCents: num(totals.net), grossCents: num(totals.gross), invoices: num(totals.invoices),
+      customers: num(totals.customers), newCustomers: from ? num(totals.new_customers) : null,
+      creditNoteCents: num(credits.cents), creditNotes: num(credits.n),
+    },
+    byProduct: byProduct.map((r) => ({
+      productId: r.product_id, name: r.name, bottlesPerCase: num(r.bottles_per_case),
+      cases: num(r.cases), bottles: num(r.bottles), cents: num(r.cents),
+    })),
+    byZone: byZone.map((r) => ({ zone: r.zone, invoices: num(r.invoices), cents: num(r.cents) })),
+    topCustomers: topCustomers.map((r) => ({
+      customerId: r.customer_id, name: r.name, invoices: num(r.invoices), cents: num(r.cents),
+    })),
+    bottles: { out: num(bottles.out), back: num(bottles.back), lost: num(bottles.lost) },
+  };
+}
+
+/**
+ * Margin, a first look: what each product sold for in the period, less what
+ * its bill of materials costs at the average price actually paid for each
+ * material (every batch received, weighted by quantity). Labour, delivery
+ * and overheads are NOT in it, so real margin is lower; the screen says so.
+ */
+export async function marginReport(db: Db, from?: string | null, to?: string | null) {
+  const p = [from ?? null, to ?? null];
+  const rows = await db.query<{
+    product_id: string; name: string; bottles_per_case: number; is_returnable: boolean;
+    units_bottles: number; cents: number; bom_lines: number; costed_lines: number;
+    material_per_bottle: number | null;
+  }>(
+    `WITH cost AS (
+       SELECT raw_material_id,
+              SUM(unit_cost_cents * quantity_received) / NULLIF(SUM(quantity_received), 0) AS avg_cents
+       FROM material_batches GROUP BY raw_material_id
+     ),
+     -- A returnable bottle (the 5 gallon) comes back and is filled again,
+     -- so its cost is not a cost of each sale; it is left out of the fill.
+     bom AS (
+       SELECT b.product_id, COUNT(*)::int AS bom_lines,
+              COUNT(c.avg_cents)::int AS costed_lines,
+              SUM(CASE WHEN pr.is_returnable AND b.component_type = 'Bottle' THEN 0
+                       ELSE b.quantity * COALESCE(c.avg_cents, 0) END) AS per_bottle
+       FROM bom_line_items b
+       JOIN products pr ON pr.id = b.product_id
+       LEFT JOIN cost c ON c.raw_material_id = b.raw_material_id
+       GROUP BY b.product_id
+     ),
+     sold AS (
+       SELECT l.product_id,
+              SUM(l.cases * pr.bottles_per_case + l.loose_bottles)::int AS units_bottles,
+              SUM(l.line_total_cents)::bigint AS cents
+       FROM invoice_line_items l
+       JOIN invoices i ON i.id = l.invoice_id
+       JOIN products pr ON pr.id = l.product_id
+       WHERE ${SALES_WHERE}
+       GROUP BY l.product_id
+     )
+     SELECT pr.id AS product_id, pr.name, pr.bottles_per_case, pr.is_returnable,
+            COALESCE(s.units_bottles, 0) AS units_bottles, COALESCE(s.cents, 0) AS cents,
+            COALESCE(b.bom_lines, 0) AS bom_lines, COALESCE(b.costed_lines, 0) AS costed_lines,
+            b.per_bottle AS material_per_bottle
+     FROM products pr
+     LEFT JOIN sold s ON s.product_id = pr.id
+     LEFT JOIN bom b ON b.product_id = pr.id
+     WHERE pr.active OR s.cents IS NOT NULL
+     ORDER BY COALESCE(s.cents, 0) DESC, pr.name`, p,
+  );
+
+  return rows.map((r) => {
+    const perBottle = r.material_per_bottle === null ? null : Math.round(Number(r.material_per_bottle));
+    const bottles = num(r.units_bottles);
+    const sales = num(r.cents);
+    const materials = perBottle === null ? null : perBottle * bottles;
+    return {
+      productId: r.product_id,
+      name: r.name,
+      bottlesPerCase: num(r.bottles_per_case),
+      bottlesSold: bottles,
+      salesCents: sales,
+      returnable: !!r.is_returnable,
+      bomLines: num(r.bom_lines),
+      costedLines: num(r.costed_lines),
+      materialPerBottleCents: perBottle,
+      materialCents: materials,
+      marginCents: materials === null ? null : sales - materials,
+      marginPercent: materials === null || sales <= 0 ? null
+        : Math.round(((sales - materials) / sales) * 1000) / 10,
+    };
+  });
+}
+
+/**
+ * Rounds and cash: every round dated in the period, what it delivered, what
+ * the driver recorded collecting against what was handed in at settlement,
+ * and the bottle count. The cash difference is a check on the round only; it
+ * never touches a customer's account (see settlement.ts).
+ */
+export async function roundsReport(db: Db, from?: string | null, to?: string | null) {
+  const rows = await db.query<{
+    id: string; delivery_date: string; zone: string; status: string; driver: string | null;
+    started: boolean; stops: number; delivered: number; missed: number; pending: number;
+    invoiced_cents: number; recorded_cents: number; actual_cash_cents: number | null;
+    cash_variance_cents: number | null; empties_recorded: number; bottle_actual_returned: number | null;
+    bottle_variance: number | null; full_out: number;
+  }>(
+    `SELECT d.id, d.delivery_date::text AS delivery_date, d.zone, d.status,
+            COALESCE(u.name, d.driver_name) AS driver, (d.started_at IS NOT NULL) AS started,
+            COUNT(s.id)::int AS stops,
+            COUNT(s.id) FILTER (WHERE s.stop_outcome = 'Delivered')::int AS delivered,
+            COUNT(s.id) FILTER (WHERE s.stop_outcome NOT IN ('Delivered','Pending'))::int AS missed,
+            COUNT(s.id) FILTER (WHERE s.stop_outcome = 'Pending')::int AS pending,
+            COALESCE(SUM(i.grand_total_cents), 0)::bigint AS invoiced_cents,
+            COALESCE(SUM(s.payment_amount_cents), 0)::bigint AS recorded_cents,
+            d.actual_cash_cents, d.cash_variance_cents,
+            COALESCE(SUM(s.bottles_empties_picked_up), 0)::int AS empties_recorded,
+            COALESCE(SUM(s.bottles_delivered_full), 0)::int AS full_out,
+            d.bottle_actual_returned, d.bottle_variance
+     FROM delivery_sheets d
+     LEFT JOIN users u ON u.id = d.assigned_driver_id
+     LEFT JOIN delivery_stops s ON s.delivery_sheet_id = d.id
+     LEFT JOIN invoices i ON i.id = s.invoice_id
+     WHERE ($1::date IS NULL OR d.delivery_date >= $1::date)
+       AND ($2::date IS NULL OR d.delivery_date <= $2::date)
+     GROUP BY d.id, u.name
+     ORDER BY d.delivery_date DESC, d.zone`,
+    [from ?? null, to ?? null],
+  );
+
+  const rounds = rows.map((r) => ({
+    id: r.id, date: r.delivery_date, zone: r.zone, driver: r.driver, status: r.status,
+    started: !!r.started, stops: num(r.stops), delivered: num(r.delivered), missed: num(r.missed),
+    pending: num(r.pending), invoicedCents: num(r.invoiced_cents), recordedCents: num(r.recorded_cents),
+    handedInCents: r.actual_cash_cents === null ? null : num(r.actual_cash_cents),
+    cashVarianceCents: r.status === 'Completed' && r.cash_variance_cents !== null ? num(r.cash_variance_cents) : null,
+    fullOut: num(r.full_out), emptiesRecorded: num(r.empties_recorded),
+    emptiesCounted: r.bottle_actual_returned === null ? null : num(r.bottle_actual_returned),
+    bottleVariance: r.bottle_variance === null ? null : num(r.bottle_variance),
+  }));
+
+  const settled = rounds.filter((r) => r.status === 'Completed');
+  const sum = (xs: number[]) => xs.reduce((a, b) => a + b, 0);
+  return {
+    totals: {
+      rounds: rounds.length,
+      settled: settled.length,
+      stops: sum(rounds.map((r) => r.stops)),
+      delivered: sum(rounds.map((r) => r.delivered)),
+      missed: sum(rounds.map((r) => r.missed)),
+      invoicedCents: sum(rounds.map((r) => r.invoicedCents)),
+      recordedCents: sum(rounds.map((r) => r.recordedCents)),
+      handedInCents: sum(settled.map((r) => r.handedInCents ?? 0)),
+      cashVarianceCents: sum(settled.map((r) => r.cashVarianceCents ?? 0)),
+      roundsShort: settled.filter((r) => (r.cashVarianceCents ?? 0) < 0).length,
+    },
+    rounds,
+  };
+}

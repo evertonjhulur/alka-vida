@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { api } from '../lib/api';
-import { money, date } from '../lib/format';
+import { money, date, when } from '../lib/format';
 
 interface Product { id: string; name: string; bottles_per_case: number }
 
@@ -194,7 +194,7 @@ export default function Production() {
           <tbody>
             {runs.map((r) => (
               <tr key={r.id}>
-                <td>{date(r.batch_date)}</td>
+                <td>{when(r.batch_date)}</td>
                 <td>{r.product_name ?? '—'}</td>
                 <td className="muted">{r.operator ?? '—'}</td>
                 <td className="num">

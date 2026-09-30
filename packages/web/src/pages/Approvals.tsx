@@ -104,8 +104,8 @@ export default function Approvals({ session }: { session: Session }) {
                 </td>
                 {session.role === 'admin' && (
                   <td className="num" style={{ whiteSpace: 'nowrap' }}>
-                    <button disabled={busy} onClick={() => review(r.id, 'Approved')}>Approve</button>{' '}
-                    <button className="secondary" disabled={busy}
+                    <button className="approve-soft" disabled={busy} onClick={() => review(r.id, 'Approved')}>Approve</button>{' '}
+                    <button className="danger-soft" disabled={busy}
                             onClick={() => review(r.id, 'Rejected')}>Reject</button>
                   </td>
                 )}

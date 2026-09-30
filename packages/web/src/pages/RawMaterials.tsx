@@ -1,6 +1,7 @@
 import { Fragment, useEffect, useState } from 'react';
 import { api, type Session } from '../lib/api';
-import { money, toCents, date } from '../lib/format';
+import { money, toCents, date, when } from '../lib/format';
+import { ask, askText } from '../components/Dialog';
 
 interface SupplierRef { id: string; name: string; unitCostCents: number }
 
@@ -179,12 +180,13 @@ export default function RawMaterials({ session }: { session: Session }) {
    * which happened and why.
    */
   async function removeMaterial(m: Material) {
-    if (!window.confirm(
+    if (!await ask(
       `Delete ${m.name}?\n\n` +
       `If it has ever been bought, counted or put on a product's recipe it ` +
       `cannot be deleted outright — that would take away the cost of work ` +
       `already done with it. It will be withdrawn from use instead, keeping ` +
       `its history and stock value.`,
+      { confirmLabel: 'Delete', danger: true },
     )) return;
 
     await run('Could not remove the material', async () => {
@@ -256,10 +258,11 @@ export default function RawMaterials({ session }: { session: Session }) {
   }
 
   async function removeCategory(c: Category) {
-    if (!window.confirm(
+    if (!await ask(
       `Delete the category ${c.name}?\n\n` +
       `A category with materials filed under it is withdrawn from use rather ` +
       `than deleted, so nothing is left orphaned.`,
+      { confirmLabel: 'Delete', danger: true },
     )) return;
     await run('Could not remove the category', async () => {
       const out = await api.del<{ deleted: boolean; name: string; materialCount: number }>(
@@ -377,7 +380,7 @@ export default function RawMaterials({ session }: { session: Session }) {
                   {useFor === m.id ? 'Cancel' : 'Record usage'}
                 </button>{' '}
                 {isAdmin && (
-                  <button className="secondary" disabled={busy}
+                  <button className="danger-soft" disabled={busy}
                           onClick={() => removeMaterial(m)}>
                     Delete
                   </button>
@@ -576,7 +579,7 @@ export default function RawMaterials({ session }: { session: Session }) {
                 <tbody>
                   {batches.map((b) => (
                     <tr key={b.id}>
-                      <td>{date(b.received_date)}</td>
+                      <td>{when(b.received_date)}</td>
                       <td>{b.supplier_name ?? '—'}</td>
                       {/* Not every batch comes from a PO - opening stock and
                           count adjustments legitimately have none. */}
@@ -692,7 +695,7 @@ export default function RawMaterials({ session }: { session: Session }) {
                                       }}>
                                 {catEdit === c.id ? 'Cancel' : 'Edit'}
                               </button>{' '}
-                              <button className="secondary" disabled={busy}
+                              <button className="danger-soft" disabled={busy}
                                       onClick={() => removeCategory(c)}>
                                 Delete
                               </button>

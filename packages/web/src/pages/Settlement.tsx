@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import { api, type Session } from '../lib/api';
-import { money, toCents, date } from '../lib/format';
+import { money, toCents, date, when } from '../lib/format';
 
 interface Allocation {
   invoiceId: string | null;
@@ -229,7 +229,7 @@ export default function Settlement({ session }: { session: Session }) {
                         <div><span className="chip warn">part payment</span></div>
                       )}
                     </td>
-                    <td className="small muted">{date(inv.invoiceDate)}</td>
+                    <td className="small muted">{when(inv.invoiceDate)}</td>
                     <td className="num muted">{money(inv.grandTotalCents)}</td>
                     <td className="num">{money(inv.balanceCents)}</td>
                     <td className="num">

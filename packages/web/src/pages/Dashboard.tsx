@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api, type Session } from '../lib/api';
-import { money, date, BUSINESS_TIMEZONE } from '../lib/format';
+import { money, date, todayInJamaica, BUSINESS_TIMEZONE, when } from '../lib/format';
 
 interface Aging {
   currentCents: number; d30Cents: number; d60Cents: number;
@@ -79,7 +79,19 @@ export default function Dashboard({ session }: { session: Session }) {
   if (!d) return <p className="muted">Loading…</p>;
 
   const waiting = d.waiting.applications + d.waiting.approvals;
-  const stopsLeft = d.rounds.reduce((s, r) => s + (r.stops - r.done), 0);
+  /*
+   * Every open round comes back, whatever its date. Shown under one
+   * "Today's rounds" heading, a round finished yesterday but not yet settled
+   * and a round booked for Thursday both read as out on the road today. Three
+   * groups instead, each with the action it needs.
+   */
+  const todayIso = todayInJamaica();
+  const day = (r: Round) => String(r.delivery_date).slice(0, 10);
+  const finished = (r: Round) => r.stops > 0 && r.done === r.stops;
+  const toSettle = d.rounds.filter((r) => finished(r) || day(r) < todayIso);
+  const onRoad = d.rounds.filter((r) => day(r) === todayIso && !finished(r));
+  const comingUp = d.rounds.filter((r) => day(r) > todayIso && !finished(r));
+  const stopsLeft = onRoad.reduce((s, r) => s + (r.stops - r.done), 0);
   const overdue = d.aging.d30Cents + d.aging.d60Cents + d.aging.d90Cents;
   const firstName = session.name.split(' ')[0];
 
@@ -95,6 +107,54 @@ export default function Dashboard({ session }: { session: Session }) {
     </Link>
   );
 
+  /** A plain function returning JSX, not a nested component. */
+  const roundsTable = (list: Round[], settle = false) => (
+    <table>
+      <thead>
+        <tr>
+          <th>Round</th><th>Driver</th><th>Progress</th>
+          <th className="num">Worth</th><th className="num">Collected</th><th />
+        </tr>
+      </thead>
+      <tbody>
+        {list.map((r) => {
+          const pct = r.stops === 0 ? 0 : Math.round((r.done / r.stops) * 100);
+          return (
+            <tr key={r.id}>
+              <td className="lead">
+                <span>
+                  {r.zone}
+                  <div className="muted small">{when(r.delivery_date)}</div>
+                </span>
+                <span className="chip neutral phone-only">
+                  {r.done} of {r.stops}
+                </span>
+              </td>
+              <td data-label="Driver">
+                {r.driver_name ?? <span className="muted">Not assigned</span>}
+              </td>
+              <td data-label="Progress" style={{ minWidth: 150 }}>
+                <div className="small">{r.done} of {r.stops} done</div>
+                <div className="bar"><span style={{ width: `${pct}%` }} /></div>
+              </td>
+              {/* What is ON the truck, not what the driver owes back: most
+                  customers are on terms and pay nothing at the door. */}
+              <td data-label="Worth" className="num">{money(Number(r.worth_cents))}</td>
+              <td data-label="Collected" className="num money">
+                {money(Number(r.collected_cents))}
+              </td>
+              <td className="num actions">
+                {settle
+                  ? <Link to={`/delivery/${r.id}/settlement`}>Settle</Link>
+                  : <Link to={`/delivery/${r.id}`}>Open</Link>}
+              </td>
+            </tr>
+          );
+        })}
+      </tbody>
+    </table>
+  );
+
   return (
     <div className="dash">
       <h1>{greeting()}, {firstName}</h1>
@@ -106,9 +166,12 @@ export default function Dashboard({ session }: { session: Session }) {
           overdue > 0 ? 'bad' : 'plain')}
 
         {figure('/delivery', 'Out today',
-          d.rounds.length === 1 ? '1 round' : `${d.rounds.length} rounds`,
-          d.rounds.length === 0 ? 'nothing on the road'
-            : `${stopsLeft} stop${stopsLeft === 1 ? '' : 's'} still to do`)}
+          onRoad.length === 1 ? '1 round' : `${onRoad.length} rounds`,
+          [
+            onRoad.length === 0 ? 'nothing on the road'
+              : `${stopsLeft} stop${stopsLeft === 1 ? '' : 's'} still to do`,
+            toSettle.length > 0 ? `${toSettle.length} to settle` : null,
+          ].filter(Boolean).join(' · '))}
 
         {figure('/applications', 'Waiting on you', String(waiting),
           waiting === 0 ? 'nothing needs you' : [
@@ -132,58 +195,37 @@ export default function Dashboard({ session }: { session: Session }) {
 
       <div className="panel phone-cards">
         <div className="panel-head">
-          <h2>Today&rsquo;s rounds</h2>
-          <Link className="small" to="/delivery">All delivery sheets</Link>
+          <h2>On the road today</h2>
+          <Link className="small" to="/delivery">All delivery rounds</Link>
         </div>
-        {d.rounds.length === 0 ? (
+        {onRoad.length === 0 ? (
           <p className="muted">
-            No rounds open. Orders are routed onto a sheet as they come in.
+            Nothing on the road today. Orders are routed onto a sheet as they come in.
           </p>
-        ) : (
-          <table>
-            <thead>
-              <tr>
-                <th>Round</th><th>Driver</th><th>Progress</th>
-                <th className="num">Worth</th><th className="num">Collected</th><th />
-              </tr>
-            </thead>
-            <tbody>
-              {d.rounds.map((r) => {
-                const pct = r.stops === 0 ? 0 : Math.round((r.done / r.stops) * 100);
-                return (
-                  <tr key={r.id}>
-                    <td className="lead">
-                      <span>
-                        {r.zone}
-                        <div className="muted small">{date(r.delivery_date)}</div>
-                      </span>
-                      <span className="chip neutral phone-only">
-                        {r.done} of {r.stops}
-                      </span>
-                    </td>
-                    <td data-label="Driver">
-                      {r.driver_name ?? <span className="muted">Not assigned</span>}
-                    </td>
-                    <td data-label="Progress" style={{ minWidth: 150 }}>
-                      <div className="small">{r.done} of {r.stops} done</div>
-                      <div className="bar"><span style={{ width: `${pct}%` }} /></div>
-                    </td>
-                    {/* What is ON the truck, not what the driver owes back: most
-                        customers are on terms and pay nothing at the door. */}
-                    <td data-label="Worth" className="num">{money(Number(r.worth_cents))}</td>
-                    <td data-label="Collected" className="num money">
-                      {money(Number(r.collected_cents))}
-                    </td>
-                    <td className="num actions">
-                      <Link to={`/delivery/${r.id}`}>Open</Link>
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        )}
+        ) : roundsTable(onRoad)}
       </div>
+
+      {toSettle.length > 0 && (
+        <div className="panel phone-cards">
+          <div className="panel-head">
+            <h2>Back and waiting to settle</h2>
+          </div>
+          <p className="muted small" style={{ marginTop: 0 }}>
+            Every stop has an outcome, or the round&rsquo;s day has passed. Settling
+            turns the driver&rsquo;s collections into payments on the customers&rsquo; accounts.
+          </p>
+          {roundsTable(toSettle, true)}
+        </div>
+      )}
+
+      {comingUp.length > 0 && (
+        <div className="panel phone-cards">
+          <div className="panel-head">
+            <h2>Coming up</h2>
+          </div>
+          {roundsTable(comingUp)}
+        </div>
+      )}
 
       {/* Side by side on a wide screen, stacked below it. */}
       <div className="split">
@@ -266,7 +308,7 @@ export default function Dashboard({ session }: { session: Session }) {
                   <strong>{applicantName(a)}</strong> asked to open an account
                   <div className="muted small">
                     {a.account_type === 'Corporate' ? 'Business' : 'Individual'}
-                    {a.parish ? ` · ${a.parish}` : ''} · asked {date(a.asked_on)}
+                    {a.parish ? ` · ${a.parish}` : ''} · asked {when(a.asked_on)}
                   </div>
                 </span>
                 <Link to="/applications">Review</Link>

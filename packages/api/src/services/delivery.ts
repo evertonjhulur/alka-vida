@@ -322,8 +322,18 @@ export async function saveStopAllocation(
 /** What the driver's app shows for a stop, including allocatable invoices. */
 export async function getStopForDriver(db: Db, stopId: string) {
   const stop = await db.maybeOne<Record<string, unknown>>(
-    `SELECT s.*, c.name AS customer_name
+    // Where the stop sits on its round ("Stop 3 of 5", same order as the
+    // round page), the customer's terms, and their standing notes.
+    `SELECT s.*, c.name AS customer_name, c.payment_terms, c.notes AS customer_notes,
+            d.zone AS sheet_zone,
+            (SELECT COUNT(*) FROM delivery_stops x
+              WHERE x.delivery_sheet_id = s.delivery_sheet_id)::int AS stop_count,
+            (SELECT COUNT(*) FROM delivery_stops x JOIN customers xc ON xc.id = x.customer_id
+              WHERE x.delivery_sheet_id = s.delivery_sheet_id
+                AND (x.sequence_no < s.sequence_no
+                     OR (x.sequence_no = s.sequence_no AND xc.name <= c.name)))::int AS stop_position
      FROM delivery_stops s JOIN customers c ON c.id = s.customer_id
+     JOIN delivery_sheets d ON d.id = s.delivery_sheet_id
      WHERE s.id = $1`, [stopId],
   );
   if (!stop) return null;
@@ -453,8 +463,12 @@ export async function getSheet(db: Db, sheetId: string) {
   const sheet = await db.maybeOne(`SELECT * FROM delivery_sheets WHERE id = $1`, [sheetId]);
   if (!sheet) return null;
   const stops = await db.query(
-    `SELECT s.*, c.name AS customer_name
+    `SELECT s.*, c.name AS customer_name,
+            o.grand_total_cents AS order_total_cents, o.delivery_mode,
+            i.invoice_number
      FROM delivery_stops s JOIN customers c ON c.id = s.customer_id
+     LEFT JOIN customer_orders o ON o.id = s.order_id
+     LEFT JOIN invoices i ON i.id = s.invoice_id
      WHERE s.delivery_sheet_id = $1
      ORDER BY s.sequence_no, c.name`,
     [sheetId],

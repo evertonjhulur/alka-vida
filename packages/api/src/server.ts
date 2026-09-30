@@ -137,6 +137,8 @@ export async function buildServer(db: Db) {
     // written to give nothing away to somebody who is only probing.
     if (req.url.startsWith('/api/register')) return;
     if (req.url.startsWith('/api/invitations/')) return;
+    // The company logo, shown on the sign-in page before anyone is signed in.
+    if (req.url.startsWith('/api/logo')) return;
     const header = req.headers.authorization;
     const token = header?.startsWith('Bearer ') ? header.slice(7) : null;
     const session = token ? verifyToken(token) : null;
@@ -254,6 +256,18 @@ export async function buildServer(db: Db) {
   }
 
   /* ---------------- auth ---------------- */
+
+  // PUBLIC. The owner's logo file beside the launcher (the same one the PDFs
+  // use), for the sign-in page and the invoice screen. 404 when there is
+  // none, and the screens fall back to the name set in type.
+  app.get('/api/logo', async (_req, reply) => {
+    const file = documents.logoPath();
+    if (!file) return reply.status(404).send({ error: 'no logo on file' });
+    return reply
+      .header('content-type', file.toLowerCase().endsWith('.jpg') ? 'image/jpeg' : 'image/png')
+      .header('cache-control', 'no-cache')
+      .send(readFileSync(file));
+  });
 
   app.post('/api/auth/login', async (req, reply) => {
     const { email, password } = req.body as { email: string; password: string };
@@ -537,6 +551,7 @@ export async function buildServer(db: Db) {
         `SELECT p.id AS product_id,
                 p.name,
                 p.bottles_per_case,
+                p.is_returnable,
                 COALESCE(pl.price_per_case_cents, p.price_per_case_cents)     AS price_per_case_cents,
                 COALESCE(pl.price_per_bottle_cents, p.price_per_bottle_cents) AS price_per_bottle_cents,
                 pt.name AS price_tier
@@ -675,12 +690,14 @@ export async function buildServer(db: Db) {
 
   app.get('/api/orders', { preHandler: allow('admin', 'user', 'customer') },
     async (req) => {
-      const q = req.query as { status?: string; customerId?: string };
+      const q = req.query as { status?: string; customerId?: string; limit?: string };
       const s = req.session!;
       // A customer sees their own orders and no one else's, whatever they ask
       // for - the same rule the invoice list follows.
       const customerId = s.role === 'customer' ? s.customerId ?? undefined : q.customerId;
-      return orders.listOrders(db, { status: q.status, customerId });
+      // Up to 500 for the Orders screen, which filters and counts in the browser.
+      const limit = Math.min(Math.max(Number(q.limit) || 100, 1), 500);
+      return orders.listOrders(db, { status: q.status, customerId, limit });
     });
 
   app.patch('/api/orders/:id', { preHandler: allow('admin', 'user') },
@@ -888,6 +905,26 @@ export async function buildServer(db: Db) {
   // account if it does not land exactly.
   app.post('/api/payments/receive', { preHandler: allow('admin', 'user') },
     async (req) => payments.receivePayment(db, actorOf(req), req.body as never));
+
+  // Money already on their account, put against one invoice (oldest first,
+  // split if it is more than needed).
+  app.post('/api/invoices/:id/apply-on-account', { preHandler: allow('admin', 'user') },
+    async (req) => {
+      const body = (req.body ?? {}) as { amountCents?: number };
+      return payments.applyToInvoice(db, actorOf(req), {
+        invoiceId: (req.params as { id: string }).id, amountCents: body.amountCents ?? null,
+      });
+    });
+
+  // One unattached payment put against one invoice of the same customer.
+  app.post('/api/payments/:id/apply', { preHandler: allow('admin', 'user') },
+    async (req) => {
+      const body = (req.body ?? {}) as { invoiceId: string; amountCents?: number };
+      return payments.applyToInvoice(db, actorOf(req), {
+        invoiceId: body.invoiceId, paymentId: (req.params as { id: string }).id,
+        amountCents: body.amountCents ?? null,
+      });
+    });
 
   app.get('/api/payments/unapplied', { preHandler: allow('admin', 'user') },
     async (req) => payments.unappliedPayments(db,
@@ -1173,6 +1210,24 @@ export async function buildServer(db: Db) {
         totals: await reports.totalDiscounts(db, q.from, q.to),
         byClient: await reports.discountsByClient(db, q.from, q.to),
       };
+    });
+
+  app.get('/api/reports/sales', { preHandler: allow('admin', 'user') },
+    async (req) => {
+      const q = req.query as { from?: string; to?: string };
+      return reports.salesReport(db, q.from || null, q.to || null);
+    });
+
+  app.get('/api/reports/rounds', { preHandler: allow('admin', 'user') },
+    async (req) => {
+      const q = req.query as { from?: string; to?: string };
+      return reports.roundsReport(db, q.from || null, q.to || null);
+    });
+
+  app.get('/api/reports/margin', { preHandler: allow('admin', 'user') },
+    async (req) => {
+      const q = req.query as { from?: string; to?: string };
+      return reports.marginReport(db, q.from || null, q.to || null);
     });
 
   app.get('/api/reports/material-costs', { preHandler: allow('admin', 'user') },

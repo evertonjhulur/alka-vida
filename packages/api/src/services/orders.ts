@@ -546,9 +546,34 @@ export async function listOrders(
   db: Db,
   opts: { status?: string; customerId?: string; limit?: number } = {},
 ) {
+  /*
+   * Besides the order itself, what the Orders screen needs to say where it
+   * stands without opening it: what is on it ("120 cs 500ml, 4 x 5 Gallon"),
+   * the round it is on (the latest stop for it, if any), whether it came from
+   * a standing order, and the business day to judge "missed" and "today"
+   * against.
+   */
   return db.query(
-    `SELECT o.*, c.name AS customer_name
-     FROM customer_orders o JOIN customers c ON c.id = o.customer_id
+    `SELECT o.*, c.name AS customer_name, c.delivery_zone AS customer_zone,
+            business_today() AS today,
+            (SELECT string_agg(
+                      CASE WHEN oli.cases > 0 AND oli.loose_bottles > 0
+                             THEN oli.cases || ' cs + ' || oli.loose_bottles || ' '
+                           WHEN oli.cases > 0 THEN oli.cases || ' cs '
+                           ELSE oli.loose_bottles || ' x ' END || p.name,
+                      ', ' ORDER BY p.name)
+               FROM order_line_items oli JOIN products p ON p.id = oli.product_id
+              WHERE oli.order_id = o.id) AS lines_summary,
+            st.id AS stop_id, st.stop_outcome, ds.id AS sheet_id, ds.zone AS sheet_zone,
+            ds.delivery_date AS sheet_date, ds.status AS sheet_status,
+            (ds.started_at IS NOT NULL) AS sheet_started
+     FROM customer_orders o
+     JOIN customers c ON c.id = o.customer_id
+     LEFT JOIN LATERAL (
+       SELECT s2.* FROM delivery_stops s2 JOIN delivery_sheets d2 ON d2.id = s2.delivery_sheet_id
+        WHERE s2.order_id = o.id ORDER BY d2.delivery_date DESC, d2.created_at DESC LIMIT 1
+     ) st ON true
+     LEFT JOIN delivery_sheets ds ON ds.id = st.delivery_sheet_id
      WHERE ($1::text IS NULL OR o.status = $1)
        AND ($2::uuid IS NULL OR o.customer_id = $2::uuid)
      ORDER BY o.created_at DESC

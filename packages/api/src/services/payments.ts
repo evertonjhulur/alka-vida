@@ -321,14 +321,115 @@ export async function unappliedPayments(db: Db, customerId?: string) {
   return db.query<{
     id: string; customer_id: string; customer_name: string; amount_cents: number;
     payment_date: string; method: string; reference: string | null; notes: string | null;
+    round_zone: string | null;
   }>(
     `SELECT p.id, p.customer_id, c.name AS customer_name, p.amount_cents,
             business_date(p.payment_date)::text AS payment_date,
-            p.method, p.reference, p.notes
+            p.method, p.reference, p.notes, ds.zone AS round_zone
      FROM payments p JOIN customers c ON c.id = p.customer_id
+     LEFT JOIN delivery_sheets ds ON ds.id = p.delivery_sheet_id
      WHERE p.invoice_id IS NULL AND p.status = 'Confirmed' AND NOT p.is_reversal
        AND ($1::uuid IS NULL OR p.customer_id = $1::uuid)
      ORDER BY p.payment_date DESC, c.name`,
     [customerId ?? null],
   );
+}
+
+/**
+ * Attach money already received, but not yet against any invoice, to one
+ * invoice of the same customer.
+ *
+ * Oldest payment first, up to what the invoice still owes (or `amountCents`
+ * if smaller). A payment larger than what is needed is split in two: the
+ * part used becomes its own payment against the invoice, with the same date,
+ * method, reference and route links, and the original keeps the rest,
+ * still unattached. The customer's running balance does not change - only
+ * which invoice the money is shown against - so this is office work, not an
+ * administrator's correction like moving a payment between customers.
+ */
+export async function applyToInvoice(
+  db: Db,
+  actor: Actor,
+  args: { invoiceId: string; paymentId?: string | null; amountCents?: Cents | null },
+): Promise<{ appliedCents: Cents; paymentIds: string[] }> {
+  requireRole(actor, 'admin', 'user');
+
+  return db.tx(async (t) => {
+    const inv = await t.maybeOne<{
+      customer_id: string; invoice_number: string; balance_cents: number;
+      is_credit_note: boolean; status: string;
+    }>(
+      `SELECT customer_id, invoice_number, balance_cents, is_credit_note, status
+       FROM invoice_ledger WHERE invoice_id = $1`, [args.invoiceId],
+    );
+    if (!inv) throw new RuleViolation('that invoice no longer exists');
+    if (inv.is_credit_note) throw new RuleViolation('a credit note is not paid');
+    if (inv.status === 'Cancelled') throw new RuleViolation('that invoice is cancelled');
+    // Lock the invoice row so two people applying at once cannot overpay it.
+    await t.query(`SELECT id FROM invoices WHERE id = $1 FOR UPDATE`, [args.invoiceId]);
+
+    const owed = num(inv.balance_cents);
+    if (owed <= 0) throw new RuleViolation(`${inv.invoice_number} is already paid`);
+    let remaining = Math.min(owed, args.amountCents && args.amountCents > 0 ? args.amountCents : owed);
+
+    const pool = await t.query<{
+      id: string; amount_cents: number; payment_date: string; method: PaymentMethod;
+      reference: string | null; notes: string | null; delivery_sheet_id: string | null;
+      delivery_stop_id: string | null; kind: string | null;
+    }>(
+      `SELECT id, amount_cents, payment_date::text AS payment_date, method, reference, notes,
+              delivery_sheet_id, delivery_stop_id, kind
+       FROM payments
+       WHERE customer_id = $1 AND invoice_id IS NULL AND status = 'Confirmed'
+         AND NOT is_reversal AND amount_cents > 0
+         AND ($2::uuid IS NULL OR id = $2::uuid)
+       ORDER BY payment_date, created_at
+       FOR UPDATE`,
+      [inv.customer_id, args.paymentId ?? null],
+    );
+    if (pool.length === 0) {
+      throw new RuleViolation(args.paymentId
+        ? 'that payment is already against an invoice, or belongs to another customer'
+        : 'there is no money on their account to apply');
+    }
+
+    let applied = 0;
+    const ids: string[] = [];
+    for (const p of pool) {
+      if (remaining <= 0) break;
+      const have = num(p.amount_cents);
+      const take = Math.min(have, remaining);
+      if (take === have) {
+        await t.query(`UPDATE payments SET invoice_id = $2 WHERE id = $1`, [p.id, args.invoiceId]);
+        await audit(t, actor, 'adjust', 'Payment', p.id, p.reference ?? p.id, {
+          applied: 'whole', invoiceId: args.invoiceId, invoiceNumber: inv.invoice_number,
+          amountCents: take,
+        });
+        ids.push(p.id);
+      } else {
+        await t.query(`UPDATE payments SET amount_cents = amount_cents - $2 WHERE id = $1`, [p.id, take]);
+        const part = await insertPayment(t, actor, {
+          customerId: inv.customer_id,
+          invoiceId: args.invoiceId,
+          amountCents: take,
+          method: p.method,
+          paymentDate: p.payment_date,
+          reference: p.reference,
+          notes: `Part of an earlier payment${p.reference ? ` (${p.reference})` : ''}, applied to ${inv.invoice_number}`,
+          deliverySheetId: p.delivery_sheet_id,
+          deliveryStopId: p.delivery_stop_id,
+          kind: p.kind,
+          status: 'Confirmed',
+        });
+        await audit(t, actor, 'adjust', 'Payment', p.id, p.reference ?? p.id, {
+          applied: 'split', invoiceId: args.invoiceId, invoiceNumber: inv.invoice_number,
+          amountCents: take, leftUnattachedCents: have - take, newPaymentId: part.id,
+        });
+        ids.push(part.id);
+      }
+      applied += take;
+      remaining -= take;
+    }
+    return { appliedCents: applied, paymentIds: ids };
+  });
 }

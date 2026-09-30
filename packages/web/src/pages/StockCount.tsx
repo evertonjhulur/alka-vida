@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { api, type Session } from '../lib/api';
-import { money, date } from '../lib/format';
+import { money, date, when } from '../lib/format';
+import { ask, askText } from '../components/Dialog';
 
 interface Material {
   id: string; name: string; quantity_on_hand: number; unit_of_measure: string;
@@ -87,7 +88,9 @@ export default function StockCount({ session }: { session: Session }) {
    * after they happened.
    */
   async function reconcile(id: string, evenThoughStockMoved = false) {
-    const why = window.prompt('Note for this adjustment (optional)') ?? undefined;
+    const note = await askText('Confirm this count?\n\nStock will be set to what was counted.', { label: 'Note for this adjustment (optional)', confirmLabel: 'Confirm count' });
+    if (note === null) return;
+    const why = note.trim() || undefined;
     setBusy(true); setError(null); setBlocked(null);
     try {
       const r = await api.post<{
@@ -136,7 +139,7 @@ export default function StockCount({ session }: { session: Session }) {
           {blocked.movements && blocked.movements.movements.length > 0 && (
             <>
               <div className="small muted">
-                Counted {date(blocked.movements.countedAt)}. Since then:
+                Counted {when(blocked.movements.countedAt)}. Since then:
               </div>
               <table style={{ marginTop: 6, marginBottom: 8 }}>
                 <thead>
@@ -145,7 +148,7 @@ export default function StockCount({ session }: { session: Session }) {
                 <tbody>
                   {blocked.movements.movements.map((m, i) => (
                     <tr key={i}>
-                      <td className="small">{date(m.at)}</td>
+                      <td className="small">{when(m.at)}</td>
                       <td className="small">{m.what}</td>
                       <td className="num">
                         {m.direction === 'out' ? '−' : '+'}{m.quantity}
@@ -167,11 +170,12 @@ export default function StockCount({ session }: { session: Session }) {
             Leave it — I will count again
           </button>{' '}
           <button disabled={busy}
-                  onClick={() => {
-                    if (!window.confirm(
+                  onClick={async () => {
+                    if (!await ask(
                       'Confirm this count over the later movements?\n\n'
                       + 'Stock will be set to what was counted. Do this only if the '
                       + 'floor was counted AFTER those movements happened.',
+                      { confirmLabel: 'Use this count' },
                     )) return;
                     reconcile(blocked.auditId, true);
                   }}>
@@ -273,7 +277,7 @@ export default function StockCount({ session }: { session: Session }) {
           <tbody>
             {audits.map((a) => (
               <tr key={a.id}>
-                <td>{date(a.audit_date)}</td>
+                <td>{when(a.audit_date)}</td>
                 <td>
                   {a.item_name}
                   <div className="muted small">

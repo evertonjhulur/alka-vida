@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useSearchParams } from 'react-router-dom';
 import { api, type Session } from '../lib/api';
 import { money } from '../lib/format';
 
@@ -56,6 +56,10 @@ export default function Customers({ session }: { session: Session }) {
     setTiers(await api.get<Tier[]>('/api/price-tiers'));
   }
   useEffect(() => { load().catch((e) => setError(e.message)); }, []);
+
+  // "+ New > Customer" in the top bar lands here with ?new=1.
+  const [params] = useSearchParams();
+  useEffect(() => { if (params.get('new') === '1') startNew(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   function startNew() {
     setForm({ ...BLANK });
@@ -347,7 +351,7 @@ export default function Customers({ session }: { session: Session }) {
               </select>
             </div>
             <div className="field">
-              <button disabled={busy || !survivor || !merged} onClick={merge}>Merge</button>
+              <button className="danger-soft" disabled={busy || !survivor || !merged} onClick={merge}>Merge</button>
             </div>
           </div>
         </div>

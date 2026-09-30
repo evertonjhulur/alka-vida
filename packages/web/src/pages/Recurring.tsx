@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { api } from '../lib/api';
-import { date } from '../lib/format';
+import { date, when } from '../lib/format';
+import { ask, askText } from '../components/Dialog';
 
 interface Schedule {
   id: string; orderNumber: string; customerId: string; customerName: string;
@@ -61,9 +62,10 @@ export default function Recurring() {
   }
 
   async function end(s: Schedule) {
-    if (!window.confirm(
+    if (!await ask(
       `End the standing order for ${s.customerName}?\n\n` +
       `Orders already raised are kept. To stop it only temporarily, pause it instead.`,
+      { confirmLabel: 'End it', cancelLabel: 'Keep it', danger: true },
     )) return;
     setBusy(true); setError(null);
     try {
@@ -175,7 +177,7 @@ export default function Recurring() {
                     {/* A schedule with no next date raises nothing and would
                         otherwise sit here looking healthy. Say so on the row,
                         not only after someone presses the button. */}
-                    {s.nextDeliveryDate ? date(s.nextDeliveryDate) : (
+                    {s.nextDeliveryDate ? when(s.nextDeliveryDate) : (
                       <>
                         <span className="chip bad">not scheduled</span>
                         <div className="muted small">
@@ -184,7 +186,7 @@ export default function Recurring() {
                       </>
                     )}
                     {s.endsOn && (
-                      <div className="muted small">ends {date(s.endsOn)}</div>
+                      <div className="muted small">ends {when(s.endsOn)}</div>
                     )}
                   </td>
                   <td className="num">{s.occurrencesRaised}</td>
@@ -192,7 +194,7 @@ export default function Recurring() {
                     <button className="secondary" onClick={() => startEdit(s)}>Change</button>{' '}
                     <button className="secondary" disabled={busy}
                             onClick={() => togglePause(s)}>Pause</button>{' '}
-                    <button className="secondary" disabled={busy}
+                    <button className="danger-soft" disabled={busy}
                             onClick={() => end(s)}>End</button>
                   </td>
                 </tr>
@@ -228,7 +230,7 @@ export default function Recurring() {
                       </div>
                       {s.lastNote && (
                         <p className="muted small">
-                          Last checked {date(s.lastRunAt)} — {s.lastNote}
+                          Last checked {when(s.lastRunAt)} — {s.lastNote}
                         </p>
                       )}
                     </td>

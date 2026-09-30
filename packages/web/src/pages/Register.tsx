@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../lib/api';
+import Logo from '../components/Logo';
 
 type AccountType = 'Corporate' | 'Individual';
 
@@ -55,142 +56,148 @@ export default function Register() {
     } finally { setBusy(false); }
   }
 
+  const header = (
+    <header className="public-head">
+      <Link to="/" aria-label="Alka Vida, sign in"><Logo height={52} /></Link>
+      <Link to="/">Sign in</Link>
+    </header>
+  );
+
   if (done) {
     return (
       <div className="login-page">
-        <div className="panel" style={{ maxWidth: 520 }}>
-          <h1>Thank you, {done}</h1>
-          <p>
-            We have your details. Someone from Alka Vida will be in touch to agree
-            your prices and delivery arrangements.
-          </p>
-          <p className="muted small">
-            Once your account is set up you will get an email with a link to choose
-            your own password. Nobody here will ever ask you for it.
-          </p>
-          <Link to="/">Back to sign in</Link>
-        </div>
+        {header}
+        <main className="public-main">
+          <section className="panel">
+            <h1 className="public-h1">Thank you, {done}</h1>
+            <p>
+              We have your details. Someone from Alka Vida will call to agree your
+              prices and delivery day.
+            </p>
+            <p className="muted small">
+              Once your account is set up you will get an email with a link to choose
+              your own password. Nobody here will ever ask you for it.
+            </p>
+            <Link to="/">Back to sign in</Link>
+          </section>
+        </main>
       </div>
     );
   }
 
+  const kind = (t: AccountType) => setF({
+    // Switching kind clears only the name fields, which are the ones that
+    // differ. Everything already typed stays.
+    ...BLANK, accountType: t,
+    email: f.email, phone: f.phone,
+    addressLine1: f.addressLine1, addressLine2: f.addressLine2,
+    city: f.city, parish: f.parish, notes: f.notes,
+  });
+
   return (
     <div className="login-page">
-      <div className="panel" style={{ maxWidth: 640 }}>
-        <h1>Open an Alka Vida account</h1>
-        <p className="muted">
-          Tell us about you and we will be in touch to agree your prices and
-          delivery. This is a request for an account, not an order.
-        </p>
+      {header}
+      <main className="public-main">
+        <div>
+          <h1 className="public-h1">Open an account</h1>
+          <p className="muted" style={{ margin: '4px 0 0' }}>
+            Tell us who you are and where to deliver. We will call to agree your
+            prices and delivery day. This is a request, not an order.
+          </p>
+        </div>
 
         {error && <div className="notice error">{error}</div>}
 
-        <form onSubmit={submit}>
-          <div className="row">
+        <form onSubmit={submit} className="public-form">
+          <div className="seg seg-even" role="group" aria-label="Kind of account">
+            <button type="button" className={isCorporate ? 'active' : ''} aria-pressed={isCorporate}
+                    onClick={() => kind('Corporate')}>A business</button>
+            <button type="button" className={!isCorporate ? 'active' : ''} aria-pressed={!isCorporate}
+                    onClick={() => kind('Individual')}>My home</button>
+          </div>
+
+          <section className="panel">
+            {isCorporate ? (
+              <>
+                <div className="field">
+                  <label htmlFor="bn">Business name</label>
+                  <input id="bn" required value={f.businessName}
+                         onChange={(e) => setF({ ...f, businessName: e.target.value })} />
+                </div>
+                <div className="field">
+                  <label htmlFor="cp">Who we speak to</label>
+                  <input id="cp" required value={f.contactPerson}
+                         onChange={(e) => setF({ ...f, contactPerson: e.target.value })} />
+                </div>
+              </>
+            ) : (
+              <div className="two">
+                <div className="field">
+                  <label htmlFor="fn">First name</label>
+                  <input id="fn" required value={f.firstName}
+                         onChange={(e) => setF({ ...f, firstName: e.target.value })} />
+                </div>
+                <div className="field">
+                  <label htmlFor="ln">Last name</label>
+                  <input id="ln" required value={f.lastName}
+                         onChange={(e) => setF({ ...f, lastName: e.target.value })} />
+                </div>
+              </div>
+            )}
+            <div className="two">
+              <div className="field">
+                <label htmlFor="ph">Phone</label>
+                <input id="ph" type="tel" required value={f.phone}
+                       onChange={(e) => setF({ ...f, phone: e.target.value })} />
+              </div>
+              <div className="field">
+                <label htmlFor="em">Email</label>
+                <input id="em" type="email" required value={f.email}
+                       onChange={(e) => setF({ ...f, email: e.target.value })} />
+              </div>
+            </div>
+          </section>
+
+          <section className="panel">
+            <h2 className="side-h">Where we deliver</h2>
             <div className="field">
-              <label htmlFor="at">What kind of account?</label>
-              <select id="at" value={f.accountType}
-                      /* Switching kind clears only the name fields, which are
-                         the ones that differ. Everything already typed stays. */
-                      onChange={(e) => setF({
-                        ...BLANK, accountType: e.target.value as AccountType,
-                        email: f.email, phone: f.phone,
-                        addressLine1: f.addressLine1, addressLine2: f.addressLine2,
-                        city: f.city, parish: f.parish, notes: f.notes,
-                      })}>
-                <option value="Corporate">A business</option>
-                <option value="Individual">Myself</option>
-              </select>
-            </div>
-          </div>
-
-          {isCorporate ? (
-            <div className="row">
-              <div className="field" style={{ flex: '1 1 260px' }}>
-                <label htmlFor="bn">Business name</label>
-                <input id="bn" required style={{ width: '100%' }} value={f.businessName}
-                       onChange={(e) => setF({ ...f, businessName: e.target.value })} />
-              </div>
-              <div className="field" style={{ flex: '1 1 220px' }}>
-                <label htmlFor="cp">Contact person</label>
-                <input id="cp" required style={{ width: '100%' }} value={f.contactPerson}
-                       onChange={(e) => setF({ ...f, contactPerson: e.target.value })} />
-              </div>
-            </div>
-          ) : (
-            <div className="row">
-              <div className="field" style={{ flex: '1 1 220px' }}>
-                <label htmlFor="fn">First name</label>
-                <input id="fn" required style={{ width: '100%' }} value={f.firstName}
-                       onChange={(e) => setF({ ...f, firstName: e.target.value })} />
-              </div>
-              <div className="field" style={{ flex: '1 1 220px' }}>
-                <label htmlFor="ln">Last name</label>
-                <input id="ln" required style={{ width: '100%' }} value={f.lastName}
-                       onChange={(e) => setF({ ...f, lastName: e.target.value })} />
-              </div>
-            </div>
-          )}
-
-          <div className="row">
-            <div className="field" style={{ flex: '1 1 260px' }}>
-              <label htmlFor="em">Email</label>
-              <input id="em" type="email" required style={{ width: '100%' }} value={f.email}
-                     onChange={(e) => setF({ ...f, email: e.target.value })} />
-            </div>
-            <div className="field" style={{ flex: '1 1 200px' }}>
-              <label htmlFor="ph">Phone</label>
-              <input id="ph" required style={{ width: '100%' }} value={f.phone}
-                     onChange={(e) => setF({ ...f, phone: e.target.value })} />
-            </div>
-          </div>
-
-          <div className="row">
-            <div className="field" style={{ flex: '1 1 100%' }}>
-              <label htmlFor="a1">Where would we deliver?</label>
-              <input id="a1" style={{ width: '100%' }} value={f.addressLine1}
-                     placeholder="Address line 1 — street and number"
+              <label htmlFor="a1">Street and number</label>
+              <input id="a1" value={f.addressLine1}
                      onChange={(e) => setF({ ...f, addressLine1: e.target.value })} />
             </div>
-          </div>
-          <div className="row">
-            <div className="field" style={{ flex: '1 1 100%' }}>
-              <input id="a2" style={{ width: '100%' }} value={f.addressLine2}
-                     placeholder="Address line 2 — building, unit, landmark (optional)"
+            <div className="field">
+              <label htmlFor="a2">Building, unit or landmark (optional)</label>
+              <input id="a2" value={f.addressLine2}
                      onChange={(e) => setF({ ...f, addressLine2: e.target.value })} />
             </div>
-          </div>
-          <div className="row">
-            <div className="field" style={{ flex: '1 1 240px' }}>
-              <label htmlFor="ct">Town or city</label>
-              <input id="ct" style={{ width: '100%' }} value={f.city}
-                     onChange={(e) => setF({ ...f, city: e.target.value })} />
+            <div className="two">
+              <div className="field">
+                <label htmlFor="ct">Town</label>
+                <input id="ct" value={f.city} onChange={(e) => setF({ ...f, city: e.target.value })} />
+              </div>
+              <div className="field">
+                <label htmlFor="pa">Parish</label>
+                <select id="pa" value={f.parish} onChange={(e) => setF({ ...f, parish: e.target.value })}>
+                  <option value="">Choose…</option>
+                  {PARISHES.map((p) => <option key={p} value={p}>{p}</option>)}
+                </select>
+              </div>
             </div>
-            <div className="field" style={{ flex: '1 1 200px' }}>
-              <label htmlFor="pa">Parish</label>
-              <select id="pa" style={{ width: '100%' }} value={f.parish}
-                      onChange={(e) => setF({ ...f, parish: e.target.value })}>
-                <option value="">Choose…</option>
-                {PARISHES.map((p) => <option key={p} value={p}>{p}</option>)}
-              </select>
-            </div>
-          </div>
-
-          <div className="row">
-            <div className="field" style={{ flex: '1 1 100%' }}>
-              <label htmlFor="nt">Anything else we should know?</label>
-              <input id="nt" style={{ width: '100%' }} value={f.notes}
-                     placeholder="how much you use, how often, delivery times"
+            <div className="field" style={{ marginBottom: 0 }}>
+              <label htmlFor="nt">Anything else (optional)</label>
+              <input id="nt" value={f.notes} placeholder="How much you use, best delivery times"
                      onChange={(e) => setF({ ...f, notes: e.target.value })} />
             </div>
-          </div>
+          </section>
 
-          <button disabled={busy || !ready}>
+          <button className="wide big" disabled={busy || !ready}>
             {busy ? 'Sending…' : 'Send my request'}
-          </button>{' '}
-          <Link to="/" className="muted small">I already have an account</Link>
+          </button>
+          <p className="muted small" style={{ textAlign: 'center', margin: 0 }}>
+            Already have an account? <Link to="/">Sign in</Link>
+          </p>
         </form>
-      </div>
+      </main>
     </div>
   );
 }

@@ -166,7 +166,7 @@ export default function Bom() {
                 <td className="num">{money(costOf(l))}</td>
                 <td className="num muted">{Number(l.quantity_on_hand)}</td>
                 <td className="num">
-                  <button className="secondary" disabled={busy} onClick={() => remove(l)}>
+                  <button className="danger-soft" disabled={busy} onClick={() => remove(l)}>
                     Remove
                   </button>
                 </td>

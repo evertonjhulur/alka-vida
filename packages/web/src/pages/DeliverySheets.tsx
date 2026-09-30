@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../lib/api';
-import { money, date, todayInJamaica } from '../lib/format';
+import { money, date, todayInJamaica, when } from '../lib/format';
 
 interface Sheet {
   id: string; delivery_date: string; zone: string; status: string;
@@ -30,7 +30,7 @@ export default function DeliverySheets() {
 
   return (
     <>
-      <h1>Delivery sheets</h1>
+      <h1>Delivery rounds</h1>
       <p className="subtitle">
         Orders are auto-routed onto the sheet for the customer's zone and requested date.
       </p>
@@ -78,7 +78,7 @@ export default function DeliverySheets() {
           <tbody>
             {shown.map((s) => (
               <tr key={s.id}>
-                <td>{date(s.delivery_date)}</td>
+                <td>{when(s.delivery_date)}</td>
                 <td>{s.zone}</td>
                 <td>
                   {s.driver_name ?? <span className="muted">Not assigned</span>}
@@ -97,7 +97,7 @@ export default function DeliverySheets() {
                   {/* Opening the route comes first: assigning a driver, adding a
                       waiting order and reordering stops all live in there.
                       Settling is the END of a route, not the way into one. */}
-                  <Link to={`/delivery/${s.id}`}>Open route</Link>
+                  <Link to={`/delivery/${s.id}`}>Open round</Link>
                   {s.status === 'Open' && (
                     <>
                       {' · '}
@@ -113,7 +113,7 @@ export default function DeliverySheets() {
           <p className="muted">
             {day
               ? 'No round on that day. Pick another date, or show every day.'
-              : 'No delivery sheets yet.'}
+              : 'No delivery rounds yet.'}
           </p>
         )}
       </div>

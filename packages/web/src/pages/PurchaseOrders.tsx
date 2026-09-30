@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { api } from '../lib/api';
-import { money, toCents, date } from '../lib/format';
+import { money, toCents, date, when } from '../lib/format';
 
 interface Supplier {
   id: string; name: string;
@@ -224,7 +224,7 @@ export default function PurchaseOrders() {
                         </td>
                         <td className="num">
                           {lines.length > 1 && (
-                            <button type="button" className="secondary"
+                            <button type="button" className="danger-soft"
                                     onClick={() => setLines((c) => c.filter((_, x) => x !== i))}>
                               Remove
                             </button>
@@ -271,7 +271,7 @@ export default function PurchaseOrders() {
               <tr key={p.id}>
                 <td>{p.po_number}</td>
                 <td>{p.supplier_name}</td>
-                <td>{date(p.order_date)}</td>
+                <td>{when(p.order_date)}</td>
                 <td>{p.line_count}</td>
                 <td>
                   <span className={`chip ${

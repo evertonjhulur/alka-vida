@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../lib/api';
-import { money, date, statusTone } from '../lib/format';
+import { money, date, statusTone, when } from '../lib/format';
 
 interface Row {
   invoice_id: string; invoice_number: string; invoice_date: string;
@@ -64,7 +64,7 @@ export default function Invoices() {
               <tr key={r.invoice_id}>
                 <td><Link to={`/invoices/${r.invoice_id}`}>{r.invoice_number}</Link></td>
                 <td>{r.customer_name}</td>
-                <td>{date(r.invoice_date)}</td>
+                <td>{when(r.invoice_date)}</td>
                 <td className="num">{money(Number(r.grand_total_cents))}</td>
                 <td className="num">{money(Number(r.amount_paid_cents))}</td>
                 <td className="num">{money(Number(r.balance_cents))}</td>

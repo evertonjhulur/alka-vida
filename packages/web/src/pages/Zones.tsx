@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { api, type Session } from '../lib/api';
+import { ask, askText } from '../components/Dialog';
 
 interface Zone {
   id: string; name: string; covers: string | null;
@@ -56,13 +57,14 @@ export default function Zones({ session }: { session: Session }) {
     setEditFor(null);
   }, 'Could not save the zone');
 
-  const remove = (z: Zone) => {
-    if (!window.confirm(
+  const remove = async (z: Zone) => {
+    if (!await ask(
       z.customer_count > 0
         ? `${z.name} has ${z.customer_count} customer(s) on it.\n\n`
           + 'It will be retired rather than deleted: it stops being offered for new '
           + 'customers, and everyone already on it stays exactly where they are.'
         : `Delete ${z.name}? Nobody is on this round.`,
+      { confirmLabel: z.customer_count > 0 ? 'Retire it' : 'Delete', danger: true },
     )) return;
     return run(async () => {
       const r = await api.del<{ deleted: boolean; name: string; customerCount: number }>(
@@ -165,7 +167,7 @@ export default function Zones({ session }: { session: Session }) {
                       Edit
                     </button>{' '}
                     {isAdmin && (
-                      <button className="secondary" disabled={busy} onClick={() => remove(z)}>
+                      <button className="danger-soft" disabled={busy} onClick={() => remove(z)}>
                         Remove
                       </button>
                     )}

@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { api, type Session } from '../lib/api';
-import { money, date, toCents, todayInJamaica } from '../lib/format';
+import { money, date, toCents, todayInJamaica, when } from '../lib/format';
+import { ask, askText } from '../components/Dialog';
 
 interface Employee {
   id: string; name: string; job_title: string | null;
@@ -122,11 +123,12 @@ export default function EmployeeRecord({ session }: { session: Session }) {
     }, 'Could not save');
   };
 
-  const setActive = (active: boolean) => {
-    if (!active && !window.confirm(
+  const setActive = async (active: boolean) => {
+    if (!active && !await ask(
       `Mark ${e.name} as having left?\n\n`
       + 'Their record and every hour or trip already recorded stay exactly as they are — '
       + 'that work is part of what production cost.',
+      { confirmLabel: 'Mark as left', danger: true },
     )) return;
     return run(async () => {
       await api.post(`/api/employees/${e.id}/active`,
@@ -152,10 +154,11 @@ export default function EmployeeRecord({ session }: { session: Session }) {
     }, 'Could not record the work');
   };
 
-  const removeEntry = (en: Entry) => {
-    if (!window.confirm(
-      `Remove ${unit(en.basis, Number(en.quantity))} on ${date(en.work_date)}, `
+  const removeEntry = async (en: Entry) => {
+    if (!await ask(
+      `Remove ${unit(en.basis, Number(en.quantity))} on ${when(en.work_date)}, `
       + `worth ${money(Number(en.amount_cents))}?`,
+      { confirmLabel: 'Remove', danger: true },
     )) return;
     return run(async () => {
       await api.del(`/api/labour/${en.id}`);
@@ -170,7 +173,7 @@ export default function EmployeeRecord({ session }: { session: Session }) {
       <div className="row" style={{ justifyContent: 'space-between', alignItems: 'baseline' }}>
         <h1 style={{ marginBottom: 4 }}>
           {e.name}{' '}
-          {!e.active && <span className="chip muted">Left {date(e.ended_on)}</span>}
+          {!e.active && <span className="chip muted">Left {when(e.ended_on)}</span>}
         </h1>
         {isAdmin && (
           <div className="row" style={{ gap: 8, margin: 0 }}>
@@ -178,7 +181,7 @@ export default function EmployeeRecord({ session }: { session: Session }) {
                     onClick={() => (editing ? setEditing(false) : startEdit())}>
               {editing ? 'Cancel' : 'Edit details'}
             </button>
-            <button className="secondary" disabled={busy}
+            <button className={e.active ? 'danger-soft' : 'secondary'} disabled={busy}
                     onClick={() => setActive(!e.active)}>
               {e.active ? 'Mark as left' : 'Bring back'}
             </button>
@@ -227,7 +230,7 @@ export default function EmployeeRecord({ session }: { session: Session }) {
         <div className="fig">
           <div className="fig-label">Started</div>
           <div className="fig-value" style={{ fontSize: 20 }}>
-            {e.started_on ? date(e.started_on) : '—'}
+            {e.started_on ? when(e.started_on) : '—'}
           </div>
           <div className="fig-sub">{e.phone ?? e.email ?? 'no contact details'}</div>
         </div>
@@ -378,7 +381,7 @@ export default function EmployeeRecord({ session }: { session: Session }) {
               {r.entries.map((en) => (
                 <tr key={en.id}>
                   <td className="lead">
-                    <span>{date(en.work_date)}</span>
+                    <span>{when(en.work_date)}</span>
                     <span className="chip neutral phone-only">
                       {money(Number(en.amount_cents))}
                     </span>
@@ -398,7 +401,7 @@ export default function EmployeeRecord({ session }: { session: Session }) {
                   </td>
                   <td className="num actions">
                     {isAdmin && (
-                      <button className="secondary" disabled={busy}
+                      <button className="danger-soft" disabled={busy}
                               onClick={() => removeEntry(en)}>
                         Remove
                       </button>

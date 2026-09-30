@@ -60,7 +60,9 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
     body: body === undefined ? undefined : JSON.stringify(body),
   });
 
-  if (res.status === 401) {
+  // A 401 from signing in is a wrong email or password, not an expired
+  // session: say what the server said, and stay on the page.
+  if (res.status === 401 && path !== '/api/auth/login') {
     clearSession();
     window.location.hash = '#/login';
     throw new ApiError(401, 'Your session has expired. Please sign in again.');

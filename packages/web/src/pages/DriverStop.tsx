@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
-import { api } from '../lib/api';
+import { Link, useParams } from 'react-router-dom';
+import { api, getSession } from '../lib/api';
 import { money, toCents } from '../lib/format';
 
 interface StopLine {
@@ -30,25 +30,47 @@ interface Stop {
   order_ref: string | null;
   stop_outcome: string;
   invoice_id: string | null;
+  delivery_sheet_id?: string;
+  sheet_zone?: string | null;
+  stop_count?: number;
+  stop_position?: number;
+  payment_terms?: string | null;
+  customer_notes?: string | null;
+  driver_notes?: string | null;
   /** Always tax-inclusive: the invoice total, or the order total before one exists. */
   amountOwedCents: number;
   lines: StopLine[];
   openInvoices: OpenInvoice[];
 }
 
-const OUTCOMES = [
-  'Delivered', 'Customer Not Home', 'Refused', 'Rescheduled', 'Other',
-] as const;
+/** How they paid, as big buttons. "Not paid" is the default on account. */
+const PAY_WAYS: Array<[string, string]> = [
+  ['', 'Not paid'], ['Cash', 'Cash'], ['Cheque', 'Cheque'], ['Card', 'Card'], ['Bank Transfer', 'Transfer'],
+];
+const OUTCOME_WORDS: Record<string, string> = {
+  Delivered: 'Delivered', 'Customer Not Home': 'Not home', Refused: 'Refused',
+  Rescheduled: 'Another day', Other: 'Not delivered',
+};
 
+/**
+ * One stop, on the driver's phone (approved mockup, 29 Sep 2026).
+ *
+ * What was dropped (− / + per line, starting from the order), bottles back,
+ * what to collect and how they paid, then one big Delivered button, with
+ * Not home, Refused and Another day under it. Each of those records the
+ * stop straight away; nothing about payment can stop a delivery being
+ * recorded. The optional split of the cash across invoices is folded away
+ * underneath.
+ */
 export default function DriverStop() {
   const { stopId } = useParams();
-  const navigate = useNavigate();
+  const office = ['admin', 'user'].includes(getSession()?.role ?? '');
 
   const [stop, setStop] = useState<Stop | null>(null);
-  const [outcome, setOutcome] = useState<string>('Delivered');
+  const [notesOpen, setNotesOpen] = useState(false);
   const [delivered, setDelivered] = useState<Record<string, string>>({});
   const [collected, setCollected] = useState('');
-  const [method, setMethod] = useState('Cash');
+  const [method, setMethod] = useState('');
   const [empties, setEmpties] = useState('');
   const [lost, setLost] = useState('');
   const [notes, setNotes] = useState('');
@@ -99,7 +121,7 @@ export default function DriverStop() {
     }, 0);
   const fullsShown = fullsTouched ? fulls : String(bottlesFromLines);
 
-  const collectedCents = toCents(collected || '0');
+  const collectedCents = method ? toCents(collected || '0') : 0;
   const allocatedCents = Object.values(alloc)
     .reduce((s, v) => s + toCents(v || '0'), 0);
   const overAllocated = allocatedCents > collectedCents;
@@ -109,8 +131,7 @@ export default function DriverStop() {
    * them can prevent this from succeeding - a payment problem must never
    * block recording that goods were delivered.
    */
-  async function completeStop(e: React.FormEvent) {
-    e.preventDefault();
+  async function record(outcome: string) {
     setBusy(true);
     setError(null);
     setSaved(null);
@@ -121,22 +142,24 @@ export default function DriverStop() {
           ? { orderLineId: l.order_line_id, cases: qty, looseBottles: 0 }
           : { orderLineId: l.order_line_id, cases: 0, looseBottles: qty };
       });
+      const paid = method ? collectedCents : 0;
 
       await api.post(`/api/stops/${stop!.id}/outcome`, {
         outcome,
         outcomeNotes: notes || null,
         deliveredLines: outcome === 'Delivered' ? deliveredLines : undefined,
-        paymentReceived: collectedCents > 0,
-        paymentMethod: collectedCents > 0 ? method : null,
-        paymentAmountCents: collectedCents,
+        paymentReceived: paid > 0,
+        paymentMethod: paid > 0 ? method : null,
+        paymentAmountCents: paid,
         // What actually went out on loan. Without this the pool never learns
         // the bottles left the truck.
-        bottlesDeliveredFull: Number(fullsShown) || 0,
+        bottlesDeliveredFull: outcome === 'Delivered' ? Number(fullsShown) || 0 : 0,
         bottlesEmptiesPickedUp: Number(empties) || 0,
         bottlesLostDamaged: Number(lost) || 0,
         driverNotes: notes || null,
       });
-      setSaved('Stop recorded.');
+      setSaved(`Recorded: ${OUTCOME_WORDS[outcome] ?? outcome}${paid > 0 ? `, ${money(paid)} ${method.toLowerCase()}` : ''}.`);
+      window.scrollTo({ top: 0, behavior: 'smooth' });
       await load();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not record the stop');
@@ -195,142 +218,162 @@ export default function DriverStop() {
     });
   }
 
+  const back = office && stop.delivery_sheet_id ? `/delivery/${stop.delivery_sheet_id}` : '/route';
+  const onTerms = !!stop.payment_terms && !/cash on delivery/i.test(stop.payment_terms);
+  const done = stop.stop_outcome !== 'Pending';
+  // A delivered stop has raised its invoice and moved bottles; recording it
+  // again from here would move them twice. Not home -> Delivered is fine.
+  const delivered_ = stop.stop_outcome === 'Delivered';
+  const step = (id: string, by: number) => setDelivered((d) => ({
+    ...d, [id]: String(Math.max((Math.round(Number(d[id]) || 0)) + by, 0)),
+  }));
+
   return (
-    <>
-      <button className="secondary" onClick={() => navigate('/route')}>← Back to route</button>
-
-      <h1 style={{ marginTop: 16 }}>{stop.customer_name}</h1>
-      <p className="subtitle">
-        {stop.delivery_address ?? 'No address on file'}
-        {stop.contact_phone ? ` · ${stop.contact_phone}` : ''}
-        {stop.order_ref ? ` · ${stop.order_ref}` : ''}
-      </p>
-
-      {error && <div className="notice error">{error}</div>}
-      {saved && <div className="notice ok">{saved}</div>}
-
-      <div className="panel">
-        <div className="muted small">Amount owed (includes GCT)</div>
-        <div className="owed">{money(stop.amountOwedCents)}</div>
-        <div className="muted small" style={{ marginTop: 4 }}>
-          Current outcome: <strong>{stop.stop_outcome}</strong>
-        </div>
+    <div className="stop-screen">
+      <div className="stop-bar">
+        <Link to={back}>‹ {office ? 'The round' : 'My route'}</Link>
+        {stop.stop_count ? <strong>Stop {stop.stop_position} of {stop.stop_count}</strong> : <span />}
+        <span className="muted small">{stop.sheet_zone ?? ''}</span>
       </div>
 
-      <form onSubmit={completeStop}>
-        <div className="panel">
-          <h2 style={{ marginTop: 0 }}>What happened</h2>
-          <div className="field">
-            <label htmlFor="out">Outcome</label>
-            <select id="out" value={outcome} onChange={(e) => setOutcome(e.target.value)}>
-              {OUTCOMES.map((o) => <option key={o} value={o}>{o}</option>)}
-            </select>
+      {error && <div className="notice error">{error}</div>}
+      {saved && (
+        <div className="notice ok">
+          {saved} <Link to={back}>Back to {office ? 'the round' : 'my route'}</Link>
+        </div>
+      )}
+      {done && !saved && (
+        <div className="notice info">
+          Already recorded as <strong>{OUTCOME_WORDS[stop.stop_outcome] ?? stop.stop_outcome}</strong>.
+          {delivered_ ? ' To change a delivered stop, the office corrects it on the round.'
+            : ' If you went back and they took it, record it again below.'}
+        </div>
+      )}
+
+      <section className="panel stop-who">
+        <div className="stop-who-top">
+          {stop.stop_position ? <span className="stop-no big">{stop.stop_position}</span> : null}
+          <div>
+            <div className="stop-name">{stop.customer_name}</div>
+            <div className="muted">{stop.delivery_address ?? 'No address on file'}</div>
+            {stop.order_ref && <div className="muted small">{stop.order_ref}</div>}
           </div>
-
-          {outcome === 'Delivered' && (
-            <>
-              <h2>Quantities delivered</h2>
-              <table>
-                <thead>
-                  <tr><th>Product</th><th>Ordered</th><th>Delivered</th></tr>
-                </thead>
-                <tbody>
-                  {stop.lines.map((l) => (
-                    <tr key={l.order_line_id}>
-                      <td>{l.product_name}</td>
-                      <td className="muted">
-                        {l.bottles_per_case > 0
-                          ? `${l.cases} cases`
-                          : `${l.loose_bottles} bottles`}
-                      </td>
-                      <td>
-                        <input type="number" min="0" step="1" style={{ width: 90 }}
-                               value={delivered[l.order_line_id] ?? ''}
-                               onChange={(e) => setDelivered((d) => ({
-                                 ...d, [l.order_line_id]: e.target.value,
-                               }))} />
-                        <span className="muted small" style={{ marginLeft: 6 }}>
-                          {l.bottles_per_case > 0 ? 'cases' : 'bottles'}
-                        </span>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </>
-          )}
-
-          <div className="row" style={{ marginTop: 14 }}>
-            {/*
-              * Only shown when this stop actually carries returnables. It
-              * follows the delivered quantities above until the driver types
-              * over it, so the common case is right without anyone doing
-              * anything - and a short delivery is still one edit away.
-              */}
-            {carriesReturnables && (
-              <div className="field">
-                <label htmlFor="fulls">5-gallon bottles delivered</label>
-                <input id="fulls" type="number" min="0" style={{ width: 120 }}
-                       value={fullsShown}
-                       onChange={(e) => { setFullsTouched(true); setFulls(e.target.value); }} />
-              </div>
-            )}
-            <div className="field">
-              <label htmlFor="empties">Empties picked up</label>
-              <input id="empties" type="number" min="0" style={{ width: 120 }}
-                     value={empties} onChange={(e) => setEmpties(e.target.value)} />
-            </div>
-            <div className="field">
-              <label htmlFor="lost">Bottles lost / damaged</label>
-              <input id="lost" type="number" min="0" style={{ width: 120 }}
-                     value={lost} onChange={(e) => setLost(e.target.value)} />
-            </div>
-          </div>
-          <p className="muted small">
-            Lost or damaged bottles are recorded as a business loss. They are never
-            charged to the customer.
-          </p>
-
-          <h2>Payment collected</h2>
-          <div className="row">
-            <div className="field">
-              <label htmlFor="amt">Amount collected</label>
-              <input id="amt" type="number" step="0.01" min="0" placeholder="0.00"
-                     style={{ width: 150 }} value={collected}
-                     onChange={(e) => setCollected(e.target.value)} />
-            </div>
-            <div className="field">
-              <label htmlFor="meth">Method</label>
-              <select id="meth" value={method} onChange={(e) => setMethod(e.target.value)}>
-                {['Cash', 'Card', 'Bank Transfer', 'Cheque', 'Other'].map((m) => (
-                  <option key={m} value={m}>{m}</option>
-                ))}
-              </select>
-            </div>
-          </div>
-          {method === 'Bank Transfer' && (
-            <div className="notice info">
-              The delivery proceeds normally. The invoice stays open until the office
-              confirms the transfer has cleared.
-            </div>
-          )}
-
-          <div className="field">
-            <label htmlFor="notes">Notes</label>
-            <textarea id="notes" rows={2} style={{ width: '100%' }}
+        </div>
+        <div className="stop-links">
+          {stop.contact_phone && <a className="button-link secondary" href={`tel:${stop.contact_phone.replace(/[^\d+]/g, '')}`}>Call {stop.contact_phone}</a>}
+          <button type="button" className="secondary" aria-expanded={notesOpen} onClick={() => setNotesOpen(!notesOpen)}>
+            Notes for this stop{stop.customer_notes ? ' •' : ''}
+          </button>
+        </div>
+        {notesOpen && (
+          <div style={{ marginTop: 10 }}>
+            {stop.customer_notes && <p className="notice info" style={{ margin: '0 0 8px' }}>{stop.customer_notes}</p>}
+            <label htmlFor="notes">Your note (the office sees it)</label>
+            <textarea id="notes" rows={2} style={{ width: '100%', boxSizing: 'border-box' }}
                       value={notes} onChange={(e) => setNotes(e.target.value)} />
           </div>
+        )}
+      </section>
 
-          <button disabled={busy}>{busy ? 'Saving…' : `Mark stop ${outcome}`}</button>
-          <p className="muted small" style={{ marginTop: 8 }}>
-            Recording the stop always succeeds, whatever the payment situation.
-          </p>
+      <section className="panel">
+        <h2 className="side-h">What you dropped</h2>
+        {stop.lines.map((l) => {
+          const cased = l.bottles_per_case > 0;
+          const ordered = cased ? l.cases : l.loose_bottles;
+          return (
+            <div key={l.order_line_id} className="drop-row">
+              <div>
+                <strong>{l.product_name.replace(/^Alka Vida\s+/i, '')}</strong>
+                <div className="muted small">ordered {ordered} {cased ? (ordered === 1 ? 'case' : 'cases') : (ordered === 1 ? 'bottle' : 'bottles')}</div>
+              </div>
+              <div className="stepper big">
+                <button type="button" className="secondary" aria-label={`One fewer ${l.product_name}`}
+                        onClick={() => step(l.order_line_id, -1)}>−</button>
+                <input type="number" min="0" inputMode="numeric" aria-label={`${l.product_name} dropped`}
+                       value={delivered[l.order_line_id] ?? ''}
+                       onChange={(e) => setDelivered((d) => ({ ...d, [l.order_line_id]: e.target.value }))} />
+                <button type="button" className="secondary" aria-label={`One more ${l.product_name}`}
+                        onClick={() => step(l.order_line_id, 1)}>+</button>
+              </div>
+            </div>
+          );
+        })}
+        <div className="two" style={{ marginTop: 12 }}>
+          {/*
+            * Only shown when this stop carries returnables. It follows the
+            * quantities above until the driver types over it.
+            */}
+          {carriesReturnables && (
+            <div className="field">
+              <label htmlFor="fulls">Full bottles out</label>
+              <input id="fulls" type="number" min="0" inputMode="numeric" value={fullsShown}
+                     onChange={(e) => { setFullsTouched(true); setFulls(e.target.value); }} />
+            </div>
+          )}
+          <div className="field">
+            <label htmlFor="empties">Empties picked up</label>
+            <input id="empties" type="number" min="0" inputMode="numeric" placeholder="0"
+                   value={empties} onChange={(e) => setEmpties(e.target.value)} />
+          </div>
+          <div className="field">
+            <label htmlFor="lost">Lost or damaged</label>
+            <input id="lost" type="number" min="0" inputMode="numeric" placeholder="0"
+                   value={lost} onChange={(e) => setLost(e.target.value)} />
+          </div>
         </div>
-      </form>
+        <p className="muted small" style={{ margin: 0 }}>Lost or damaged bottles are a business loss, never charged to the customer.</p>
+      </section>
 
-      {invoicesToAllocate.length > 0 && (
-        <div className="panel">
-          <h2 style={{ marginTop: 0 }}>Suggested split of the cash (optional)</h2>
+      <section className="panel">
+        <div className="collect-head">
+          <h2 className="side-h" style={{ margin: 0 }}>To collect</h2>
+          <div className="owed">{money(stop.amountOwedCents)}</div>
+        </div>
+        <div className="muted small">
+          incl. GCT · {onTerms ? `on ${stop.payment_terms} terms, so paying now is optional` : 'cash on delivery'}
+        </div>
+        <div className="seg pay-ways" role="group" aria-label="How they paid">
+          {PAY_WAYS.map(([v, label]) => (
+            <button key={label} type="button" className={method === v ? 'active' : ''} aria-pressed={method === v}
+                    onClick={() => {
+                      setMethod(v);
+                      if (v && !collected) setCollected((stop.amountOwedCents / 100).toFixed(2));
+                    }}>{label}</button>
+          ))}
+        </div>
+        {method && (
+          <div className="field" style={{ marginTop: 10 }}>
+            <label htmlFor="amt">Amount taken</label>
+            <input id="amt" inputMode="decimal" style={{ width: '100%', boxSizing: 'border-box' }}
+                   value={collected} onChange={(e) => setCollected(e.target.value)} />
+          </div>
+        )}
+        {method === 'Bank Transfer' && (
+          <div className="notice info" style={{ marginTop: 8 }}>
+            The invoice stays open until the office sees the transfer has cleared.
+          </div>
+        )}
+      </section>
+
+      {!delivered_ && (
+        <>
+          <button type="button" className="big-go" disabled={busy} onClick={() => record('Delivered')}>
+            {busy ? 'Saving…' : 'Delivered'}
+          </button>
+          <div className="not-delivered">
+            <button type="button" className="secondary" disabled={busy} onClick={() => record('Customer Not Home')}>Not home</button>
+            <button type="button" className="secondary" disabled={busy} onClick={() => record('Refused')}>Refused</button>
+            <button type="button" className="secondary" disabled={busy} onClick={() => record('Rescheduled')}>Another day</button>
+          </div>
+          <p className="muted small" style={{ textAlign: 'center' }}>
+            Recording the stop always works, whatever happens with the money.
+          </p>
+        </>
+      )}
+
+      {invoicesToAllocate.length > 0 && collectedCents > 0 && (
+        <details className="panel">
+          <summary style={{ cursor: 'pointer' }}><strong>Split the cash across invoices (optional)</strong></summary>
           <p className="muted small">
             This is a suggestion for the office. It creates no payment and changes no
             balance until the route is settled.
@@ -401,8 +444,8 @@ export default function DriverStop() {
                   onClick={saveAllocation}>
             Save suggested split
           </button>
-        </div>
+        </details>
       )}
-    </>
+    </div>
   );
 }

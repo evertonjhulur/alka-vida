@@ -379,13 +379,14 @@ export async function getInvoiceDetail(db: Db, invoiceId: string) {
   );
   const payments = await db.query(
     `SELECT id, amount_cents, business_date(payment_date)::text AS payment_date,
-            method, status, is_reversal, reference
+            method, status, is_reversal, reference, reverses_payment_id
      FROM payments WHERE invoice_id = $1 ORDER BY payment_date`, [invoiceId],
   );
   // Who it is for, and what it came from. Without these the screen showed a
   // number, some lines and no way to tell whose invoice it was.
   const customer = await db.one(
-    `SELECT id, name, email, phone, delivery_address, payment_terms, delivery_zone
+    `SELECT id, name, email, phone, delivery_address, payment_terms, delivery_zone,
+            address_line1, address_line2, city, parish, contact_person
      FROM customers WHERE id = $1`, [ledger.customerId],
   );
   const orders = await db.query(
@@ -394,5 +395,35 @@ export async function getInvoiceDetail(db: Db, invoiceId: string) {
      FROM invoice_orders io JOIN customer_orders o ON o.id = io.order_id
      WHERE io.invoice_id = $1 ORDER BY o.order_number`, [invoiceId],
   );
-  return { ...header, ...ledger, lines, payments, customer, orders };
+  // What the invoice page's "What has happened" and "on their account"
+  // prompt need: the delivery that raised it, credit notes against it, its
+  // own audit trail, and money the customer has paid that is not yet
+  // against any invoice.
+  const delivery = await db.maybeOne(
+    `SELECT ds.zone, ds.delivery_date::text AS delivery_date, ds.driver_name,
+            u.name AS driver_user_name,
+            st.bottles_delivered_full, st.bottles_empties_picked_up, st.bottles_lost_damaged
+     FROM delivery_stops st
+     JOIN delivery_sheets ds ON ds.id = st.delivery_sheet_id
+     LEFT JOIN users u ON u.id = ds.assigned_driver_id
+     WHERE st.invoice_id = $1 LIMIT 1`, [invoiceId],
+  );
+  const creditNotes = await db.query(
+    `SELECT id, invoice_number, grand_total_cents, credit_status, created_at
+     FROM invoices WHERE linked_invoice_id = $1 AND is_credit_note ORDER BY created_at`,
+    [invoiceId],
+  );
+  const history = await db.query(
+    `SELECT ts, user_name, action, details FROM audit_log
+     WHERE entity_type = 'Invoice' AND entity_id = $1 ORDER BY ts`, [invoiceId],
+  );
+  const onAccount = await db.one<{ cents: number }>(
+    `SELECT COALESCE(SUM(amount_cents), 0)::bigint AS cents FROM payments
+     WHERE customer_id = $1 AND invoice_id IS NULL AND status = 'Confirmed'
+       AND NOT is_reversal AND amount_cents > 0`, [ledger.customerId],
+  );
+  return {
+    ...header, ...ledger, lines, payments, customer, orders,
+    delivery, creditNotes, history, onAccountCents: Number(onAccount.cents),
+  };
 }

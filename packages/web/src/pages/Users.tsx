@@ -1,6 +1,7 @@
 import { Fragment, useEffect, useState } from 'react';
 import { api, type Role, type Session } from '../lib/api';
-import { date } from '../lib/format';
+import { date, when } from '../lib/format';
+import { ask, askText } from '../components/Dialog';
 
 interface User {
   id: string; email: string; name: string; role: Role; active: boolean;
@@ -138,7 +139,7 @@ export default function Users({ session }: { session: Session }) {
         + 'They will not be able to sign in, and will be signed out of anything '
         + 'they have open. Their history stays exactly as it is.'
       : `Give ${u.name} access again?`;
-    if (!window.confirm(question)) return;
+    if (!(await ask(question, u.active ? { confirmLabel: 'Withdraw access', danger: true } : { confirmLabel: 'Give access' }))) return;
 
     await run(async () => {
       await api.post(`/api/users/${u.id}/active`, { active: !u.active });
@@ -189,7 +190,7 @@ export default function Users({ session }: { session: Session }) {
           <div className="muted small">{ROLE_NOTE[u.role]}</div>
         </td>
         <td className="small muted">
-          {u.last_login_at ? date(u.last_login_at) : 'never signed in'}
+          {u.last_login_at ? when(u.last_login_at) : 'never signed in'}
         </td>
         <td className="num">
           <button className="secondary" disabled={busy} onClick={() => toggleEdit(u)}>
@@ -206,7 +207,7 @@ export default function Users({ session }: { session: Session }) {
                   }}>
             {pwFor === u.id ? 'Cancel' : 'Reset password'}
           </button>{' '}
-          <button className="secondary" disabled={busy || u.id === session.id}
+          <button className={u.active ? 'danger-soft' : 'secondary'} disabled={busy || u.id === session.id}
                   title={u.id === session.id ? 'You cannot withdraw your own access' : undefined}
                   onClick={() => toggleActive(u)}>
             {u.active ? 'Withdraw access' : 'Give access back'}

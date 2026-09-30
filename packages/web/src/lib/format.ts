@@ -67,6 +67,21 @@ export function date(value: string | null | undefined): string {
   return d.toLocaleDateString('en-CA', { timeZone: BUSINESS_TIMEZONE });
 }
 
+/**
+ * The clock time of an instant, in Jamaica - "3:16 pm".
+ *
+ * Slicing the ISO string gave the UTC time: a round started at 10:16 pm in
+ * Kingston read as "03:16".
+ */
+export function time(value: string | null | undefined): string {
+  if (!value) return '—';
+  const d = new Date(String(value));
+  if (Number.isNaN(d.getTime())) return '—';
+  return d.toLocaleTimeString('en-JM', {
+    timeZone: BUSINESS_TIMEZONE, hour: 'numeric', minute: '2-digit',
+  });
+}
+
 /** Colour token for an invoice status chip. */
 export function statusTone(status: string): string {
   switch (status) {
@@ -77,4 +92,42 @@ export function statusTone(status: string): string {
     case 'Cancelled': return 'muted';
     default: return 'neutral';
   }
+}
+
+/** A business date as people say it: "Tue 29 Sep". Taken as written, no timezone shift. */
+export function day(value: string | null | undefined): string {
+  if (!value) return '—';
+  const iso = date(value);
+  const d = new Date(`${iso}T12:00:00Z`);
+  if (Number.isNaN(d.getTime())) return iso;
+  const wd = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][d.getUTCDay()];
+  const mo = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][d.getUTCMonth()];
+  return `${wd} ${d.getUTCDate()} ${mo}`;
+}
+
+/** "today", "yesterday", "tomorrow", or the day itself, against the business day. */
+export function relDay(value: string | null | undefined, today: string = todayInJamaica()): string {
+  if (!value) return '—';
+  const a = Date.parse(`${date(value)}T12:00:00Z`);
+  const b = Date.parse(`${date(today)}T12:00:00Z`);
+  const diff = Math.round((a - b) / 86_400_000);
+  if (diff === 0) return 'today';
+  if (diff === -1) return 'yesterday';
+  if (diff === 1) return 'tomorrow';
+  return day(value);
+}
+
+/**
+ * A date for reading, not for sums: "Tue 29 Sep" this year, "29 Sep 2025"
+ * for any other year. Every screen uses this for display; `date()` stays for
+ * comparisons, date boxes and exports, which need 2026-09-29.
+ */
+export function when(value: string | null | undefined): string {
+  if (!value) return '—';
+  const iso = date(value);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(iso)) return iso;
+  if (iso.slice(0, 4) === todayInJamaica().slice(0, 4)) return day(iso);
+  const d = new Date(`${iso}T12:00:00Z`);
+  const mo = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][d.getUTCMonth()];
+  return `${d.getUTCDate()} ${mo} ${d.getUTCFullYear()}`;
 }

@@ -216,4 +216,23 @@ describe('Order listing', () => {
     const cancelled = await listOrders(f.db, { status: 'Cancelled' }) as Array<{ status: string }>;
     assert.ok(cancelled.every((o) => o.status === 'Cancelled'));
   });
+
+  test('each order says what is on it and which round it is on', async () => {
+    const order = await createOrder(f.db, f.office, {
+      customerId: f.customerId, deliveryMode: 'Delivery',
+      requestedDeliveryDate: '2027-06-02',
+      lines: [{ productId: f.fiveGalProductId, looseBottles: 3 }],
+    });
+    const rows = await listOrders(f.db, { customerId: f.customerId, limit: 500 }) as Array<{
+      id: string; lines_summary: string; sheet_id: string | null; stop_id: string | null;
+      stop_outcome: string | null; sheet_status: string | null; today: string;
+    }>;
+    const row = rows.find((r) => r.id === order.id)!;
+    assert.match(row.lines_summary, /^3 x /);
+    assert.equal(row.sheet_id, order.deliverySheetId);
+    assert.ok(row.stop_id);
+    assert.equal(row.stop_outcome, 'Pending');
+    assert.equal(row.sheet_status, 'Open');
+    assert.ok(row.today, 'the business day comes with the list');
+  });
 });

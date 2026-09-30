@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { api, type Session } from '../lib/api';
-import { date } from '../lib/format';
+import { date, when } from '../lib/format';
 
 interface Pool {
   id: string; label: string;
@@ -58,6 +58,16 @@ export default function BottlePool({ session }: { session: Session }) {
   }
 
   const totalOut = holdings.reduce((s, h) => s + Number(h.holding), 0);
+
+  /*
+   * The pool's own count of bottles out can be larger than what deliveries
+   * trace to named customers: the opening balance entered at go-live, and
+   * any adjustment since, belong to nobody in particular. Without this line
+   * the headline said 1,217 out and the table below totalled 11, with
+   * nothing to say why.
+   */
+  const poolOut = pools.reduce((s, p) => s + Number(p.filledWithCustomer), 0);
+  const untraced = poolOut - totalOut;
 
   return (
     <>
@@ -173,9 +183,27 @@ export default function BottlePool({ session }: { session: Session }) {
         {holdings.length === 0
           ? <p className="muted">No bottles have been delivered yet.</p>
           : (
-            <div className="total-line grand">
-              <span>Total out with customers</span><span>{totalOut}</span>
-            </div>
+            <>
+              <div className="total-line">
+                <span>Traced to customers above</span><span>{totalOut.toLocaleString('en-JM')}</span>
+              </div>
+              {untraced !== 0 && (
+                <div className="total-line">
+                  <span>
+                    {untraced > 0 ? 'Not traced to a customer' : 'Difference to check'}
+                    <div className="muted small">
+                      {untraced > 0
+                        ? 'opening balance and adjustments, recorded on the pool but not against any delivery'
+                        : 'deliveries trace more bottles out than the pool count shows - a pool adjustment may be due'}
+                    </div>
+                  </span>
+                  <span>{untraced.toLocaleString('en-JM')}</span>
+                </div>
+              )}
+              <div className="total-line grand">
+                <span>Total out with customers</span><span>{poolOut.toLocaleString('en-JM')}</span>
+              </div>
+            </>
           )}
       </div>
 
@@ -191,7 +219,7 @@ export default function BottlePool({ session }: { session: Session }) {
           <tbody>
             {history.map((m) => (
               <tr key={m.id}>
-                <td>{date(m.txn_day)}</td>
+                <td>{when(m.txn_day)}</td>
                 <td>
                   <span className={`chip ${
                     m.reference_type === 'BottleReturn' ? 'ok'

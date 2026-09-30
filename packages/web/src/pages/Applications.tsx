@@ -136,14 +136,14 @@ export default function Applications({ session }: { session: Session }) {
           {a.status === 'Pending' ? (
             isAdmin ? (
               <>
-                <button className="secondary" disabled={busy}
+                <button className={openFor === a.id ? 'secondary' : 'approve-soft'} disabled={busy}
                         onClick={() => {
                           setOpenFor(openFor === a.id ? null : a.id);
                           setTerms({ priceTierId: '', deliveryZone: '', paymentTerms: '' });
                         }}>
                   {openFor === a.id ? 'Cancel' : 'Approve…'}
                 </button>{' '}
-                <button className="secondary" disabled={busy} onClick={() => decline(a)}>
+                <button className="danger-soft" disabled={busy} onClick={() => decline(a)}>
                   Decline
                 </button>
               </>
@@ -195,7 +195,7 @@ export default function Applications({ session }: { session: Session }) {
                 </select>
               </div>
               <div className="field">
-                <button disabled={busy} onClick={() => approve(a)}>
+                <button className="approve-soft" disabled={busy} onClick={() => approve(a)}>
                   Approve and invite
                 </button>
               </div>
