@@ -692,6 +692,7 @@ export function setMailSinkForTests(fn: typeof mailSink): void { mailSink = fn; 
  */
 export function mailConfigured(): boolean {
   if (mailSink) return true;
+  if (process.env.RESEND_API_KEY && process.env.MAIL_FROM) return true;
   return !!(process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS);
 }
 
@@ -704,6 +705,38 @@ const NOT_SET_UP =
 export async function sendMail(m: MailMessage): Promise<void> {
   if (!mailConfigured()) throw new RuleViolation(NOT_SET_UP);
   if (mailSink) { await mailSink(m); return; }
+
+  /*
+   * On a web host, send through Resend's web API rather than SMTP. Railway
+   * (like many hosts) blocks outgoing SMTP on its smaller plans, so the
+   * office PC keeps using the mail account in the settings file while the
+   * hosted copy uses RESEND_API_KEY. Replies go to MAIL_REPLY_TO when set.
+   */
+  if (process.env.RESEND_API_KEY) {
+    const res = await fetch('https://api.resend.com/emails', {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${process.env.RESEND_API_KEY}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        from: process.env.MAIL_FROM,
+        to: [m.to],
+        subject: m.subject,
+        text: m.text,
+        ...(process.env.MAIL_REPLY_TO ? { reply_to: process.env.MAIL_REPLY_TO } : {}),
+        attachments: (m.attachments ?? []).map((a) => ({
+          filename: a.filename, content: a.content.toString('base64'),
+        })),
+      }),
+    });
+    if (!res.ok) {
+      const detail = await res.text().catch(() => '');
+      throw new RuleViolation(`the email could not be sent (${res.status}): ${detail.slice(0, 200)}`);
+    }
+    return;
+  }
+
   const port = Number(process.env.SMTP_PORT ?? 587);
   const transport = createTransport({
     host: process.env.SMTP_HOST,

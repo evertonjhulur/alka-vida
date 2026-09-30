@@ -37,6 +37,15 @@ SMTP_PASS=
 # What customers see in the From line. Leave blank to use SMTP_USER.
 MAIL_FROM=
 
+# ---------------------------------------------------------------------------
+# On the web host (Railway) instead of SMTP
+# ---------------------------------------------------------------------------
+# Railway blocks SMTP on its smaller plans, so the hosted copy sends through
+# Resend (resend.com). Set these in Railway's Variables, not here:
+#   RESEND_API_KEY=re_...
+#   MAIL_FROM=Alka Vida <orders@yourdomain.com>
+#   MAIL_REPLY_TO=orders@yourdomain.com
+
 
 # ---------------------------------------------------------------------------
 # Advanced - you almost certainly do not need these

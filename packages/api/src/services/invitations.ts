@@ -19,7 +19,7 @@
  */
 
 import { createHash, randomBytes } from 'node:crypto';
-import { createTransport } from 'nodemailer';
+import { mailConfigured, sendMail } from './documents.ts';
 import type { Db } from '../db/index.ts';
 import type { Actor } from './core.ts';
 import { audit, requireRole } from './core.ts';
@@ -42,9 +42,7 @@ export const UNUSABLE_PASSWORD = 'invited-not-yet-set';
 
 const hashToken = (token: string) => createHash('sha256').update(token).digest('hex');
 
-export function mailConfigured(): boolean {
-  return Boolean(process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS);
-}
+export { mailConfigured };
 
 /** Where the customer should be sent. Configurable for a real deployment. */
 function portalBaseUrl(): string {
@@ -190,14 +188,7 @@ export async function emailInvitation(
     return { sent: false, reason: 'no mail account is set up on this machine' };
   }
   try {
-    const transport = createTransport({
-      host: process.env.SMTP_HOST,
-      port: Number(process.env.SMTP_PORT ?? 587),
-      secure: Number(process.env.SMTP_PORT ?? 587) === 465,
-      auth: { user: process.env.SMTP_USER!, pass: process.env.SMTP_PASS! },
-    });
-    await transport.sendMail({
-      from: process.env.MAIL_FROM ?? process.env.SMTP_USER,
+    await sendMail({
       to,
       subject: 'Your Alka Vida account',
       text:
