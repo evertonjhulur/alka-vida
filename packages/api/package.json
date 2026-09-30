@@ -8,7 +8,8 @@
     "start": "node src/server.ts",
     "migrate": "node src/db/migrate.ts",
     "seed": "node src/db/seed.ts",
-    "test": "node --test --test-concurrency=1 \"test/*.test.ts\""
+    "test": "node --test --test-concurrency=1 \"test/*.test.ts\"",
+    "start:railway": "PORT=3001 node src/server.ts"
   },
   "dependencies": {
     "@alka/shared": "*",
