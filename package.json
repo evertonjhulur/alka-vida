@@ -4,9 +4,16 @@
   "version": "1.0.0",
   "description": "Operations system for 1506 Investments Limited (Alka Vida water brand)",
   "type": "module",
-  "workspaces": ["packages/shared", "packages/api", "packages/web"],
-  "engines": { "node": ">=24" },
+  "workspaces": [
+    "packages/shared",
+    "packages/api",
+    "packages/web"
+  ],
+  "engines": {
+    "node": ">=24"
+  },
   "scripts": {
+    "start": "npm run start:railway -w @alka/api",
     "test": "npm run test --workspaces --if-present",
     "migrate": "npm run migrate -w @alka/api",
     "dev:api": "npm run dev -w @alka/api",

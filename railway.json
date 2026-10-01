@@ -5,7 +5,7 @@
     "watchPatterns": ["/**"]
   },
   "deploy": {
-    "startCommand": "PORT=3001 npm start -w @alka/api",
+    "startCommand": "npm run start:railway -w @alka/api",
     "numReplicas": 1,
     "restartPolicyType": "ON_FAILURE",
     "restartPolicyMaxRetries": 5
