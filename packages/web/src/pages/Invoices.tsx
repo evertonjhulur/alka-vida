@@ -2,12 +2,15 @@ import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../lib/api';
 import { money, date, statusTone, when } from '../lib/format';
+import { downloadCsv, dollars } from '../lib/csv';
 
 interface Row {
   invoice_id: string; invoice_number: string; invoice_date: string;
   customer_name: string;
   grand_total_cents: number; amount_paid_cents: number;
   balance_cents: number; status: string;
+  due_date?: string | null; is_credit_note?: boolean;
+  subtotal_cents?: number; gct_cents?: number; discount_amount_cents?: number;
 }
 
 interface Waiting {
@@ -36,6 +39,8 @@ export default function Invoices() {
   }
   const [status, setStatus] = useState('');
   const [search, setSearch] = useState('');
+  const [from, setFrom] = useState('');
+  const [to, setTo] = useState('');
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -44,9 +49,22 @@ export default function Invoices() {
   }, [status]);
 
   const q = search.trim().toLowerCase();
-  const shown = q === '' ? rows : rows.filter(
-    (r) => r.invoice_number.toLowerCase().includes(q)
-      || (r.customer_name ?? '').toLowerCase().includes(q));
+  const shown = rows.filter((r) => (q === '' || r.invoice_number.toLowerCase().includes(q)
+      || (r.customer_name ?? '').toLowerCase().includes(q))
+    && (!from || date(r.invoice_date) >= from) && (!to || date(r.invoice_date) <= to));
+
+  /** The list as it is filtered on screen, for Excel (team feedback, point 13). */
+  function exportList() {
+    downloadCsv(`invoices${from || to ? `-${from || 'start'}-to-${to || 'today'}` : ''}`, [
+      ['Invoice', 'Customer', 'Date', 'Due', 'Type', 'Subtotal', 'Discount', 'GCT', 'Total', 'Paid', 'Balance', 'Status'],
+      ...shown.map((r) => [
+        r.invoice_number, r.customer_name, date(r.invoice_date), r.due_date ? date(r.due_date) : '',
+        r.is_credit_note ? 'Credit note' : 'Invoice',
+        dollars(r.subtotal_cents), dollars(r.discount_amount_cents), dollars(r.gct_cents),
+        dollars(r.grand_total_cents), dollars(r.amount_paid_cents), dollars(r.balance_cents), r.status,
+      ]),
+    ]);
+  }
 
   return (
     <>
@@ -104,12 +122,25 @@ export default function Invoices() {
             ))}
           </select>
         </div>
+        <div className="field">
+          <label htmlFor="ifrom">From</label>
+          <input id="ifrom" type="date" value={from} onChange={(e) => setFrom(e.target.value)} />
+        </div>
+        <div className="field">
+          <label htmlFor="ito">To</label>
+          <input id="ito" type="date" value={to} onChange={(e) => setTo(e.target.value)} />
+        </div>
+        <div className="field" style={{ alignSelf: 'flex-end' }}>
+          <button type="button" className="secondary" disabled={shown.length === 0} onClick={exportList}>
+            Export to Excel ({shown.length})
+          </button>
+        </div>
         </div>
 
         <table>
           <thead>
             <tr>
-              <th>Invoice</th><th>Customer</th><th>Date</th><th className="num">Total</th>
+              <th>Invoice</th><th>Customer</th><th>Date</th><th>Due</th><th className="num">Total</th>
               <th className="num">Paid</th><th className="num">Balance</th><th>Status</th>
             </tr>
           </thead>
@@ -119,6 +150,7 @@ export default function Invoices() {
                 <td><Link to={`/invoices/${r.invoice_id}`}>{r.invoice_number}</Link></td>
                 <td>{r.customer_name}</td>
                 <td>{when(r.invoice_date)}</td>
+                <td>{r.is_credit_note || !r.due_date ? '—' : when(r.due_date)}</td>
                 <td className="num">{money(Number(r.grand_total_cents))}</td>
                 <td className="num">{money(Number(r.amount_paid_cents))}</td>
                 <td className="num">{money(Number(r.balance_cents))}</td>

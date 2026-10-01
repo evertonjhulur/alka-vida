@@ -1116,3 +1116,35 @@ label.check input { width: auto; margin: 0; }
 .addr-card { border: 1px solid var(--line); border-radius: 6px; padding: 10px 12px; margin-bottom: 8px; }
 .addr-card .chip { margin-left: 6px; }
 .quote-public { max-width: 760px; margin: 24px auto; padding: 0 16px; }
+
+/* ---------- Team feedback round, 1 Oct 2026 ---------- */
+.topbar-tabs.many { grid-template-columns: repeat(3, 1fr); }
+.topbar-tabs.many a { font-size: 13px; padding: 0 6px; min-height: 36px; }
+.portal-figures { grid-template-columns: repeat(3, 1fr); }
+.portal-home { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; align-items: start; }
+.portal-home > .panel { margin: 0; }
+.news-item { padding: 10px 0; border-bottom: 1px solid #eef1f4; }
+.news-item:last-child { border-bottom: 0; }
+.news-head { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.news-body { margin: 6px 0 4px; white-space: pre-line; }
+a.button-link.whatsapp, button.whatsapp { background: #1fa855; border-color: #1fa855; color: #fff; }
+a.button-link.whatsapp:hover { background: #178a45; }
+.addr-row { display: flex; justify-content: space-between; gap: 12px; align-items: center; padding: 10px 0; border-top: 1px solid #eef1f4; }
+.portal-sum .total-line.grand { font-size: 20px; }
+.stop-notes { margin-top: 4px; padding: 4px 8px; background: #fff8e6; border-left: 3px solid #e3a008; border-radius: 4px; font-size: 13px; white-space: pre-line; }
+.alloc-table input[type=number] { width: 120px; }
+.filter-row { display: flex; flex-wrap: wrap; gap: 10px; align-items: flex-end; }
+.filter-row .field { margin-bottom: 0; }
+.count-sheet td input { width: 90px; }
+.count-sheet td input.note { width: 100%; min-width: 180px; }
+.count-sheet tr.off td { background: #fffaf3; }
+.explain { background: #f6f9fc; border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; }
+.explain ol { margin: 6px 0 0 18px; padding: 0; }
+.explain li { margin: 3px 0; }
+@media (max-width: 760px) {
+  .portal-home { grid-template-columns: 1fr; }
+  .portal-figures { grid-template-columns: repeat(3, 1fr); gap: 6px; }
+  .portal-figures .fig { padding: 8px; }
+  .portal-figures .fig-value { font-size: 17px; }
+}
+.group-row td { background: #f6f8fa; font-size: 13px; }

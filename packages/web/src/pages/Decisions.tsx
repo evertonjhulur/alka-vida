@@ -37,10 +37,24 @@ type Filter = 'all' | 'money' | 'accounts';
 
 const TYPE_LABEL: Record<string, string> = {
   Discount: 'Discount', CreditNote: 'Credit note', StopCorrection: 'Stop correction',
+  SameDayOrder: 'Same-day order', PaymentChange: 'Payment change',
 };
 const TYPE_TONE: Record<string, string> = {
-  Discount: 'warn', CreditNote: 'info', StopCorrection: 'neutral',
+  Discount: 'warn', CreditNote: 'info', StopCorrection: 'neutral', SameDayOrder: 'info', PaymentChange: 'warn',
 };
+const METHOD_OK = (v: unknown) => String(v);
+/** A payment change, in words: "amount 450.00, dated 2026-09-30, to another customer". */
+function describeChange(p: Record<string, unknown> | null): string {
+  if (!p) return '';
+  const bits: string[] = [];
+  if (p.amountCents !== undefined) bits.push(`amount ${money(Number(p.amountCents))}`);
+  if (p.paymentDate) bits.push(`dated ${when(String(p.paymentDate))}`);
+  if (p.method) bits.push(`by ${METHOD_OK(p.method).toLowerCase()}`);
+  if (p.reference !== undefined) bits.push(`reference "${p.reference ?? ''}"`);
+  if (p.customerId) bits.push('moved to another customer');
+  if (p.invoiceId !== undefined) bits.push(p.invoiceId ? 'put against another invoice' : 'left on the account');
+  return bits.join(', ');
+}
 const FIELD_LABEL: Record<string, string> = {
   paymentAmountCents: 'Cash collected',
   bottlesDeliveredFull: 'Bottles delivered',
@@ -170,10 +184,18 @@ export default function Decisions({ session }: { session: Session }) {
         {r.requestType === 'StopCorrection' && (
           <div className="small">Change to: {describe(r.payload)}</div>
         )}
+        {r.requestType === 'PaymentChange' && (
+          <div className="small">Change to: {describeChange(r.payload)}</div>
+        )}
+        {r.requestType === 'SameDayOrder' && (
+          <div className="small">Approve to put it on today's round. Reject and it goes on their next delivery day instead (it is not cancelled).</div>
+        )}
       </div>
       <div className="decision-amount">
         {r.requestType === 'StopCorrection' ? (
           <span className="muted small">figures on the stop</span>
+        ) : r.requestType === 'SameDayOrder' || r.requestType === 'PaymentChange' ? (
+          <strong>{money(r.amountCents)}</strong>
         ) : (
           <>
             <strong>−{money(r.amountCents)}</strong>
@@ -184,8 +206,12 @@ export default function Decisions({ session }: { session: Session }) {
       <div className="decision-actions">
         {isAdmin ? (
           <>
-            <button className="approve-soft" disabled={busy} onClick={() => review(r, 'Approved')}>Approve</button>
-            <button className="danger-soft" disabled={busy} onClick={() => review(r, 'Rejected')}>Reject</button>
+            <button className="approve-soft" disabled={busy} onClick={() => review(r, 'Approved')}>
+              {r.requestType === 'SameDayOrder' ? 'Deliver today' : 'Approve'}
+            </button>
+            <button className="danger-soft" disabled={busy} onClick={() => review(r, 'Rejected')}>
+              {r.requestType === 'SameDayOrder' ? 'Next delivery day' : 'Reject'}
+            </button>
           </>
         ) : <span className="muted small">an administrator decides</span>}
       </div>

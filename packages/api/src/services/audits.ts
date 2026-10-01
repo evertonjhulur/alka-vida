@@ -22,7 +22,11 @@ import { RuleViolation, drawFifo, blendedAverageCost, type Batch } from '@alka/s
 export interface CountInput {
   itemType: 'RawMaterial' | 'FinishedGoods';
   itemId: string;
-  countedQty: number;
+  /** Units (raw materials) or bottles (finished goods). */
+  countedQty?: number;
+  /** Finished goods: full cases and loose bottles; countedQty is worked out. */
+  countedCases?: number | null;
+  countedLoose?: number | null;
   damagedQty?: number;
   notes?: string | null;
 }
@@ -37,30 +41,54 @@ export async function recordCount(
   usableQty: number; discrepancy: number;
 }> {
   requireRole(actor, 'admin', 'user');
-  if (input.countedQty < 0) throw new RuleViolation('a counted quantity cannot be negative');
-  const damaged = input.damagedQty ?? 0;
-  if (damaged < 0) throw new RuleViolation('a damaged quantity cannot be negative');
-  if (damaged > input.countedQty) {
-    throw new RuleViolation('damaged units cannot exceed the number counted');
-  }
 
   return db.tx(async (t) => {
+    // Finished goods are counted the way they sit on the floor: full cases,
+    // then any loose bottles from the run (team feedback, point 20).
+    let counted = Number(input.countedQty ?? 0);
+    let cases: number | null = null;
+    let loose: number | null = null;
+    if (input.itemType === 'FinishedGoods' && (input.countedCases != null || input.countedLoose != null)) {
+      const p = await t.one<{ bottles_per_case: number }>(
+        `SELECT bottles_per_case FROM products WHERE id = $1`, [input.itemId],
+      );
+      cases = Math.max(0, Math.round(Number(input.countedCases) || 0));
+      loose = Math.max(0, Math.round(Number(input.countedLoose) || 0));
+      const bpc = num(p.bottles_per_case);
+      counted = bpc > 0 ? cases * bpc + loose : loose + cases;
+    }
+    if (!Number.isFinite(counted) || counted < 0) throw new RuleViolation('a counted quantity cannot be negative');
+    const damaged = input.damagedQty ?? 0;
+    if (damaged < 0) throw new RuleViolation('a damaged quantity cannot be negative');
+    if (damaged > counted) {
+      throw new RuleViolation('damaged units cannot exceed the number counted');
+    }
+
     const { name, systemQty } = await currentStock(t, input.itemType, input.itemId);
-    const usable = input.countedQty - damaged;
+    const usable = counted - damaged;
     const discrepancy = usable - systemQty;
+    // A difference has to be explained before it is saved (point 20): that
+    // explanation is what the variance report is for.
+    if (Math.abs(discrepancy) > 1e-9 && !input.notes?.trim()) {
+      throw new RuleViolation(
+        `${name}: the count is ${discrepancy > 0 ? 'over' : 'short'} by ${Math.abs(Math.round(discrepancy * 1000) / 1000)}. `
+        + 'Say why in the notes before saving it.',
+      );
+    }
 
     const row = await t.one<{ id: string }>(
       `INSERT INTO inventory_audits
          (item_type, item_id, item_name, system_qty, counted_qty,
-          damaged_qty, discrepancy, notes)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+          damaged_qty, discrepancy, notes, counted_cases, counted_loose, counted_by)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
        RETURNING id`,
       [input.itemType, input.itemId, name, systemQty,
-       input.countedQty, damaged, discrepancy, input.notes ?? null],
+       counted, damaged, discrepancy, input.notes?.trim() || null, cases, loose, actor.name],
     );
+    input = { ...input, countedQty: counted };
 
     await writeAudit(t, actor, 'create', 'InventoryAudit', row.id, name, {
-      itemType: input.itemType, systemQty, countedQty: input.countedQty,
+      itemType: input.itemType, systemQty, countedQty: counted,
       damagedQty: damaged, discrepancy, stockChanged: false,
     });
 
@@ -219,9 +247,9 @@ export async function reconcileCount(
     await t.query(
       `UPDATE inventory_audits
        SET status = 'Reconciled', system_qty = $2, discrepancy = $3,
-           notes = COALESCE(notes,'') || $4
+           notes = COALESCE(notes,'') || $4, reconciled_by = $5, reconciled_at = now()
        WHERE id = $1`,
-      [auditId, systemQty, delta, trail],
+      [auditId, systemQty, delta, trail, actor.name],
     );
 
     await writeAudit(t, actor, 'adjust', 'InventoryAudit', auditId, a.item_name, {
@@ -350,11 +378,89 @@ async function currentStock(
   return { name: p.name, systemQty: num(p.qty) };
 }
 
-export async function listAudits(db: Db, status?: 'Open' | 'Reconciled') {
+export async function listAudits(
+  db: Db, status?: 'Open' | 'Reconciled', range: { from?: string | null; to?: string | null } = {},
+) {
   return db.query(
-    `SELECT * FROM inventory_audits
-     WHERE ($1::text IS NULL OR status = $1)
-     ORDER BY audit_date DESC, item_name`,
-    [status ?? null],
+    `SELECT a.*, a.audit_date::text AS audit_date, p.bottles_per_case,
+            rm.unit_of_measure,
+            (a.counted_qty - a.damaged_qty) AS usable_qty
+     FROM inventory_audits a
+     LEFT JOIN products p ON a.item_type = 'FinishedGoods' AND p.id = a.item_id
+     LEFT JOIN raw_materials rm ON a.item_type = 'RawMaterial' AND rm.id = a.item_id
+     WHERE ($1::text IS NULL OR a.status = $1)
+       AND ($2::date IS NULL OR a.audit_date >= $2::date)
+       AND ($3::date IS NULL OR a.audit_date <= $3::date)
+     ORDER BY a.audit_date DESC, a.counted_at DESC, a.item_name`,
+    [status ?? null, range.from || null, range.to || null],
   );
+}
+
+/**
+ * Stock on hand, the way the floor is counted (team feedback, point 20).
+ *
+ * Finished goods in full cases plus the loose bottles left from a run - the
+ * loose ones are assumed to go into the next case run, so they are shown
+ * separately rather than as a fraction of a case. Raw materials as plain
+ * units, with how many cases of each product that uses them they would make.
+ */
+export async function stockSnapshot(db: Db) {
+  const goods = await db.query<{
+    product_id: string; name: string; size: string | null; bottles_per_case: number; bottles: number;
+    is_returnable: boolean; last_counted: string | null;
+  }>(
+    `SELECT p.id AS product_id, p.name, p.size, p.bottles_per_case, p.is_returnable,
+            COALESCE(f.quantity_on_hand, 0)::int AS bottles,
+            (SELECT MAX(audit_date)::text FROM inventory_audits a
+              WHERE a.item_type = 'FinishedGoods' AND a.item_id = p.id) AS last_counted
+     FROM products p LEFT JOIN finished_goods_stock f ON f.product_id = p.id
+     WHERE p.active ORDER BY p.name`,
+  );
+  const materials = await db.query<{
+    id: string; name: string; unit_of_measure: string; quantity_on_hand: number;
+    reorder_point: number | null; category: string | null; last_counted: string | null;
+  }>(
+    `SELECT rm.id, rm.name, rm.unit_of_measure, rm.quantity_on_hand, rm.reorder_point,
+            rm.category,
+            (SELECT MAX(audit_date)::text FROM inventory_audits a
+              WHERE a.item_type = 'RawMaterial' AND a.item_id = rm.id) AS last_counted
+     FROM raw_materials rm LEFT JOIN material_categories mc ON mc.name = rm.category
+     WHERE rm.retired_at IS NULL OR rm.quantity_on_hand > 0
+     ORDER BY mc.sort_order NULLS LAST, rm.category NULLS LAST, rm.name`,
+  );
+  const bom = await db.query<{ raw_material_id: string; product_id: string; product_name: string;
+    quantity: number; bottles_per_case: number }>(
+    `SELECT b.raw_material_id, b.product_id, p.name AS product_name, b.quantity, p.bottles_per_case
+     FROM bom_line_items b JOIN products p ON p.id = b.product_id WHERE p.active`,
+  );
+  return {
+    finishedGoods: goods.map((g) => {
+      const bpc = num(g.bottles_per_case);
+      const bottles = num(g.bottles);
+      return {
+        productId: g.product_id, name: g.name, size: g.size, bottlesPerCase: bpc,
+        bottles, isReturnable: g.is_returnable,
+        cases: bpc > 0 ? Math.floor(Math.max(bottles, 0) / bpc) : null,
+        loose: bpc > 0 ? Math.max(bottles, 0) % bpc : bottles,
+        lastCounted: g.last_counted,
+      };
+    }),
+    rawMaterials: materials.map((m) => {
+      const onHand = num(m.quantity_on_hand);
+      const makes = bom.filter((b) => b.raw_material_id === m.id && num(b.quantity) > 0).map((b) => {
+        const perCase = num(b.quantity) * (num(b.bottles_per_case) > 0 ? num(b.bottles_per_case) : 1);
+        return {
+          productId: b.product_id, productName: b.product_name,
+          perCase: Math.round(perCase * 1000) / 1000,
+          cases: Math.floor(Math.max(onHand, 0) / perCase),
+          unit: num(b.bottles_per_case) > 0 ? 'cases' : 'bottles',
+        };
+      });
+      return {
+        id: m.id, name: m.name, unit: m.unit_of_measure, onHand, category: m.category,
+        reorderPoint: m.reorder_point === null ? null : num(m.reorder_point),
+        lastCounted: m.last_counted, makes,
+      };
+    }),
+  };
 }

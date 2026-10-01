@@ -14,7 +14,7 @@
 
 import type { Db, Queryable } from '../db/index.ts';
 import type { Actor } from './core.ts';
-import { audit, nextNumber, requireRole, num } from './core.ts';
+import { audit, nextNumber, requireRole, num, termsDays } from './core.ts';
 import type { Cents, InvoiceStatus } from '@alka/shared';
 import { computeTotals, computeLineTotal, RuleViolation, GCT_RATE } from '@alka/shared';
 
@@ -142,13 +142,19 @@ export async function createInvoice(
         discount_percent, discount_amount_cents, discount_status,
         gct_cents, grand_total_cents, notes,
         discount_fixed_cents, gct_exempt, cycle, period_from, period_to)
-     VALUES ($1,$2,COALESCE($3::date,business_today()),$4,$5,$6,$7,$8,$9,$10,$11,
+     VALUES ($1,$2,COALESCE($3::date,business_today()),
+             COALESCE($4::date, COALESCE($3::date,business_today()) + $17::int),
+             $5,$6,$7,$8,$9,$10,$11,
              $12,$13,$14,$15,$16)
      RETURNING id`,
     [invoiceNumber, args.customerId, args.invoiceDate ?? null, args.dueDate ?? null,
      totals.subtotal, pct, totals.discountAmount, discountStatus,
      totals.gct, totals.grandTotal, args.notes ?? null,
-     fixed, gctExempt, args.cycle ?? null, args.periodFrom ?? null, args.periodTo ?? null],
+     fixed, gctExempt, args.cycle ?? null, args.periodFrom ?? null, args.periodTo ?? null,
+     // Every invoice is due on a day (team feedback, 1 Oct 2026, point 5):
+     // the customer's terms, "Net 30" = 30 days, cash / on receipt = same day.
+     termsDays((await t.one<{ payment_terms: string | null }>(
+       `SELECT payment_terms FROM customers WHERE id = $1`, [args.customerId])).payment_terms)],
   );
 
   await insertLines(t, invoice.id, priced);
@@ -510,7 +516,7 @@ export async function getInvoiceDetail(db: Db, invoiceId: string) {
   );
   const orders = await db.query(
     `SELECT o.id, o.order_number, o.delivery_mode, o.order_date::text AS order_date,
-            o.requested_delivery_date::text AS requested_delivery_date, o.status
+            o.requested_delivery_date::text AS requested_delivery_date, o.status, o.customer_po
      FROM invoice_orders io JOIN customer_orders o ON o.id = io.order_id
      WHERE io.invoice_id = $1 ORDER BY o.order_number`, [invoiceId],
   );

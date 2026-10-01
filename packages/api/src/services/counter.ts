@@ -20,6 +20,38 @@ import { createInvoice, getInvoiceLedger } from './invoices.ts';
 import { insertPayment } from './payments.ts';
 import { refreshOrderStatus } from './orders.ts';
 import { billedOnCycle } from './delivery.ts';
+import { takeFinishedGoods, deliveredBottles } from './stockmoves.ts';
+import { applyDeliveryMovement } from './bottles.ts';
+
+/**
+ * Goods going out of the door at the counter or on a collection: take them
+ * off finished-goods stock, and move any 5-gallon bottles - out to the
+ * customer, and any empties they handed in back to the pool - recording both
+ * against the customer as a delivery stop would (team feedback, point 12).
+ */
+async function goodsLeave(
+  t: Queryable, actor: Actor, orderId: string, customerId: string, emptiesBack: number,
+): Promise<void> {
+  const o = await t.one<{ order_number: string; delivery_mode: string }>(
+    `SELECT order_number, delivery_mode FROM customer_orders WHERE id = $1`, [orderId],
+  );
+  const lines = await deliveredBottles(t, orderId);
+  await takeFinishedGoods(t, lines, o.order_number,
+    o.delivery_mode === 'Counter' ? 'Counter sale' : 'Collected at the plant');
+  const out = lines.reduce((sum, l) => sum + l.returnable, 0);
+  const back = Math.max(0, Math.round(Number(emptiesBack) || 0));
+  if (out > 0 || back > 0) {
+    const c = await t.maybeOne<{ name: string }>(`SELECT name FROM customers WHERE id = $1`, [customerId]);
+    await applyDeliveryMovement(t, actor, {
+      delivered: out, emptiesPickedUp: back, reference: o.order_number, customerName: c?.name,
+    });
+    await t.query(
+      `INSERT INTO customer_bottle_moves (customer_id, delivered, returned, order_id, reference)
+       VALUES ($1,$2,$3,$4,$5)`,
+      [customerId, out, back, orderId, o.order_number],
+    );
+  }
+}
 
 export interface CounterSaleInput {
   customerId: string;
@@ -32,6 +64,8 @@ export interface CounterSaleInput {
   method?: PaymentMethod;
   notes?: string | null;
   idempotencyKey?: string | null;
+  /** 5-gallon empties the customer handed in with this sale. */
+  emptiesReturned?: number;
 }
 
 export async function counterSale(
@@ -66,6 +100,7 @@ export async function counterSale(
       notes: input.notes ?? 'Counter sale',
       amountPaidCents: input.amountPaidCents ?? 0,
       method: input.method ?? 'Cash',
+      emptiesBack: input.emptiesReturned ?? 0,
     });
 
     const outcome = await withIdempotency(t, input.idempotencyKey, 'counterSale', run);
@@ -99,7 +134,7 @@ async function invoiceAndTakePayment(
   actor: Actor,
   args: {
     orderId: string; customerId: string;
-    notes: string; amountPaidCents: Cents; method: PaymentMethod;
+    notes: string; amountPaidCents: Cents; method: PaymentMethod; emptiesBack?: number;
   },
 ): Promise<{ id: string }> {
   // What is handed over is the whole order, so delivered quantities are the
@@ -113,6 +148,7 @@ async function invoiceAndTakePayment(
   await refreshOrderStatus(t, args.orderId);
   await t.query(`UPDATE customer_orders SET fulfilled_on = business_today() WHERE id = $1`,
     [args.orderId]);
+  await goodsLeave(t, actor, args.orderId, args.customerId, args.emptiesBack ?? 0);
 
   const lines = await t.query<{
     product_id: string; delivered_cases: number; delivered_loose: number;
@@ -188,6 +224,7 @@ export async function collectOrder(
     method?: PaymentMethod;
     notes?: string | null;
     idempotencyKey?: string | null;
+    emptiesReturned?: number;
   },
 ): Promise<{
   invoiceId: string; invoiceNumber: string; grandTotalCents: Cents;
@@ -230,6 +267,7 @@ export async function collectOrder(
       await refreshOrderStatus(t, input.orderId);
       await t.query(`UPDATE customer_orders SET fulfilled_on = business_today() WHERE id = $1`,
         [input.orderId]);
+      await goodsLeave(t, actor, input.orderId, order.customer_id, input.emptiesReturned ?? 0);
       const paid = input.amountPaidCents ?? 0;
       if (paid > 0) {
         await insertPayment(t, actor, {
@@ -255,6 +293,7 @@ export async function collectOrder(
       notes: input.notes ?? `Collected at the plant`,
       amountPaidCents: input.amountPaidCents ?? 0,
       method: input.method ?? 'Cash',
+      emptiesBack: input.emptiesReturned ?? 0,
     });
 
     const outcome = await withIdempotency(t, input.idempotencyKey, 'collectOrder', run);

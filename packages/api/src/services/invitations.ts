@@ -22,7 +22,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { mailConfigured, sendMail } from './documents.ts';
 import type { Db } from '../db/index.ts';
 import type { Actor } from './core.ts';
-import { audit, requireRole } from './core.ts';
+import { audit, requireRole, siteUrl } from './core.ts';
 import { hashPassword } from '../lib/auth.ts';
 import { RuleViolation } from '@alka/shared';
 
@@ -46,7 +46,7 @@ export { mailConfigured };
 
 /** Where the customer should be sent. Configurable for a real deployment. */
 function portalBaseUrl(): string {
-  return (process.env.PORTAL_URL ?? 'http://localhost:3001').replace(/\/+$/, '');
+  return siteUrl();
 }
 
 export const invitationLink = (token: string) =>
@@ -110,10 +110,10 @@ export async function createInvitation(
  */
 export async function inviteeFor(
   db: Db, token: string,
-): Promise<{ name: string; email: string } | null> {
+): Promise<{ name: string; email: string; purpose: string } | null> {
   if (!token) return null;
-  const row = await db.maybeOne<{ name: string; email: string }>(
-    `SELECT u.name, u.email
+  const row = await db.maybeOne<{ name: string; email: string; purpose: string }>(
+    `SELECT u.name, u.email, i.purpose
      FROM user_invitations i JOIN users u ON u.id = i.user_id
      WHERE i.token_hash = $1 AND i.used_at IS NULL AND i.expires_at > now()
        AND u.active`,
@@ -198,6 +198,73 @@ export async function emailInvitation(
         + `${link}\n\n`
         + `The link works once and expires in ${VALID_FOR_DAYS} days.\n\n`
         + 'If you were not expecting this, you can ignore it.\n\n'
+        + '1506 Investments Limited\n',
+    });
+    return { sent: true };
+  } catch (err) {
+    return { sent: false, reason: err instanceof Error ? err.message : 'sending failed' };
+  }
+}
+
+/**
+ * "Forgotten your password?" on the sign-in page (team feedback, 1 Oct 2026).
+ *
+ * Anybody can ask, so the answer never says whether the address has an
+ * account: it is the same whether a link went or not. The link is the same
+ * one-time, hashed kind an invitation uses, valid for a day, and asking again
+ * replaces it. Nothing happens to the current password until the link is used,
+ * so a stranger asking on somebody's behalf achieves nothing.
+ */
+export async function requestPasswordReset(
+  db: Db, email: string,
+): Promise<{ sent: boolean; reason?: string }> {
+  const address = (email ?? '').trim().toLowerCase();
+  if (!address.includes('@')) return { sent: false, reason: 'no address' };
+
+  const user = await db.maybeOne<{ id: string; name: string; email: string }>(
+    `SELECT id, name, email FROM users
+     WHERE lower(email) = $1 AND active AND email NOT LIKE '%@alkavida.local'`,
+    [address],
+  );
+  if (!user) return { sent: false, reason: 'no such login' };
+
+  // One a minute is plenty; this also stops the button being used to flood
+  // somebody's inbox.
+  const recent = await db.maybeOne(
+    `SELECT 1 FROM user_invitations
+     WHERE user_id = $1 AND purpose = 'reset' AND created_at > now() - interval '1 minute'`,
+    [user.id],
+  );
+  if (recent) return { sent: false, reason: 'asked a moment ago' };
+  if (!mailConfigured()) return { sent: false, reason: 'no mail account is set up' };
+
+  const token = randomBytes(TOKEN_BYTES).toString('base64url');
+  const expiresAt = new Date(Date.now() + 24 * 3600 * 1000);
+  await db.tx(async (t) => {
+    await t.query(
+      `UPDATE user_invitations SET used_at = now() WHERE user_id = $1 AND used_at IS NULL`,
+      [user.id],
+    );
+    await t.query(
+      `INSERT INTO user_invitations (user_id, token_hash, expires_at, created_by, purpose)
+       VALUES ($1,$2,$3,$1,'reset')`,
+      [user.id, hashToken(token), expiresAt.toISOString()],
+    );
+    await audit(t, { id: user.id, name: user.name, role: 'customer' },
+      'update', 'User', user.id, user.name, { passwordResetRequested: true });
+  });
+
+  try {
+    await sendMail({
+      to: user.email,
+      subject: 'Reset your Alka Vida password',
+      text:
+        `Good day ${user.name},\n\n`
+        + 'Somebody (hopefully you) asked to reset the password for your Alka Vida '
+        + 'account. Use the link below to choose a new one:\n\n'
+        + `${invitationLink(token)}\n\n`
+        + 'The link works once and expires in 24 hours. If you did not ask for this, '
+        + 'ignore this email: your password has not changed.\n\n'
         + '1506 Investments Limited\n',
     });
     return { sent: true };

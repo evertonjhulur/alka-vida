@@ -310,8 +310,10 @@ export async function salesReport(db: Db, from?: string | null, to?: string | nu
      FROM invoices i WHERE ${SALES_WHERE}`, p,
   );
 
-  const credits = await db.one<{ cents: number; n: number }>(
-    `SELECT COALESCE(SUM(ABS(i.grand_total_cents)),0)::bigint AS cents, COUNT(*)::int AS n
+  const credits = await db.one<{ cents: number; n: number; net: number; gct: number }>(
+    `SELECT COALESCE(SUM(ABS(i.grand_total_cents)),0)::bigint AS cents, COUNT(*)::int AS n,
+            COALESCE(SUM(ABS(i.subtotal_cents) - ABS(i.discount_amount_cents)),0)::bigint AS net,
+            COALESCE(SUM(ABS(i.gct_cents)),0)::bigint AS gct
      FROM invoices i
      WHERE i.is_credit_note AND i.credit_status = 'Approved' AND i.lifecycle <> 'Cancelled'
        AND ($1::date IS NULL OR i.invoice_date >= $1::date)
@@ -370,6 +372,13 @@ export async function salesReport(db: Db, from?: string | null, to?: string | nu
       netCents: num(totals.net), grossCents: num(totals.gross), invoices: num(totals.invoices),
       customers: num(totals.customers), newCustomers: from ? num(totals.new_customers) : null,
       creditNoteCents: num(credits.cents), creditNotes: num(credits.n),
+      creditNoteNetCents: num(credits.net), creditNoteGctCents: num(credits.gct),
+      // Credit notes come OFF sales (team feedback, point 21): these are the
+      // figures to post to QuickBooks for the period.
+      netAfterCreditsCents: num(totals.net) - num(credits.net),
+      grossAfterCreditsCents: num(totals.gross) - num(credits.cents),
+      gctCents: num(totals.gross) - num(totals.net),
+      gctAfterCreditsCents: (num(totals.gross) - num(totals.net)) - num(credits.gct),
     },
     byProduct: byProduct.map((r) => ({
       productId: r.product_id, name: r.name, bottlesPerCase: num(r.bottles_per_case),
@@ -522,4 +531,65 @@ export async function roundsReport(db: Db, from?: string | null, to?: string | n
     },
     rounds,
   };
+}
+
+/**
+ * Every invoice and credit note in the period, one line each, with the order
+ * it came from (team feedback, point 21): what makes up the sales total, and
+ * what to post to QuickBooks. Credit notes are negative, so the columns add
+ * up to the net figures on the Sales report.
+ */
+export async function salesTransactions(db: Db, from?: string | null, to?: string | null) {
+  const rows = await db.query<{
+    invoice_id: string; invoice_number: string; invoice_date: string; is_credit_note: boolean;
+    customer_name: string; customer_id: string; orders: string | null; customer_po: string | null;
+    linked_number: string | null; subtotal_cents: number; discount_cents: number; gct_cents: number;
+    total_cents: number; balance_cents: number; status: string; zone: string | null;
+    delivered_on: string | null; notes: string | null;
+  }>(
+    `SELECT i.id AS invoice_id, i.invoice_number, i.invoice_date::text AS invoice_date, i.is_credit_note,
+            c.name AS customer_name, c.id AS customer_id,
+            (SELECT string_agg(o.order_number, ', ' ORDER BY o.order_number)
+               FROM invoice_orders io JOIN customer_orders o ON o.id = io.order_id
+              WHERE io.invoice_id = i.id) AS orders,
+            (SELECT string_agg(DISTINCT o.customer_po, ', ')
+               FROM invoice_orders io JOIN customer_orders o ON o.id = io.order_id
+              WHERE io.invoice_id = i.id AND o.customer_po IS NOT NULL) AS customer_po,
+            li.invoice_number AS linked_number,
+            i.subtotal_cents,
+            CASE WHEN i.discount_status = 'Approved' THEN i.discount_amount_cents ELSE 0 END AS discount_cents,
+            i.gct_cents, i.grand_total_cents AS total_cents,
+            l.balance_cents, l.status,
+            ds.zone, ds.delivery_date::text AS delivered_on, i.notes
+     FROM invoices i
+     JOIN customers c ON c.id = i.customer_id
+     JOIN invoice_ledger l ON l.invoice_id = i.id
+     LEFT JOIN invoices li ON li.id = i.linked_invoice_id
+     LEFT JOIN LATERAL (
+       SELECT d.zone, d.delivery_date FROM delivery_stops st JOIN delivery_sheets d ON d.id = st.delivery_sheet_id
+        WHERE st.invoice_id = i.id LIMIT 1) ds ON true
+     WHERE i.lifecycle <> 'Cancelled'
+       AND (NOT i.is_credit_note OR i.credit_status = 'Approved')
+       AND ($1::date IS NULL OR i.invoice_date >= $1::date)
+       AND ($2::date IS NULL OR i.invoice_date <= $2::date)
+     ORDER BY i.invoice_date, i.invoice_number`,
+    [from ?? null, to ?? null],
+  );
+  return rows.map((r) => {
+    const sign = r.is_credit_note ? -1 : 1;
+    const subtotal = sign * Math.abs(num(r.subtotal_cents));
+    const discount = sign * Math.abs(num(r.discount_cents));
+    return {
+      invoiceId: r.invoice_id, number: r.invoice_number, date: r.invoice_date,
+      type: r.is_credit_note ? 'Credit note' : 'Invoice',
+      customerId: r.customer_id, customer: r.customer_name,
+      orders: r.orders, customerPo: r.customer_po, against: r.linked_number,
+      subtotalCents: subtotal, discountCents: discount,
+      netCents: subtotal - discount,
+      gctCents: sign * Math.abs(num(r.gct_cents)),
+      totalCents: sign * Math.abs(num(r.total_cents)),
+      balanceCents: num(r.balance_cents), status: r.status,
+      zone: r.zone, deliveredOn: r.delivered_on, notes: r.notes,
+    };
+  });
 }

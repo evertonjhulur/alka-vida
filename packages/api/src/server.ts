@@ -43,6 +43,8 @@ import * as zones from './services/zones.ts';
 import * as labour from './services/labour.ts';
 import { collectOrder, counterSale } from './services/counter.ts';
 import { registerRevisionRoutes } from './routes/revisions.ts';
+import { registerFeedbackRoutes } from './routes/feedback.ts';
+import * as messaging from './services/messaging.ts';
 import * as paperwork from './services/paperwork.ts';
 
 declare module 'fastify' {
@@ -131,6 +133,7 @@ export async function buildServer(db: Db) {
     // requiring a token to fetch the login page itself is a deadlock.
     if (!req.url.startsWith('/api/')) return;
     if (req.url.startsWith('/api/auth/login')) return;
+    if (req.url.startsWith('/api/auth/forgot-password')) return;
     // Answering this is how the browser learns the server is out of date;
     // requiring a token would hide the very problem it exists to report.
     if (req.url.startsWith('/api/version')) return;
@@ -317,9 +320,11 @@ export async function buildServer(db: Db) {
   app.post('/api/portal/orders/:id/repeat', { preHandler: allow('customer') },
     async (req) => {
       const body = req.body as { pattern: RecurrencePattern; endsOn?: string | null };
-      return recurring.startOwnSchedule(db, actorOf(req), portalCustomer(req),
+      const r = await recurring.startOwnSchedule(db, actorOf(req), portalCustomer(req),
         (req.params as { id: string }).id,
         { pattern: body.pattern, endsOn: body.endsOn ?? null });
+      await recurring.generateDueOrders(db, actorOf(req)).catch(() => null);
+      return r;
     });
 
   app.post('/api/portal/recurring/:id/pause', { preHandler: allow('customer') },
@@ -676,24 +681,42 @@ export async function buildServer(db: Db) {
       // the office one. Spreading the request body into createOrder let a
       // customer set a line price - which outranks their tier rate - and a
       // discount. createPortalOrder takes quantities and nothing else.
+      let created: orders.CreateOrderResult;
       if (s.role === 'customer') {
         if (!s.customerId) throw new ForbiddenError('this login is not linked to a customer');
-        return orders.createPortalOrder(db, actorOf(req), s.customerId,
+        created = await orders.createPortalOrder(db, actorOf(req), s.customerId,
           req.body as orders.PortalOrderInput);
+      } else {
+        const body = req.body as orders.CreateOrderInput;
+        // Office staff entering an order for today after the cut-off: it
+        // waits for an administrator, the same as one from the portal.
+        if (body.deliveryMode === 'Delivery' && body.requestedDeliveryDate && !body.parentRecurringId) {
+          const check = await orders.sameDayCheck(db, actorOf(req), body.customerId, 'Delivery',
+            body.requestedDeliveryDate, body.addressId ?? null);
+          if (check.needsReview) body.needsReview = true;
+        }
+        created = await orders.createOrder(db, actorOf(req), body);
       }
-      return orders.createOrder(db, actorOf(req), req.body as orders.CreateOrderInput);
+      // "Thank you for your order" - best effort, after the order is safe.
+      void messaging.sendOrderPlacedEmail(db, created.id).catch(() => {});
+      return created;
     });
 
   app.get('/api/orders', { preHandler: allow('admin', 'user', 'customer') },
     async (req) => {
-      const q = req.query as { status?: string; customerId?: string; limit?: string };
+      const q = req.query as {
+        status?: string; customerId?: string; limit?: string; from?: string; to?: string; dateBy?: string;
+      };
       const s = req.session!;
       // A customer sees their own orders and no one else's, whatever they ask
       // for - the same rule the invoice list follows.
       const customerId = s.role === 'customer' ? s.customerId ?? undefined : q.customerId;
       // Up to 500 for the Orders screen, which filters and counts in the browser.
       const limit = Math.min(Math.max(Number(q.limit) || 100, 1), 500);
-      return orders.listOrders(db, { status: q.status, customerId, limit });
+      return orders.listOrders(db, {
+        status: q.status, customerId, limit, from: q.from || null, to: q.to || null,
+        dateBy: q.dateBy === 'placed' ? 'placed' : 'delivery',
+      });
     });
 
   app.patch('/api/orders/:id', { preHandler: allow('admin', 'user') },
@@ -778,10 +801,14 @@ export async function buildServer(db: Db) {
 
   // Marking a stop must always succeed; nothing about payment gates it.
   app.post('/api/stops/:id/outcome', { preHandler: allow('admin', 'user', 'driver') },
-    async (req) => delivery.markStop(db, actorOf(req), {
-      ...(req.body as delivery.MarkStopInput),
-      stopId: (req.params as { id: string }).id,
-    }));
+    async (req) => {
+      const r = await delivery.markStop(db, actorOf(req), {
+        ...(req.body as delivery.MarkStopInput),
+        stopId: (req.params as { id: string }).id,
+      });
+      if (r.outcome === 'Delivered') void messaging.sendDeliveredEmail(db, r.stopId).catch(() => {});
+      return r;
+    });
 
   // Provisional only. Validated here, and never able to block the stop above.
   app.post('/api/stops/:id/allocation', { preHandler: allow('admin', 'user', 'driver') },
@@ -838,10 +865,13 @@ export async function buildServer(db: Db) {
     const q = req.query as { customerId?: string; status?: string };
     const customerId = s.role === 'customer' ? s.customerId : (q.customerId ?? null);
     return db.query(
-      `SELECT * FROM invoice_ledger
-       WHERE ($1::uuid IS NULL OR customer_id = $1::uuid)
-         AND ($2::text IS NULL OR status = $2)
-       ORDER BY invoice_date DESC, invoice_number DESC`,
+      `SELECT l.*, i.subtotal_cents, i.gct_cents,
+              CASE WHEN i.discount_status = 'Approved' THEN i.discount_amount_cents ELSE 0 END
+                AS discount_amount_cents
+       FROM invoice_ledger l JOIN invoices i ON i.id = l.invoice_id
+       WHERE ($1::uuid IS NULL OR l.customer_id = $1::uuid)
+         AND ($2::text IS NULL OR l.status = $2)
+       ORDER BY l.invoice_date DESC, l.invoice_number DESC`,
       [customerId, q.status ?? null],
     );
   });
@@ -850,6 +880,11 @@ export async function buildServer(db: Db) {
     const { id } = req.params as { id: string };
     const inv = await invoices.getInvoiceDetail(db, id);
     if (inv) assertOwnCustomer(req, (inv as { customerId: string }).customerId);
+    // A customer sees their invoice, not the office's notes on it.
+    if (inv && req.session?.role === 'customer') {
+      const { history: _h, onAccountCents: _o, ...rest } = inv as Record<string, unknown>;
+      return rest;
+    }
     return inv;
   });
 
@@ -1123,7 +1158,8 @@ export async function buildServer(db: Db) {
   app.post('/api/purchase-orders/:id/receive', { preHandler: allow('admin', 'user') },
     async (req) => inventory.receivePurchaseOrder(db, actorOf(req),
       (req.params as { id: string }).id,
-      (req.body as { receipts: never[] }).receipts));
+      (req.body as { receipts: never[] }).receipts,
+      (req.body as { receivedOn?: string | null }).receivedOn ?? null));
 
   /* ---------------- production ---------------- */
 
@@ -1164,8 +1200,14 @@ export async function buildServer(db: Db) {
 
   /** Turn an existing order into the start of a standing order. */
   app.post('/api/orders/:id/recurring', { preHandler: allow('admin', 'user') },
-    async (req) => recurring.startSchedule(db, actorOf(req),
-      (req.params as { id: string }).id, req.body as never));
+    async (req) => {
+      const r = await recurring.startSchedule(db, actorOf(req),
+        (req.params as { id: string }).id, req.body as never);
+      // Raise whatever falls in the next week straight away, so it is on its
+      // round now rather than after the next hourly check (point 16).
+      await recurring.generateDueOrders(db, actorOf(req)).catch(() => null);
+      return r;
+    });
 
   app.patch('/api/recurring/:id', { preHandler: allow('admin', 'user') },
     async (req) => {
@@ -1205,7 +1247,10 @@ export async function buildServer(db: Db) {
   /* ---------------- stock counts / audit ---------------- */
 
   app.get('/api/audits', { preHandler: allow('admin', 'user') },
-    async (req) => audits.listAudits(db, (req.query as { status?: 'Open' | 'Reconciled' }).status));
+    async (req) => {
+      const q = req.query as { status?: 'Open' | 'Reconciled'; from?: string; to?: string };
+      return audits.listAudits(db, q.status, { from: q.from, to: q.to });
+    });
 
   app.post('/api/audits', { preHandler: allow('admin', 'user') },
     async (req) => audits.recordCount(db, actorOf(req), req.body as never));
@@ -1287,6 +1332,7 @@ export async function buildServer(db: Db) {
     async () => reports.bottlePoolReport(db));
 
   registerRevisionRoutes(app as never, db, { allow: allow as never, actorOf, assertOwnCustomer });
+  registerFeedbackRoutes(app as never, db, { allow: allow as never, actorOf });
 
   return app;
 }
@@ -1358,6 +1404,9 @@ if (import.meta.filename === process.argv[1]) {
   const runAutomatic = async (why: string) => {
     try {
       const r = await paperwork.runAutomation(db, generator);
+      // Messages to customers still waiting for today's allowance.
+      const queued = await messaging.sendQueuedMessages(db).catch(() => ({ sentNow: 0 }));
+      if (queued.sentNow) console.log(`  ${queued.sentNow} queued customer message(s) sent (${why}).`);
       const bits = [
         r.cycleInvoices ? `${r.cycleInvoices} weekly/monthly invoice(s) raised` : '',
         r.statements ? `${r.statements} statement(s) emailed` : '',

@@ -334,7 +334,7 @@ describe('Stock counts (InventoryAudit)', () => {
     const before = await f.db.one<{ q: number }>(
       `SELECT quantity_on_hand q FROM raw_materials WHERE id = $1`, [capId],
     );
-    const count = await recordCount(f.db, f.office, {
+    const count = await recordCount(f.db, f.office, { notes: 'counted for the test',
       itemType: 'RawMaterial', itemId: capId, countedQty: Number(before.q) - 100,
     });
     const result = await reconcileCount(f.db, f.admin, count.id, 'breakage in store room');
@@ -361,7 +361,7 @@ describe('Stock counts (InventoryAudit)', () => {
       `SELECT quantity_on_hand q FROM raw_materials WHERE id = $1`, [capId],
     );
     // All stock physically present, but 25 of it is unusable.
-    const count = await recordCount(f.db, f.office, {
+    const count = await recordCount(f.db, f.office, { notes: 'counted for the test',
       itemType: 'RawMaterial', itemId: capId,
       countedQty: Number(before.q), damagedQty: 25,
     });
@@ -378,7 +378,7 @@ describe('Stock counts (InventoryAudit)', () => {
     const before = await f.db.one<{ q: number }>(
       `SELECT quantity_on_hand q FROM raw_materials WHERE id = $1`, [capId],
     );
-    const count = await recordCount(f.db, f.office, {
+    const count = await recordCount(f.db, f.office, { notes: 'counted for the test',
       itemType: 'RawMaterial', itemId: capId, countedQty: Number(before.q) + 40,
     });
     const result = await reconcileCount(f.db, f.admin, count.id);
@@ -394,7 +394,7 @@ describe('Stock counts (InventoryAudit)', () => {
   });
 
   test('finished goods can be counted too', async () => {
-    const count = await recordCount(f.db, f.office, {
+    const count = await recordCount(f.db, f.office, { notes: 'counted for the test',
       itemType: 'FinishedGoods', itemId: productId, countedQty: 480,
     });
     assert.equal(count.systemQty, 484);
@@ -411,7 +411,7 @@ describe('Stock counts (InventoryAudit)', () => {
    * stock back. These pin the refusal, and the deliberate way past it.
    */
   test('stock moving after a count blocks the confirm, naming what moved', async () => {
-    const count = await recordCount(f.db, f.office, {
+    const count = await recordCount(f.db, f.office, { notes: 'counted for the test',
       itemType: 'RawMaterial', itemId: capId, countedQty: 900,
     });
 
@@ -432,7 +432,7 @@ describe('Stock counts (InventoryAudit)', () => {
   });
 
   test('what moved since the count can be listed before deciding', async () => {
-    const count = await recordCount(f.db, f.office, {
+    const count = await recordCount(f.db, f.office, { notes: 'counted for the test',
       itemType: 'RawMaterial', itemId: capId, countedQty: 800,
     });
     await issueMaterial(f.db, f.office, { rawMaterialId: capId, quantity: 40 });
@@ -445,7 +445,7 @@ describe('Stock counts (InventoryAudit)', () => {
   });
 
   test('the count can be applied over later movements, deliberately', async () => {
-    const count = await recordCount(f.db, f.office, {
+    const count = await recordCount(f.db, f.office, { notes: 'counted for the test',
       itemType: 'RawMaterial', itemId: capId, countedQty: 700,
     });
     await issueMaterial(f.db, f.office, { rawMaterialId: capId, quantity: 50 });
@@ -465,7 +465,7 @@ describe('Stock counts (InventoryAudit)', () => {
   });
 
   test('a count with nothing moving after it confirms without complaint', async () => {
-    const count = await recordCount(f.db, f.office, {
+    const count = await recordCount(f.db, f.office, { notes: 'counted for the test',
       itemType: 'RawMaterial', itemId: capId, countedQty: 650,
     });
     const r = await reconcileCount(f.db, f.admin, count.id);
@@ -477,7 +477,7 @@ describe('Stock counts (InventoryAudit)', () => {
   });
 
   test('only an admin may reconcile, and never twice', async () => {
-    const count = await recordCount(f.db, f.office, {
+    const count = await recordCount(f.db, f.office, { notes: 'counted for the test',
       itemType: 'FinishedGoods', itemId: productId, countedQty: 470,
     });
     await assert.rejects(reconcileCount(f.db, f.office, count.id), /requires role admin/);
@@ -513,7 +513,7 @@ describe('Stock counts (InventoryAudit)', () => {
     );
 
     // Count zero: the system thinks 100 exist but no batch backs any of them.
-    const count = await recordCount(f.db, f.office, {
+    const count = await recordCount(f.db, f.office, { notes: 'counted for the test',
       itemType: 'RawMaterial', itemId: orphan, countedQty: 0,
     });
     await reconcileCount(f.db, f.admin, count.id);

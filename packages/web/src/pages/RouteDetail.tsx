@@ -19,6 +19,11 @@ interface Stop {
   order_total_cents?: number | null;
   invoice_number?: string | null;
   invoice_id?: string | null;
+  delivery_instructions?: string | null;
+  order_notes?: string | null;
+  customer_po?: string | null;
+  rescheduled_to?: string | null;
+  reschedule_reason?: string | null;
 }
 
 interface Sheet {
@@ -227,13 +232,24 @@ export default function RouteDetail({ session }: { session: Session }) {
                   <td data-label="Order"><span className="stop-no">{i + 1}</span></td>
                   <td data-label="Customer">
                     <strong>{s.customer_name}</strong>
-                    <div className="muted small">{[s.delivery_address ?? 'No address on file', s.order_ref].filter(Boolean).join(' · ')}</div>
+                    <div className="muted small">{s.delivery_address ?? 'No address on file'}</div>
+                    <div className="small">{[s.order_ref, s.customer_po ? `PO ${s.customer_po}` : null].filter(Boolean).join(' · ')}</div>
+                    {(s.delivery_instructions || (s.order_notes && !/^Standing order for/.test(s.order_notes))) && (
+                      <div className="stop-notes">
+                        {s.delivery_instructions}
+                        {s.delivery_instructions && s.order_notes && !/^Standing order for/.test(s.order_notes) ? '\n' : ''}
+                        {s.order_notes && !/^Standing order for/.test(s.order_notes) ? s.order_notes : ''}
+                      </div>
+                    )}
                   </td>
                   <td data-label="How" className="small">{s.line_items_summary ? s.line_items_summary.replace(/Alka Vida\s+/gi, '') : '—'}</td>
                   <td data-label="Status">
                     {s.stop_outcome === 'Pending' && open && i === firstPending && sheet.started_at
                       ? <span className="chip info">Next stop</span>
                       : <span className={`chip ${outcomeTone(s.stop_outcome)}`}>{OUTCOME_WORDS[s.stop_outcome] ?? (s.stop_outcome === 'Pending' ? 'To do' : s.stop_outcome)}</span>}
+                    {s.rescheduled_to && (
+                      <div className="small">to {day(s.rescheduled_to)}{s.reschedule_reason ? `: ${s.reschedule_reason}` : ''}</div>
+                    )}
                     {s.invoice_number && s.invoice_id && (
                       <div className="small"><Link to={`/invoices/${s.invoice_id}`}>{s.invoice_number}</Link></div>
                     )}

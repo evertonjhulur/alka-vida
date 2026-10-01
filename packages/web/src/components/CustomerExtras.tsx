@@ -16,12 +16,14 @@ interface Address {
   id: string; label: string; address_line1: string | null; address_line2: string | null;
   city: string | null; parish: string | null; is_billing: boolean; is_delivery: boolean;
   delivery_zone: string | null; route_sequence: number; contact_person: string | null; phone: string | null;
+  delivery_instructions?: string | null;
 }
 interface Zone { id: string; name: string; retired_at: string | null; run_days: string[] | null }
 
 const BLANK_ADDR = {
   label: '', addressLine1: '', addressLine2: '', city: '', parish: '',
   isBilling: false, isDelivery: true, deliveryZone: '', routeSequence: '0', contactPerson: '', phone: '',
+  deliveryInstructions: '',
 };
 
 export function AddressesPanel({ customerId }: { customerId: string }) {
@@ -46,6 +48,7 @@ export function AddressesPanel({ customerId }: { customerId: string }) {
       city: a.city ?? '', parish: a.parish ?? '', isBilling: a.is_billing, isDelivery: a.is_delivery,
       deliveryZone: a.delivery_zone ?? '', routeSequence: String(a.route_sequence ?? 0),
       contactPerson: a.contact_person ?? '', phone: a.phone ?? '',
+      deliveryInstructions: a.delivery_instructions ?? '',
     } : { ...BLANK_ADDR });
   };
 
@@ -173,6 +176,11 @@ export function AddressesPanel({ customerId }: { customerId: string }) {
             <div className="field">
               <label htmlFor="ad-phone">Phone there</label>
               <input id="ad-phone" value={f.phone} onChange={(e) => setF({ ...f, phone: e.target.value })} />
+            </div>
+            <div className="field grow">
+              <label htmlFor="ad-di">Delivery notes</label>
+              <input id="ad-di" value={f.deliveryInstructions} placeholder="Gate code, where to leave it"
+                     onChange={(e) => setF({ ...f, deliveryInstructions: e.target.value })} />
             </div>
           </div>
           <div className="row">

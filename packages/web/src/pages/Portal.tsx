@@ -1,13 +1,14 @@
 import { Fragment, useEffect, useMemo, useState } from 'react';
-import { useNavigate, useParams } from 'react-router-dom';
-import { api, download, type Session } from '../lib/api';
-import { money, date, statusTone, when } from '../lib/format';
+import { Link, useNavigate, useParams } from 'react-router-dom';
+import { api, download, openPdf, type Session } from '../lib/api';
+import { money, statusTone, todayInJamaica, when } from '../lib/format';
 import { StatementView } from './Statement';
-import { ask, askText } from '../components/Dialog';
+import { ask } from '../components/Dialog';
+import { PARISHES } from '../components/CustomerForm';
 
 interface Row {
-  invoice_id: string; invoice_number: string; invoice_date: string;
-  grand_total_cents: number; balance_cents: number; status: string;
+  invoice_id: string; invoice_number: string; invoice_date: string; due_date: string | null;
+  grand_total_cents: number; balance_cents: number; status: string; is_credit_note: boolean;
 }
 
 /** A product at THIS customer's own rate, from /api/customers/:id/prices. */
@@ -21,8 +22,9 @@ interface MyOrder {
   id: string; order_number: string; order_date: string;
   requested_delivery_date: string | null; status: string;
   delivery_mode: string; grand_total_cents: number; source: string;
+  sheet_started?: boolean | null; needs_review?: boolean; customer_po?: string | null;
+  lines_summary?: string | null;
 }
-
 
 /** One of the customer's own standing orders. */
 interface Schedule {
@@ -31,15 +33,52 @@ interface Schedule {
   occurrencesRaised: number; lineSummary: string;
 }
 
-const GCT_RATE = 0.15;
-const PATTERNS = ['Weekly', 'Biweekly', 'Monthly'] as const;
+interface Address {
+  id: string; label: string; address_line1: string | null; address_line2: string | null;
+  city: string | null; parish: string | null; is_billing: boolean; is_delivery: boolean;
+  contact_person: string | null; phone: string | null; delivery_instructions: string | null;
+}
 
-type Tab = 'order' | 'orders' | 'repeats' | 'account' | 'quotes';
+interface Position {
+  balanceCents: number; overdueCents: number; overdueInvoices: number;
+  nextDueDate: string | null; nextDueCents: number;
+}
+
+interface Profile {
+  id: string; name: string; account_type: string; contact_person: string | null;
+  phone: string | null; email: string | null; whatsapp: string | null;
+  address_line1: string | null; address_line2: string | null; city: string | null; parish: string | null;
+  delivery_address: string | null; delivery_instructions: string | null; delivery_zone: string | null;
+  delivery_days: string[] | null; payment_terms: string | null; invoice_cycle: string | null;
+  marketing_opt_out: boolean; order_emails: boolean; auto_statements: boolean; gct_exempt: boolean;
+  addresses: Address[]; position: Position;
+}
+
+interface News {
+  id: string; kind: string; title: string; body: string; starts_on: string; ends_on: string | null; pinned: boolean;
+}
+
+interface Home {
+  position: Position; news: News[]; cutoff: string;
+  whatsapp: { number: string; link: string | null };
+  nextOrder: { order_number: string; requested_delivery_date: string | null; delivery_mode: string; needs_review: boolean } | null;
+}
 
 interface MyQuote {
   id: string; quote_number: string; quote_date: string; valid_until: string | null;
   status: string; grand_total_cents: number; lines_summary: string | null; expired: boolean;
 }
+
+const GCT_RATE = 0.15;
+const PATTERNS = ['Weekly', 'Biweekly', 'Monthly'] as const;
+const TABS = ['home', 'order', 'orders', 'repeats', 'account', 'quotes', 'profile'] as const;
+type Tab = (typeof TABS)[number];
+
+const KIND_TONE: Record<string, string> = { Promotion: 'ok', Closure: 'warn', Update: 'info', News: 'neutral' };
+const addrLine = (a: { address_line1: string | null; address_line2: string | null; city: string | null; parish: string | null }) =>
+  [a.address_line1, a.address_line2, a.city, a.parish].filter(Boolean).join(', ');
+
+const BLANK_ADDR = { label: '', addressLine1: '', addressLine2: '', city: '', parish: '', contactPerson: '', phone: '', deliveryInstructions: '' };
 
 export default function Portal({ session }: { session: Session }) {
   /*
@@ -50,17 +89,17 @@ export default function Portal({ session }: { session: Session }) {
    */
   const { tab: fromUrl } = useParams();
   const navigate = useNavigate();
-  const tab: Tab = (['order', 'orders', 'repeats', 'account', 'quotes'] as const)
-    .includes(fromUrl as Tab) ? (fromUrl as Tab) : 'order';
+  const tab: Tab = (TABS as readonly string[]).includes(fromUrl ?? '') ? (fromUrl as Tab) : 'home';
   const setTab = (t: Tab) => navigate(`/portal/${t}`);
 
   const [rows, setRows] = useState<Row[]>([]);
-  const [balance, setBalance] = useState<number | null>(null);
   const [prices, setPrices] = useState<Priced[]>([]);
   const [myOrders, setMyOrders] = useState<MyOrder[]>([]);
   const [schedules, setSchedules] = useState<Schedule[]>([]);
   const [repeatFor, setRepeatFor] = useState<string | null>(null);
   const [quotes, setQuotes] = useState<MyQuote[]>([]);
+  const [profile, setProfile] = useState<Profile | null>(null);
+  const [home, setHome] = useState<Home | null>(null);
 
   // How many of each product, keyed by product: every product is on the
   // screen with − / +, rather than a line to add and a product to choose.
@@ -68,6 +107,11 @@ export default function Portal({ session }: { session: Session }) {
   const [mode, setMode] = useState<'Delivery' | 'Pickup'>('Delivery');
   const [wanted, setWanted] = useState('');
   const [notes, setNotes] = useState('');
+  const [po, setPo] = useState('');
+  const [addressId, setAddressId] = useState('');
+
+  const [pf, setPf] = useState<Record<string, string | boolean>>({});
+  const [addrEdit, setAddrEdit] = useState<{ id: string | null; v: typeof BLANK_ADDR } | null>(null);
 
   const [error, setError] = useState<string | null>(null);
   const [placed, setPlaced] = useState<string | null>(null);
@@ -77,11 +121,24 @@ export default function Portal({ session }: { session: Session }) {
 
   async function load() {
     if (!customerId) return;
+    const [h, p] = await Promise.all([
+      api.get<Home>('/api/portal/home'),
+      api.get<Profile>('/api/portal/profile'),
+    ]);
+    setHome(h); setProfile(p);
+    setPf({
+      contactPerson: p.contact_person ?? '', phone: p.phone ?? '', whatsapp: p.whatsapp ?? '',
+      // Before addresses came in parts the whole line sat in one field; it
+      // opens in Street so nothing is lost.
+      addressLine1: (p.address_line1 || p.city || p.parish) ? (p.address_line1 ?? '') : (p.delivery_address ?? ''),
+      addressLine2: p.address_line2 ?? '', city: p.city ?? '',
+      parish: p.parish ?? '', deliveryInstructions: p.delivery_instructions ?? '',
+      orderEmails: p.order_emails !== false, autoStatements: p.auto_statements !== false,
+      offers: !p.marketing_opt_out,
+    });
     setRows(await api.get<Row[]>('/api/invoices'));
     setMyOrders(await api.get<MyOrder[]>('/api/orders'));
     setSchedules(await api.get<Schedule[]>('/api/portal/recurring'));
-    const b = await api.get<{ balanceCents: number }>(`/api/customers/${customerId}/balance`);
-    setBalance(b.balanceCents);
     setPrices(await api.get<Priced[]>(`/api/customers/${customerId}/prices`));
     setQuotes(await api.get<MyQuote[]>('/api/quotations').catch(() => []));
   }
@@ -155,34 +212,70 @@ export default function Portal({ session }: { session: Session }) {
     }, 'Could not stop the repeat');
   }
 
+  async function saveProfile(e: React.FormEvent) {
+    e.preventDefault();
+    await act(async () => {
+      await api.patch('/api/portal/profile', {
+        contactPerson: pf.contactPerson, phone: pf.phone, whatsapp: pf.whatsapp,
+        addressLine1: pf.addressLine1, addressLine2: pf.addressLine2, city: pf.city, parish: pf.parish,
+        deliveryInstructions: pf.deliveryInstructions,
+        orderEmails: pf.orderEmails, autoStatements: pf.autoStatements, marketingOptOut: !pf.offers,
+      });
+      setPlaced('Your details are saved.');
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    }, 'Could not save your details');
+  }
+
+  async function saveAddress(e: React.FormEvent) {
+    e.preventDefault();
+    if (!addrEdit) return;
+    await act(async () => {
+      if (addrEdit.id) await api.patch(`/api/portal/addresses/${addrEdit.id}`, addrEdit.v);
+      else await api.post('/api/portal/addresses', addrEdit.v);
+      setPlaced(`${addrEdit.v.label} saved. You can choose it when you place an order.`);
+      setAddrEdit(null);
+    }, 'Could not save the address');
+  }
+
+  async function removeAddress(a: Address) {
+    if (!await ask(`Remove ${a.label}?`, { confirmLabel: 'Remove it', danger: true })) return;
+    await act(async () => {
+      await api.del(`/api/portal/addresses/${a.id}`);
+      setPlaced(`${a.label} removed.`);
+    }, 'Could not remove the address');
+  }
+
   useEffect(() => { load().catch((e) => setError(e.message)); }, [customerId]);
 
-  const productOf = (id: string) => prices.find((p) => p.product_id === id);
-
   const unitOf = (p: Priced) => (p.bottles_per_case > 0 ? 'case' : 'bottle');
+  void unitOf;
   const rateOf = (p: Priced) => (p.bottles_per_case > 0
     ? Number(p.price_per_case_cents)
     : Number(p.price_per_bottle_cents));
 
   /**
    * The total this customer will actually be asked for, worked out the same
-   * way the server does it: their own tier rate, with GCT on top. Nothing is
-   * quoted here that the server would not charge - order entry once previewed
-   * list prices while the server saved tier prices, and nobody noticed until
-   * a customer queried an invoice.
+   * way the server does it: their own rate, then GCT (unless they are exempt).
+   * Shown as subtotal, then GCT, then the total (team feedback, point 2).
    */
+  const exempt = !!profile?.gct_exempt;
   const totals = useMemo(() => {
     let subtotal = 0;
     for (const p of prices) {
       const n = qty[p.product_id] ?? 0;
       if (n > 0) subtotal += n * rateOf(p);
     }
-    const gct = Math.round(subtotal * GCT_RATE);
+    const gct = exempt ? 0 : Math.round(subtotal * GCT_RATE);
     return { subtotal, gct, grandTotal: subtotal + gct };
-  }, [qty, prices]);
+  }, [qty, prices, exempt]);
 
   const bump = (id: string, by: number) =>
     setQty((q) => ({ ...q, [id]: Math.max(0, Math.min(9999, (q[id] ?? 0) + by)) }));
+
+  const deliveryAddresses = (profile?.addresses ?? []).filter((a) => a.is_delivery);
+  const cutoff = home?.cutoff ?? '10:00';
+  const nowHm = new Intl.DateTimeFormat('en-GB', { timeZone: 'America/Jamaica', hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date());
+  const lateToday = mode === 'Delivery' && wanted === todayInJamaica() && nowHm >= cutoff;
 
   async function place(e: React.FormEvent) {
     e.preventDefault();
@@ -203,23 +296,31 @@ export default function Portal({ session }: { session: Session }) {
     }
 
     try {
-      const order = await api.post<{ orderNumber: string; grandTotalCents: number }>(
+      const order = await api.post<{
+        orderNumber: string; grandTotalCents: number; deliveryDate?: string | null; needsReview?: boolean;
+      }>(
         '/api/orders',
         {
           lines: payload,
           deliveryMode: mode,
           requestedDeliveryDate: wanted || null,
           notes: notes || null,
+          customerPo: po || null,
+          addressId: mode === 'Delivery' ? (addressId || null) : null,
         },
       );
       setPlaced(
         `Thank you — order ${order.orderNumber} for ${money(order.grandTotalCents)} is in. `
         + (mode === 'Pickup'
           ? 'We will have it ready for you to collect.'
-          : 'It will go out on the next round for your area.'),
+          : order.needsReview
+            ? `It came in after our ${cutoff} cut-off for same-day delivery, so we will check it and confirm the day with you shortly.`
+            : order.deliveryDate ? `It is booked for delivery on ${when(order.deliveryDate)}.`
+              : 'It will go out on the next round for your area.')
+        + '',
       );
       setQty({});
-      setWanted(''); setNotes('');
+      setWanted(''); setNotes(''); setPo('');
       await load();
       setTab('orders');
     } catch (err) {
@@ -231,23 +332,108 @@ export default function Portal({ session }: { session: Session }) {
     return <div className="notice error">This login is not linked to a customer account.</div>;
   }
 
+  const pos = home?.position ?? profile?.position;
+  const positionFigures = () => (
+    <div className="figures portal-figures">
+      <div className="fig">
+        <div className="fig-label">{(pos?.balanceCents ?? 0) < 0 ? 'In credit' : 'Balance'}</div>
+        <div className="fig-value">{money(Math.abs(pos?.balanceCents ?? 0))}</div>
+        <div className="fig-sub">{(pos?.balanceCents ?? 0) > 0 ? 'what you owe in total' : 'nothing owed'}</div>
+      </div>
+      <div className={`fig${(pos?.overdueCents ?? 0) > 0 ? ' attention' : ''}`}>
+        <div className="fig-label">Overdue</div>
+        <div className="fig-value">{money(pos?.overdueCents ?? 0)}</div>
+        <div className={`fig-sub${(pos?.overdueCents ?? 0) > 0 ? ' bad' : ''}`}>
+          {(pos?.overdueInvoices ?? 0) > 0
+            ? `${pos!.overdueInvoices} invoice${pos!.overdueInvoices === 1 ? '' : 's'} past due` : 'nothing late'}
+        </div>
+      </div>
+      <div className="fig">
+        <div className="fig-label">Next due</div>
+        <div className="fig-value" style={{ fontSize: pos?.nextDueDate ? 22 : 17 }}>
+          {pos?.nextDueDate ? money(pos.nextDueCents) : '—'}
+        </div>
+        <div className="fig-sub">{pos?.nextDueDate ? `on ${when(pos.nextDueDate)}` : 'nothing coming due'}</div>
+      </div>
+    </div>
+  );
+
   /**
    * Plain functions returning JSX, NOT nested components: a component
    * declared inside another gets a new type on every render, so the inputs
    * unmount and lose focus on every keystroke.
    */
+  const pfInput = (key: string, label: string, opts: { placeholder?: string; type?: string; wide?: boolean } = {}) => (
+    <div className={`field${opts.wide ? ' grow' : ''}`}>
+      <label htmlFor={`pf-${key}`}>{label}</label>
+      <input id={`pf-${key}`} type={opts.type ?? 'text'} value={String(pf[key] ?? '')} placeholder={opts.placeholder}
+             onChange={(e) => setPf({ ...pf, [key]: e.target.value })} />
+    </div>
+  );
+  const addrInput = (key: keyof typeof BLANK_ADDR, label: string, placeholder?: string) => (
+    <div className="field grow">
+      <label htmlFor={`ad-${key}`}>{label}</label>
+      <input id={`ad-${key}`} value={addrEdit?.v[key] ?? ''} placeholder={placeholder}
+             onChange={(e) => setAddrEdit(addrEdit && { ...addrEdit, v: { ...addrEdit.v, [key]: e.target.value } })} />
+    </div>
+  );
+
   return (
     <>
-      <h1>My account</h1>
-      <p className="subtitle">Order water, and see what you owe.</p>
+      <h1>{tab === 'home' && profile ? `Welcome, ${profile.contact_person || profile.name}` : 'My account'}</h1>
+      <p className="subtitle">{profile?.name ?? ''}{profile?.name ? ' · ' : ''}Order water, and see what you owe.</p>
 
       {error && <div className="notice error">{error}</div>}
       {placed && <div className="notice ok">{placed}</div>}
 
-      <div className="panel">
-        <div className="muted small">Current balance</div>
-        <div className="owed">{money(balance ?? 0)}</div>
-      </div>
+      {tab === 'home' && (
+        <>
+          {positionFigures()}
+          <div className="portal-home">
+            <section className="panel">
+              <h2 style={{ marginTop: 0 }}>Your next delivery</h2>
+              {home?.nextOrder ? (
+                <p style={{ margin: '0 0 12px' }}>
+                  <strong>{home.nextOrder.order_number}</strong>{' '}
+                  {home.nextOrder.needs_review ? 'is waiting for us to confirm the day.'
+                    : home.nextOrder.delivery_mode === 'Pickup'
+                      ? `is for you to collect${home.nextOrder.requested_delivery_date ? ` on ${when(home.nextOrder.requested_delivery_date)}` : ''}.`
+                      : home.nextOrder.requested_delivery_date
+                        ? `is coming on ${when(home.nextOrder.requested_delivery_date)}.`
+                        : 'is going out on the next round for your area.'}
+                </p>
+              ) : <p className="muted" style={{ margin: '0 0 12px' }}>Nothing on order at the moment.</p>}
+              <div className="row" style={{ gap: 8 }}>
+                <button type="button" onClick={() => setTab('order')}>Place an order</button>
+                {home?.whatsapp.link && (
+                  <a className="button-link whatsapp" href={home.whatsapp.link} target="_blank" rel="noreferrer">
+                    Order on WhatsApp
+                  </a>
+                )}
+                <button type="button" className="secondary" onClick={() => setTab('account')}>Invoices &amp; statement</button>
+              </div>
+              <p className="muted small" style={{ marginBottom: 0 }}>
+                Same-day delivery: order by {cutoff}. After that we check with you before it goes out.
+              </p>
+            </section>
+
+            <section className="panel">
+              <h2 style={{ marginTop: 0 }}>News &amp; offers</h2>
+              {(home?.news ?? []).length === 0 && <p className="muted" style={{ margin: 0 }}>Nothing new right now.</p>}
+              {(home?.news ?? []).map((n) => (
+                <article key={n.id} className="news-item">
+                  <div className="news-head">
+                    <span className={`chip ${KIND_TONE[n.kind] ?? 'neutral'}`}>{n.kind}</span>
+                    <strong>{n.title}</strong>
+                  </div>
+                  {n.body && <p className="news-body">{n.body}</p>}
+                  {n.ends_on && <div className="muted small">Until {when(n.ends_on)}</div>}
+                </article>
+              ))}
+            </section>
+          </div>
+        </>
+      )}
 
       {tab === 'order' && (
         <form onSubmit={place} className="portal-order">
@@ -293,26 +479,57 @@ export default function Portal({ session }: { session: Session }) {
               <button type="button" className={mode === 'Pickup' ? 'active' : ''} aria-pressed={mode === 'Pickup'}
                       onClick={() => setMode('Pickup')}>I&rsquo;ll collect</button>
             </div>
+            {mode === 'Delivery' && (
+              <div className="field" style={{ marginTop: 10 }}>
+                <label htmlFor="addr">Deliver to</label>
+                <select id="addr" value={addressId} style={{ width: '100%', minHeight: 44 }}
+                        onChange={(e) => setAddressId(e.target.value)}>
+                  <option value="">{profile?.delivery_address ? `Main address: ${profile.delivery_address}` : 'My main address'}</option>
+                  {deliveryAddresses.map((a) => (
+                    <option key={a.id} value={a.id}>{a.label}: {addrLine(a)}</option>
+                  ))}
+                </select>
+                <div className="small" style={{ marginTop: 4 }}>
+                  <button type="button" className="as-link small" onClick={() => { setTab('profile'); setAddrEdit({ id: null, v: { ...BLANK_ADDR } }); }}>
+                    + Add a different delivery address
+                  </button>
+                </div>
+              </div>
+            )}
             <div className="two" style={{ marginTop: 10 }}>
               <div className="field">
-                <label htmlFor="wd">{mode === 'Pickup' ? 'When will you collect?' : 'When would you like it? (optional)'}</label>
-                <input id="wd" type="date" value={wanted} onChange={(e) => setWanted(e.target.value)} />
+                <label htmlFor="wd">{mode === 'Pickup' ? 'When will you collect?' : 'Delivery date (optional)'}</label>
+                <input id="wd" type="date" value={wanted} min={todayInJamaica()} onChange={(e) => setWanted(e.target.value)} />
               </div>
               <div className="field">
-                <label htmlFor="nt">Anything we should know?</label>
-                <input id="nt" value={notes} placeholder="e.g. leave at the back gate"
-                       onChange={(e) => setNotes(e.target.value)} />
+                <label htmlFor="po">Your PO number (optional)</label>
+                <input id="po" value={po} placeholder="if your accounts team needs one"
+                       onChange={(e) => setPo(e.target.value)} />
               </div>
             </div>
-            <p className="muted small" style={{ margin: 0 }}>
-              {mode === 'Pickup' ? 'We will have it ready for you.' : 'Left blank, it goes on the next round for your area.'}
-            </p>
+            <div className="field">
+              <label htmlFor="nt">Anything we should know?</label>
+              <input id="nt" value={notes} placeholder="e.g. leave at the back gate"
+                     onChange={(e) => setNotes(e.target.value)} />
+            </div>
+            {lateToday ? (
+              <div className="notice warn" style={{ margin: 0 }}>
+                It is past {cutoff}, our cut-off for same-day delivery. You can still place it: we will check
+                whether it can go today and confirm with you.
+              </div>
+            ) : (
+              <p className="muted small" style={{ margin: 0 }}>
+                {mode === 'Pickup' ? 'We will have it ready for you.'
+                  : `Left blank, it goes on your next delivery day. Same-day orders by ${cutoff}.`}
+              </p>
+            )}
           </section>
 
-          <div className="portal-total">
-            <span className="muted small">{money(totals.subtotal)} + GCT {money(totals.gct)}</span>
-            <strong>{money(totals.grandTotal)}</strong>
-          </div>
+          <section className="panel portal-sum">
+            <div className="total-line"><span>Subtotal</span><span>{money(totals.subtotal)}</span></div>
+            <div className="total-line"><span>{exempt ? 'GCT (exempt)' : 'GCT 15%'}</span><span>{money(totals.gct)}</span></div>
+            <div className="total-line grand"><span>Total</span><span>{money(totals.grandTotal)}</span></div>
+          </section>
           <button className="wide big" disabled={busy || totals.grandTotal === 0}>
             {busy ? 'Placing…' : 'Place order'}
           </button>
@@ -325,86 +542,84 @@ export default function Portal({ session }: { session: Session }) {
           <table>
             <thead>
               <tr>
-                <th>Order</th><th>Placed</th><th>Wanted</th>
+                <th>Order</th><th>Placed</th><th>Delivery date</th>
                 <th>How</th><th className="num">Total</th><th>Status</th><th />
               </tr>
             </thead>
             <tbody>
-              {myOrders.map((o) => (
-                <Fragment key={o.id}>
-                  <tr>
-                    {/* On a phone this row is a card: `lead` is its heading,
-                        and each other cell prints its own column name. */}
-                    <td className="lead">
-                      <span>
-                        {o.order_number}
-                        {o.source === 'Portal' && (
-                          <div className="muted small">placed by you</div>
-                        )}
-                      </span>
-                      {/* The status sits beside the number on a card; the
-                          table below keeps its own Status column. */}
-                      <span className={`chip ${statusTone(o.status)} phone-only`}>
-                        {o.status}
-                      </span>
-                    </td>
-                    <td data-label="Placed">{when(o.order_date)}</td>
-                    <td data-label="Wanted"
-                        className={o.requested_delivery_date ? undefined : 'empty'}>
-                      {o.requested_delivery_date ? when(o.requested_delivery_date) : '—'}
-                    </td>
-                    <td data-label="How" className="small">
-                      {o.delivery_mode === 'Pickup' ? 'Collection' : 'Delivery'}
-                    </td>
-                    <td data-label="Total" className="num money">
-                      {money(Number(o.grand_total_cents))}
-                    </td>
-                    <td className="on-desktop">
-                      <span className={`chip ${statusTone(o.status)}`}>{o.status}</span>
-                    </td>
-                    <td className="num actions">
-                      {/* Only an order that has not gone out can be changed.
-                          Once it is delivered it has been invoiced. */}
-                      {/* Nothing at all once it has gone out, so the cell is
-                          genuinely empty and the card drops the row. The
-                          status is already on the line above. */}
-                      {o.status === 'Pending' && (
-                        <>
-                          <button className="secondary" disabled={busy}
-                                  onClick={() => setRepeatFor(repeatFor === o.id ? null : o.id)}>
-                            {repeatFor === o.id ? 'Cancel' : 'Repeat this'}
-                          </button>{' '}
-                          <button className="danger-soft" disabled={busy}
-                                  onClick={() => cancelOrder(o)}>
-                            Cancel order
-                          </button>
-                        </>
-                      )}
-                    </td>
-                  </tr>
-                  {repeatFor === o.id && (
+              {myOrders.map((o) => {
+                const onRoad = !!o.sheet_started && o.status === 'Pending';
+                const statusWord = o.needs_review && o.status === 'Pending' ? 'Being confirmed'
+                  : onRoad ? 'Out for delivery' : o.status;
+                return (
+                  <Fragment key={o.id}>
                     <tr>
-                      <td colSpan={7} style={{ background: '#f9fafb' }}>
-                        <strong>Get this order again, regularly</strong>
-                        <p className="muted small" style={{ marginTop: 4 }}>
-                          We will raise the same order for you each time, about a week
-                          before it is due, at whatever your prices are on the day. You
-                          can pause or stop it whenever you like.
-                        </p>
-                        {PATTERNS.map((p) => (
-                          <span key={p}>
-                            <button type="button" disabled={busy}
-                                    onClick={() => makeRepeat(o, p)}>
-                              {p === 'Weekly' ? 'Every week'
-                                : p === 'Biweekly' ? 'Every two weeks' : 'Every month'}
+                      {/* On a phone this row is a card: `lead` is its heading,
+                          and each other cell prints its own column name. */}
+                      <td className="lead">
+                        <span>
+                          {o.order_number}
+                          {o.customer_po && <div className="muted small">your PO {o.customer_po}</div>}
+                          {o.lines_summary && <div className="muted small">{o.lines_summary.replace(/Alka Vida\s+/gi, '')}</div>}
+                        </span>
+                        <span className={`chip ${statusTone(statusWord)} phone-only`}>{statusWord}</span>
+                      </td>
+                      <td data-label="Placed">{when(o.order_date)}</td>
+                      <td data-label="Delivery date"
+                          className={o.requested_delivery_date ? undefined : 'empty'}>
+                        {o.requested_delivery_date ? when(o.requested_delivery_date) : '—'}
+                      </td>
+                      <td data-label="How" className="small">
+                        {o.delivery_mode === 'Pickup' ? 'Collection' : 'Delivery'}
+                      </td>
+                      <td data-label="Total" className="num money">
+                        {money(Number(o.grand_total_cents))}
+                      </td>
+                      <td className="on-desktop">
+                        <span className={`chip ${statusTone(statusWord)}`}>{statusWord}</span>
+                      </td>
+                      <td className="num actions">
+                        {/* Only an order that has not gone out can be changed.
+                            Once the driver has set off it is on the van. */}
+                        {o.status === 'Pending' && !onRoad && (
+                          <>
+                            <button className="secondary" disabled={busy}
+                                    onClick={() => setRepeatFor(repeatFor === o.id ? null : o.id)}>
+                              {repeatFor === o.id ? 'Cancel' : 'Repeat this'}
                             </button>{' '}
-                          </span>
-                        ))}
+                            <button className="danger-soft" disabled={busy}
+                                    onClick={() => cancelOrder(o)}>
+                              Cancel order
+                            </button>
+                          </>
+                        )}
+                        {onRoad && <span className="muted small">On its way. Call us to change it.</span>}
                       </td>
                     </tr>
-                  )}
-                </Fragment>
-              ))}
+                    {repeatFor === o.id && (
+                      <tr>
+                        <td colSpan={7} style={{ background: '#f9fafb' }}>
+                          <strong>Get this order again, regularly</strong>
+                          <p className="muted small" style={{ marginTop: 4 }}>
+                            We will raise the same order for you each time, about a week
+                            before it is due, at whatever your prices are on the day. You
+                            can pause or stop it whenever you like.
+                          </p>
+                          {PATTERNS.map((p) => (
+                            <span key={p}>
+                              <button type="button" disabled={busy}
+                                      onClick={() => makeRepeat(o, p)}>
+                                {p === 'Weekly' ? 'Every week'
+                                  : p === 'Biweekly' ? 'Every two weeks' : 'Every month'}
+                              </button>{' '}
+                            </span>
+                          ))}
+                        </td>
+                      </tr>
+                    )}
+                  </Fragment>
+                );
+              })}
             </tbody>
           </table>
           {myOrders.length === 0 && (
@@ -523,25 +738,30 @@ export default function Portal({ session }: { session: Session }) {
 
       {tab === 'account' && (
         <>
+          {positionFigures()}
           <div className="panel phone-cards">
             <h2 style={{ marginTop: 0 }}>Invoices</h2>
+            <p className="muted small" style={{ marginTop: 0 }}>Tap an invoice number to see it, print it or save it as a PDF.</p>
             <table>
               <thead>
                 <tr>
-                  <th>Invoice</th><th>Date</th><th className="num">Total</th>
-                  <th className="num">Balance</th><th>Status</th>
+                  <th>Invoice</th><th>Date</th><th>Due</th><th className="num">Total</th>
+                  <th className="num">Balance</th><th>Status</th><th />
                 </tr>
               </thead>
               <tbody>
                 {rows.map((r) => (
                   <tr key={r.invoice_id}>
                     <td className="lead">
-                      <span>{r.invoice_number}</span>
+                      <Link to={`/portal/invoices/${r.invoice_id}`}>{r.invoice_number}</Link>
                       <span className={`chip ${statusTone(r.status)} phone-only`}>
                         {r.status}
                       </span>
                     </td>
                     <td data-label="Date">{when(r.invoice_date)}</td>
+                    <td data-label="Due" className={r.due_date ? undefined : 'empty'}>
+                      {r.is_credit_note ? '—' : r.due_date ? when(r.due_date) : '—'}
+                    </td>
                     <td data-label="Total" className="num">
                       {money(Number(r.grand_total_cents))}
                     </td>
@@ -551,6 +771,11 @@ export default function Portal({ session }: { session: Session }) {
                     </td>
                     <td className="on-desktop">
                       <span className={`chip ${statusTone(r.status)}`}>{r.status}</span>
+                    </td>
+                    <td className="num actions">
+                      <button type="button" className="secondary" disabled={busy}
+                              onClick={() => download(`/api/portal/invoices/${r.invoice_id}/pdf`, `${r.invoice_number}.pdf`)
+                                .catch((e) => setError(e.message))}>PDF</button>
                     </td>
                   </tr>
                 ))}
@@ -563,6 +788,194 @@ export default function Portal({ session }: { session: Session }) {
           <StatementView customerId={customerId} />
         </>
       )}
+
+      {tab === 'profile' && profile && (
+        <>
+          <form className="panel" onSubmit={saveProfile}>
+            <h2 style={{ marginTop: 0 }}>My details</h2>
+            <p className="muted small" style={{ marginTop: 0 }}>
+              {profile.name} · {profile.email}. To change the account name or email, please call us.
+            </p>
+            <div className="row">
+              {pfInput('contactPerson', 'Contact person', { wide: true })}
+              {pfInput('phone', 'Phone', { type: 'tel' })}
+              {pfInput('whatsapp', 'WhatsApp (if different)', { type: 'tel' })}
+            </div>
+            <fieldset className="form-block">
+              <legend>Main delivery address</legend>
+              <div className="row">
+                {pfInput('addressLine1', 'Street', { wide: true })}
+                {pfInput('addressLine2', 'Apartment, building (optional)', { wide: true })}
+              </div>
+              <div className="row">
+                {pfInput('city', 'Town or district', { wide: true })}
+                <div className="field grow">
+                  <label htmlFor="pf-parish">Parish</label>
+                  <select id="pf-parish" value={String(pf.parish ?? '')} onChange={(e) => setPf({ ...pf, parish: e.target.value })}>
+                    <option value="">Choose…</option>
+                    {PARISHES.map((p) => <option key={p} value={p}>{p}</option>)}
+                  </select>
+                </div>
+              </div>
+            </fieldset>
+            <div className="field">
+              <label htmlFor="pf-di">Delivery notes for the driver</label>
+              <textarea id="pf-di" rows={2} style={{ width: '100%', boxSizing: 'border-box' }}
+                        placeholder="Gate code, where to leave it, who to ask for…"
+                        value={String(pf.deliveryInstructions ?? '')}
+                        onChange={(e) => setPf({ ...pf, deliveryInstructions: e.target.value })} />
+            </div>
+            <fieldset className="form-block">
+              <legend>Emails from us</legend>
+              <label className="check"><input type="checkbox" checked={!!pf.orderEmails}
+                onChange={(e) => setPf({ ...pf, orderEmails: e.target.checked })} /> Order confirmations (placed and delivered)</label>
+              <label className="check"><input type="checkbox" checked={!!pf.autoStatements}
+                onChange={(e) => setPf({ ...pf, autoStatements: e.target.checked })} /> A monthly statement</label>
+              <label className="check"><input type="checkbox" checked={!!pf.offers}
+                onChange={(e) => setPf({ ...pf, offers: e.target.checked })} /> News and special offers</label>
+            </fieldset>
+            <button disabled={busy}>{busy ? 'Saving…' : 'Save my details'}</button>
+          </form>
+
+          <div className="panel">
+            <div className="panel-head">
+              <h2>Other delivery addresses</h2>
+              {!addrEdit && (
+                <button type="button" className="secondary" onClick={() => setAddrEdit({ id: null, v: { ...BLANK_ADDR } })}>
+                  + Add an address
+                </button>
+              )}
+            </div>
+            {addrEdit && (
+              <form onSubmit={saveAddress} className="sub-panel" style={{ marginBottom: 12 }}>
+                <div className="row">
+                  {addrInput('label', 'Name it', 'e.g. Warehouse, Home')}
+                  {addrInput('addressLine1', 'Street')}
+                </div>
+                <div className="row">
+                  {addrInput('addressLine2', 'Apartment, building (optional)')}
+                  {addrInput('city', 'Town or district')}
+                  <div className="field grow">
+                    <label htmlFor="ad-parish">Parish</label>
+                    <select id="ad-parish" value={addrEdit.v.parish}
+                            onChange={(e) => setAddrEdit({ ...addrEdit, v: { ...addrEdit.v, parish: e.target.value } })}>
+                      <option value="">Choose…</option>
+                      {PARISHES.map((p) => <option key={p} value={p}>{p}</option>)}
+                    </select>
+                  </div>
+                </div>
+                <div className="row">
+                  {addrInput('contactPerson', 'Who to ask for (optional)')}
+                  {addrInput('phone', 'Phone there (optional)')}
+                </div>
+                {addrInput('deliveryInstructions', 'Delivery notes (optional)', 'Gate code, where to leave it…')}
+                <div className="row" style={{ gap: 8 }}>
+                  <button disabled={busy}>Save address</button>
+                  <button type="button" className="secondary" onClick={() => setAddrEdit(null)}>Cancel</button>
+                </div>
+              </form>
+            )}
+            {profile.addresses.filter((a) => a.is_delivery).length === 0 && !addrEdit && (
+              <p className="muted" style={{ margin: 0 }}>None yet. Add one to have an order delivered somewhere other than your main address.</p>
+            )}
+            {profile.addresses.filter((a) => a.is_delivery).map((a) => (
+              <div key={a.id} className="addr-row">
+                <div>
+                  <strong>{a.label}</strong>
+                  <div className="small">{addrLine(a)}</div>
+                  {a.delivery_instructions && <div className="muted small">{a.delivery_instructions}</div>}
+                </div>
+                <div className="row" style={{ gap: 6 }}>
+                  <button type="button" className="secondary" onClick={() => setAddrEdit({
+                    id: a.id,
+                    v: {
+                      label: a.label, addressLine1: a.address_line1 ?? '', addressLine2: a.address_line2 ?? '',
+                      city: a.city ?? '', parish: a.parish ?? '', contactPerson: a.contact_person ?? '',
+                      phone: a.phone ?? '', deliveryInstructions: a.delivery_instructions ?? '',
+                    },
+                  })}>Change</button>
+                  <button type="button" className="danger-soft" onClick={() => removeAddress(a)}>Remove</button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+    </>
+  );
+}
+
+/** One invoice, for the customer: see it, print it, save it (point 6). */
+export function PortalInvoice() {
+  const { invoiceId } = useParams();
+  const [inv, setInv] = useState<Record<string, unknown> | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    api.get<Record<string, unknown>>(`/api/invoices/${invoiceId}`).then(setInv).catch((e) => setError(e.message));
+  }, [invoiceId]);
+  if (error) return <div className="notice error">{error}</div>;
+  if (!inv) return <p className="muted">Loading…</p>;
+  const n = (k: string) => Number(inv[k] ?? 0);
+  const lines = (inv.lines as Array<Record<string, unknown>>) ?? [];
+  const orders = (inv.orders as Array<{ order_number: string; customer_po: string | null }>) ?? [];
+  const isCN = !!inv.isCreditNote;
+  const path = `/api/portal/invoices/${invoiceId}/pdf`;
+  return (
+    <>
+      <p style={{ marginTop: 0 }}><Link to="/portal/account">← Statements &amp; invoices</Link></p>
+      <div className="inv-title">
+        <div>
+          <h1 style={{ marginBottom: 2 }}>{isCN ? 'Credit note' : 'Invoice'} {String(inv.invoiceNumber)}</h1>
+          {orders.length > 0 && (
+            <div className="muted">Order {orders.map((o) => o.order_number).join(', ')}
+              {orders.some((o) => o.customer_po) ? ` · your PO ${orders.map((o) => o.customer_po).filter(Boolean).join(', ')}` : ''}</div>
+          )}
+        </div>
+        <span className={`chip ${statusTone(String(inv.status))}`}>{String(inv.status)}</span>
+      </div>
+      <div className="row" style={{ gap: 8, margin: '10px 0 14px' }}>
+        <button type="button" onClick={() => openPdf(path).catch((e) => setError(e.message))}>Print</button>
+        <button type="button" className="secondary"
+                onClick={() => download(path, `${String(inv.invoiceNumber)}.pdf`).catch((e) => setError(e.message))}>
+          Download PDF
+        </button>
+      </div>
+      <div className="panel paper">
+        <p className="small" style={{ marginTop: 0 }}>
+          Dated {when(String(inv.invoiceDate))}
+          {!isCN && inv.dueDate ? ` · due ${when(String(inv.dueDate))}` : ''}
+          {inv.period_from && inv.period_to ? ` · deliveries ${when(String(inv.period_from))} to ${when(String(inv.period_to))}` : ''}
+        </p>
+        <table className="paper-lines">
+          <thead><tr>{lines.some((l) => l.delivered_on) && <th>Delivered</th>}<th>Item</th><th>Quantity</th><th className="num">Unit price</th><th className="num">Amount</th></tr></thead>
+          <tbody>
+            {lines.map((l, i) => {
+              const cased = Number(l.cases) > 0;
+              return (
+                <tr key={i}>
+                  {lines.some((x) => x.delivered_on) && <td className="small">{l.delivered_on ? when(String(l.delivered_on)) : ''}</td>}
+                  <td>{String(l.product_name ?? '')}</td>
+                  <td>{cased ? `${l.cases} cs` : String(l.loose_bottles)}</td>
+                  <td className="num">{money(Number(cased ? l.price_per_case_cents : l.price_per_bottle_cents))}</td>
+                  <td className="num">{money(Number(l.line_total_cents))}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+        <div className="paper-totals">
+          <div className="total-line"><span>Subtotal</span><span>{money(Math.abs(n('subtotal_cents')))}</span></div>
+          {n('discount_amount_cents') > 0 && <div className="total-line"><span>Discount</span><span>−{money(n('discount_amount_cents'))}</span></div>}
+          <div className="total-line"><span>{inv.gct_exempt ? 'GCT (exempt)' : 'GCT 15%'}</span><span>{money(Math.abs(n('gct_cents')))}</span></div>
+          <div className="total-line grand"><span>{isCN ? 'Credit' : 'Total'}</span><span>{money(Math.abs(n('grandTotalCents')))}</span></div>
+          {!isCN && (
+            <>
+              <div className="total-line"><span>Paid</span><span>{money(n('amountPaidCents'))}</span></div>
+              <div className="total-line grand"><span>Balance due</span><span>{money(n('balanceCents'))}</span></div>
+            </>
+          )}
+        </div>
+      </div>
     </>
   );
 }

@@ -14,7 +14,7 @@ export default function SetPassword() {
   const [params] = useSearchParams();
   const token = params.get('token') ?? '';
 
-  const [invitee, setInvitee] = useState<{ name: string; email: string } | null>(null);
+  const [invitee, setInvitee] = useState<{ name: string; email: string; purpose?: string } | null>(null);
   const [checking, setChecking] = useState(true);
   const [next, setNext] = useState('');
   const [again, setAgain] = useState('');
@@ -23,7 +23,7 @@ export default function SetPassword() {
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
-    api.get<{ invitee: { name: string; email: string } | null }>(
+    api.get<{ invitee: { name: string; email: string; purpose?: string } | null }>(
       `/api/invitations/${encodeURIComponent(token)}`,
     )
       .then((r) => setInvitee(r.invitee))
@@ -71,8 +71,8 @@ export default function SetPassword() {
         <div className="panel" style={{ maxWidth: 460 }}>
           <h1>This link is not valid</h1>
           <p className="muted">
-            It may have been used already, or it may have expired. Ask Alka Vida
-            to send you a new one.
+            It may have been used already, or it may have expired. Use
+            {' '}<strong>Forgotten your password?</strong> on the sign-in page to get a new one.
           </p>
           <Link to="/">Back to sign in</Link>
         </div>
@@ -83,9 +83,9 @@ export default function SetPassword() {
   return (
     <div className="login-page">
       <div className="panel" style={{ maxWidth: 460 }}>
-        <h1>Welcome, {invitee.name}</h1>
+        <h1>{invitee.purpose === 'reset' ? `New password, ${invitee.name}` : `Welcome, ${invitee.name}`}</h1>
         <p className="muted">
-          Choose a password for <strong>{invitee.email}</strong>. Only you will
+          Choose {invitee.purpose === 'reset' ? 'a new' : 'a'} password for <strong>{invitee.email}</strong>. Only you will
           know it — nobody at Alka Vida can see it.
         </p>
 

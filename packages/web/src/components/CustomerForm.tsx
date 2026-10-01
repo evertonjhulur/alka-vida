@@ -41,6 +41,8 @@ export interface CustomerFormValues {
   gctExempt: boolean; gctExemptRef: string;
   autoStatements: boolean; autoReminders: boolean;
   notes: string;
+  deliveryInstructions: string; whatsapp: string;
+  orderEmails: boolean; offers: boolean;
 }
 
 export const BLANK_CUSTOMER: CustomerFormValues = {
@@ -49,6 +51,7 @@ export const BLANK_CUSTOMER: CustomerFormValues = {
   deliveryZone: '', deliveryDays: [], routeSequence: '0',
   priceTierId: '', paymentTerms: '', invoiceCycle: 'PerDelivery',
   gctExempt: false, gctExemptRef: '', autoStatements: true, autoReminders: true, notes: '',
+  deliveryInstructions: '', whatsapp: '', orderEmails: true, offers: true,
 };
 
 /** A customer row from the API, as the form's values. */
@@ -72,6 +75,8 @@ export function customerToForm(c: Record<string, unknown>): CustomerFormValues {
     gctExempt: !!c.gct_exempt, gctExemptRef: s('gct_exempt_ref'),
     autoStatements: c.auto_statements !== false, autoReminders: c.auto_reminders !== false,
     notes: s('notes'),
+    deliveryInstructions: s('delivery_instructions'), whatsapp: s('whatsapp'),
+    orderEmails: c.order_emails !== false, offers: !c.marketing_opt_out,
   };
 }
 
@@ -93,6 +98,9 @@ export function formToPayload(f: CustomerFormValues) {
     gctExempt: f.gctExempt, gctExemptRef: f.gctExempt ? (f.gctExemptRef || null) : null,
     autoStatements: f.autoStatements, autoReminders: f.autoReminders,
     notes: f.notes || null,
+    deliveryInstructions: f.deliveryInstructions || null,
+    whatsapp: f.whatsapp || null,
+    orderEmails: f.orderEmails, marketingOptOut: !f.offers,
   };
 }
 
@@ -182,6 +190,10 @@ export default function CustomerForm({
                 <label htmlFor="cf-email">Email *</label>
                 <input id="cf-email" type="email" required value={f.email}
                        onChange={(e) => set('email', e.target.value)} />
+              </div>
+              <div className="field">
+                <label htmlFor="cf-wa">WhatsApp (if not the phone)</label>
+                <input id="cf-wa" type="tel" value={f.whatsapp} onChange={(e) => set('whatsapp', e.target.value)} />
               </div>
             </div>
           </fieldset>
@@ -317,8 +329,26 @@ export default function CustomerForm({
             </div>
           </fieldset>
 
+          <div className="field">
+            <label htmlFor="cf-di">Delivery notes for the driver</label>
+            <input id="cf-di" style={{ width: '100%' }} value={f.deliveryInstructions}
+                   placeholder="Gate code, where to leave it, who to ask for"
+                   onChange={(e) => set('deliveryInstructions', e.target.value)} />
+            <div className="muted small">Shown on the delivery round under their order. The customer can change it in their portal profile.</div>
+          </div>
+
           <fieldset className="form-block">
             <legend>Emails we send them on our own</legend>
+            <label className="check">
+              <input type="checkbox" checked={f.orderEmails}
+                     onChange={(e) => set('orderEmails', e.target.checked)} />
+              Order confirmations (placed and delivered)
+            </label>
+            <label className="check">
+              <input type="checkbox" checked={f.offers}
+                     onChange={(e) => set('offers', e.target.checked)} />
+              News and special offers
+            </label>
             <label className="check">
               <input type="checkbox" checked={f.autoStatements}
                      onChange={(e) => set('autoStatements', e.target.checked)} />
@@ -330,7 +360,7 @@ export default function CustomerForm({
               Reminders when an invoice is overdue
             </label>
             <p className="muted small" style={{ margin: '4px 0 0' }}>
-              Only sent when automatic emails are switched on under Settings › Automatic emails.
+              Statements and reminders only go when switched on under Settings › Emails &amp; ordering.
             </p>
           </fieldset>
 

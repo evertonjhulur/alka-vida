@@ -258,6 +258,24 @@ export async function adjustPool(
   });
 }
 
+
+/**
+ * Every 5-gallon movement against a customer: bottles on delivery rounds, plus
+ * those that went out or came back at the counter or on a collection
+ * (customer_bottle_moves). Before 1 Oct 2026 only the rounds counted, so a
+ * customer who collected or bought at the counter never showed as holding
+ * any bottles.
+ */
+const CUSTOMER_MOVES = `
+  SELECT s.customer_id, sh.delivery_date AS day,
+         s.bottles_delivered_full AS delivered, s.bottles_empties_picked_up AS returned,
+         s.bottles_lost_damaged AS lost
+  FROM delivery_stops s JOIN delivery_sheets sh ON sh.id = s.delivery_sheet_id
+  WHERE s.stop_outcome = 'Delivered'
+  UNION ALL
+  SELECT m.customer_id, m.moved_on, m.delivered, m.returned, m.lost
+  FROM customer_bottle_moves m`;
+
 /**
  * How many bottles each customer is holding, derived from what was delivered
  * to them against what they handed back. This is the exchange side of the
@@ -266,17 +284,17 @@ export async function adjustPool(
 export async function customerHoldings(db: Db) {
   return db.query(
     `SELECT c.id AS customer_id, c.name, c.phone, c.delivery_zone,
-            COALESCE(SUM(s.bottles_delivered_full), 0)::int      AS delivered,
-            COALESCE(SUM(s.bottles_empties_picked_up), 0)::int   AS returned,
-            COALESCE(SUM(s.bottles_lost_damaged), 0)::int        AS lost,
-            (COALESCE(SUM(s.bottles_delivered_full), 0)
-             - COALESCE(SUM(s.bottles_empties_picked_up), 0)
-             - COALESCE(SUM(s.bottles_lost_damaged), 0))::int    AS holding
+            COALESCE(SUM(s.delivered), 0)::int   AS delivered,
+            COALESCE(SUM(s.returned), 0)::int    AS returned,
+            COALESCE(SUM(s.lost), 0)::int        AS lost,
+            (COALESCE(SUM(s.delivered), 0)
+             - COALESCE(SUM(s.returned), 0)
+             - COALESCE(SUM(s.lost), 0))::int    AS holding,
+            MAX(s.day)::text AS last_moved
      FROM customers c
-     JOIN delivery_stops s ON s.customer_id = c.id
-     WHERE s.stop_outcome = 'Delivered'
+     JOIN (${CUSTOMER_MOVES}) s ON s.customer_id = c.id
      GROUP BY c.id, c.name, c.phone, c.delivery_zone
-     HAVING COALESCE(SUM(s.bottles_delivered_full), 0) > 0
+     HAVING COALESCE(SUM(s.delivered), 0) > 0 OR COALESCE(SUM(s.returned), 0) > 0
      ORDER BY holding DESC, c.name`,
   );
 }
@@ -334,27 +352,21 @@ export async function bottleAccount(
     `SELECT
        -- everything BEFORE the window, so the period reads as a movement
        COALESCE(SUM(
-         CASE WHEN $2::date IS NULL OR sh.delivery_date < $2::date
-              THEN s.bottles_delivered_full - s.bottles_empties_picked_up
-                   - s.bottles_lost_damaged ELSE 0 END), 0)::text AS opening,
-       COALESCE(SUM(CASE WHEN inWindow THEN s.bottles_delivered_full ELSE 0 END), 0)::text
-         AS delivered,
-       COALESCE(SUM(CASE WHEN inWindow THEN s.bottles_empties_picked_up ELSE 0 END), 0)::text
-         AS returned,
-       COALESCE(SUM(CASE WHEN inWindow THEN s.bottles_lost_damaged ELSE 0 END), 0)::text
-         AS lost,
+         CASE WHEN $2::date IS NOT NULL AND m.day < $2::date
+              THEN m.delivered - m.returned - m.lost ELSE 0 END), 0)::text AS opening,
+       COALESCE(SUM(CASE WHEN w.inWindow THEN m.delivered ELSE 0 END), 0)::text AS delivered,
+       COALESCE(SUM(CASE WHEN w.inWindow THEN m.returned ELSE 0 END), 0)::text AS returned,
+       COALESCE(SUM(CASE WHEN w.inWindow THEN m.lost ELSE 0 END), 0)::text AS lost,
        -- what they hold now, counting everything up to the end of the window
        COALESCE(SUM(
-         CASE WHEN $3::date IS NULL OR sh.delivery_date <= $3::date
-              THEN s.bottles_delivered_full - s.bottles_empties_picked_up
-                   - s.bottles_lost_damaged ELSE 0 END), 0)::text AS closing
-     FROM delivery_stops s
-     JOIN delivery_sheets sh ON sh.id = s.delivery_sheet_id
+         CASE WHEN $3::date IS NULL OR m.day <= $3::date
+              THEN m.delivered - m.returned - m.lost ELSE 0 END), 0)::text AS closing
+     FROM (${CUSTOMER_MOVES}) m
      CROSS JOIN LATERAL (
-       SELECT ($2::date IS NULL OR sh.delivery_date >= $2::date)
-          AND ($3::date IS NULL OR sh.delivery_date <= $3::date) AS inWindow
+       SELECT ($2::date IS NULL OR m.day >= $2::date)
+          AND ($3::date IS NULL OR m.day <= $3::date) AS inWindow
      ) w
-     WHERE s.customer_id = $1 AND s.stop_outcome = 'Delivered'`,
+     WHERE m.customer_id = $1`,
     [customerId, from, to],
   );
 

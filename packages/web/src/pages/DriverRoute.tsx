@@ -6,6 +6,7 @@ import { date, time, when } from '../lib/format';
 interface Stop {
   id: string; customer_name: string; delivery_address: string | null;
   sequence_no: number; stop_outcome: string; line_items_summary: string | null;
+  order_ref?: string | null; delivery_instructions?: string | null; order_notes?: string | null;
 }
 interface Sheet {
   id: string; delivery_date: string; zone: string; status: string;
@@ -83,9 +84,18 @@ export default function DriverRoute({ session }: { session: Session }) {
                 <div className="muted small" style={{ marginLeft: 34 }}>
                   {stop.delivery_address ?? 'No address on file'}
                 </div>
+                {stop.order_ref && (
+                  <div className="muted small" style={{ marginLeft: 34 }}>{stop.order_ref}</div>
+                )}
                 {stop.line_items_summary && (
                   <div className="small" style={{ marginLeft: 34, marginTop: 4 }}>
                     {stop.line_items_summary}
+                  </div>
+                )}
+                {(stop.delivery_instructions || (stop.order_notes && !/^Standing order for/.test(stop.order_notes))) && (
+                  <div className="stop-notes" style={{ marginLeft: 34 }}>
+                    {[stop.delivery_instructions, stop.order_notes && !/^Standing order for/.test(stop.order_notes) ? stop.order_notes : null]
+                      .filter(Boolean).join('\n')}
                   </div>
                 )}
               </div>

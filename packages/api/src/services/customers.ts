@@ -97,6 +97,11 @@ export interface CustomerInput {
   gctExempt?: boolean; gctExemptRef?: string | null;
   invoiceCycle?: 'PerDelivery' | 'Weekly' | 'Monthly';
   autoStatements?: boolean; autoReminders?: boolean;
+  /** Gate code, where to leave it... shown to the driver under the order. */
+  deliveryInstructions?: string | null;
+  whatsapp?: string | null;
+  marketingOptOut?: boolean;
+  orderEmails?: boolean;
 }
 
 const WEEK = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
@@ -149,6 +154,10 @@ function customerColumns(input: CustomerInput): Record<string, unknown> {
   if (has('gctExemptRef')) cols.gct_exempt_ref = text(input.gctExemptRef);
   if (has('autoStatements')) cols.auto_statements = input.autoStatements !== false;
   if (has('autoReminders')) cols.auto_reminders = input.autoReminders !== false;
+  if (has('deliveryInstructions')) cols.delivery_instructions = text(input.deliveryInstructions);
+  if (has('whatsapp')) cols.whatsapp = text(input.whatsapp);
+  if (has('marketingOptOut')) cols.marketing_opt_out = !!input.marketingOptOut;
+  if (has('orderEmails')) cols.order_emails = input.orderEmails !== false;
   if (has('invoiceCycle') && input.invoiceCycle) {
     if (!['PerDelivery', 'Weekly', 'Monthly'].includes(input.invoiceCycle)) {
       throw new RuleViolation('invoice cycle must be per delivery, weekly or monthly');
@@ -274,6 +283,7 @@ export interface AddressInput {
   isBilling?: boolean; isDelivery?: boolean;
   deliveryZone?: string | null; routeSequence?: number;
   contactPerson?: string | null; phone?: string | null;
+  deliveryInstructions?: string | null;
 }
 
 export async function listAddresses(db: Db | Queryable, customerId: string) {
@@ -312,13 +322,14 @@ export async function saveAddress(
       input.city?.trim() || null, input.parish?.trim() || null, isBilling, isDelivery,
       isDelivery ? zone : null, Number(input.routeSequence) || 0,
       input.contactPerson?.trim() || null, input.phone?.trim() || null,
+      input.deliveryInstructions?.trim() || null,
     ];
     let id = addressId;
     if (id) {
       await t.query(
         `UPDATE customer_addresses SET label = $3, address_line1 = $4, address_line2 = $5,
            city = $6, parish = $7, is_billing = $8, is_delivery = $9, delivery_zone = $10,
-           route_sequence = $11, contact_person = $12, phone = $13
+           route_sequence = $11, contact_person = $12, phone = $13, delivery_instructions = $14
          WHERE id = $1 AND customer_id = $2`,
         [id, customerId, ...vals],
       );
@@ -326,8 +337,8 @@ export async function saveAddress(
       const row = await t.one<{ id: string }>(
         `INSERT INTO customer_addresses
            (customer_id, label, address_line1, address_line2, city, parish, is_billing,
-            is_delivery, delivery_zone, route_sequence, contact_person, phone)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING id`,
+            is_delivery, delivery_zone, route_sequence, contact_person, phone, delivery_instructions)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING id`,
         [customerId, ...vals],
       );
       id = row.id;
@@ -501,9 +512,15 @@ export async function customerHistory(db: Db, customerId: string) {
 
   const orders = await db.query(
     `SELECT id, order_number, order_date::text AS order_date,
-            status, delivery_mode, source, grand_total_cents::text AS grand_total_cents
+            requested_delivery_date::text AS requested_delivery_date,
+            fulfilled_on::text AS fulfilled_on, customer_po, needs_review,
+            status, delivery_mode, source, grand_total_cents::text AS grand_total_cents,
+            (SELECT string_agg(CASE WHEN oli.cases > 0 THEN oli.cases || ' cs ' ELSE oli.loose_bottles || ' x ' END
+                               || p.name, ', ' ORDER BY p.name)
+               FROM order_line_items oli JOIN products p ON p.id = oli.product_id
+              WHERE oli.order_id = customer_orders.id) AS lines_summary
      FROM customer_orders WHERE customer_id = $1
-     ORDER BY order_date DESC, order_number DESC LIMIT 25`,
+     ORDER BY order_date DESC, order_number DESC LIMIT 60`,
     [customerId],
   );
 
@@ -521,7 +538,8 @@ export async function customerHistory(db: Db, customerId: string) {
   const payments = await db.query(
     `SELECT p.id, business_date(p.payment_date)::text AS payment_date,
             p.amount_cents::text AS amount_cents, p.method, p.reference,
-            p.is_reversal, p.status, i.invoice_number
+            p.is_reversal, p.status, i.invoice_number, p.invoice_id,
+            EXISTS (SELECT 1 FROM payments r WHERE r.reverses_payment_id = p.id) AS reversed
      FROM payments p
      LEFT JOIN invoices i ON i.id = p.invoice_id
      WHERE p.customer_id = $1 AND p.status = 'Confirmed'
@@ -545,5 +563,44 @@ export async function customerHistory(db: Db, customerId: string) {
     [customerId],
   );
 
-  return { customer, orders, invoices, payments, balanceCents: num(balance.balance_cents) };
+  const position = await accountPosition(db, customerId);
+  return {
+    customer, orders, invoices, payments, balanceCents: num(balance.balance_cents),
+    overdueCents: position.overdueCents, overdueInvoices: position.overdueInvoices,
+  };
+}
+
+/**
+ * What a customer owes and how much of it is late (team feedback, point 5):
+ * shown on the portal home and the office customer record alike. Overdue is
+ * whatever is still owed on invoices past their due date.
+ */
+export async function accountPosition(db: Db | Queryable, customerId: string): Promise<{
+  balanceCents: number; overdueCents: number; overdueInvoices: number;
+  nextDueDate: string | null; nextDueCents: number;
+}> {
+  const b = await db.maybeOne<{ balance_cents: string }>(
+    `SELECT COALESCE(balance_cents, 0)::text AS balance_cents
+     FROM customer_balances WHERE customer_id = $1`, [customerId],
+  );
+  const o = await db.one<{ cents: string; n: number }>(
+    `SELECT COALESCE(SUM(balance_cents), 0)::text AS cents, COUNT(*)::int AS n
+     FROM invoice_ledger
+     WHERE customer_id = $1 AND NOT is_credit_note AND status <> 'Cancelled'
+       AND balance_cents > 0 AND due_date IS NOT NULL AND due_date < business_today()`,
+    [customerId],
+  );
+  const next = await db.maybeOne<{ due: string; cents: string }>(
+    `SELECT due_date::text AS due, SUM(balance_cents)::text AS cents
+     FROM invoice_ledger
+     WHERE customer_id = $1 AND NOT is_credit_note AND status <> 'Cancelled'
+       AND balance_cents > 0 AND due_date >= business_today()
+     GROUP BY due_date ORDER BY due_date LIMIT 1`,
+    [customerId],
+  );
+  return {
+    balanceCents: num(b?.balance_cents),
+    overdueCents: num(o.cents), overdueInvoices: num(o.n),
+    nextDueDate: next?.due ?? null, nextDueCents: num(next?.cents),
+  };
 }

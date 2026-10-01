@@ -1,0 +1,556 @@
+/**
+ * Talking to customers (team feedback, 1 Oct 2026, points 8 and 23):
+ *
+ *   - order confirmations: an email when an order is placed and when it is
+ *     delivered (with the invoice attached when one was raised);
+ *   - News & offers, shown on the customer's portal home;
+ *   - customer lists (by zone, delivery day, account type, what they owe...)
+ *     and messages sent to a list by email, with a WhatsApp link per
+ *     customer for the office to send the same words by hand;
+ *   - the business WhatsApp number, for an "Order on WhatsApp" button.
+ *
+ * Every email here is best-effort: a message that cannot go is logged and
+ * reported, and never undoes the order, delivery or post it was about.
+ */
+
+import type { Db, Queryable } from '../db/index.ts';
+import type { Actor } from './core.ts';
+import { audit, getSetting, num, requireRole, siteUrl } from './core.ts';
+import { RuleViolation } from '@alka/shared';
+import { mailConfigured, sendMail, renderInvoicePdf, formatCash as cash, fmtDate } from './documents.ts';
+
+/* ------------------------------------------------------------------ */
+/* Order confirmations                                                 */
+/* ------------------------------------------------------------------ */
+
+async function logAuto(
+  db: Queryable, kind: string, customerId: string, sentTo: string | null,
+  key: string | null, detail: string, ok: boolean,
+): Promise<void> {
+  await db.query(
+    `INSERT INTO auto_emails (kind, customer_id, sent_to, period_key, detail, ok)
+     VALUES ($1,$2,$3,$4,$5,$6)`, [kind, customerId, sentTo, key, detail, ok],
+  );
+}
+
+async function alreadySent(db: Queryable, kind: string, key: string): Promise<boolean> {
+  return !!(await db.maybeOne(
+    `SELECT 1 FROM auto_emails WHERE kind = $1 AND period_key = $2 AND ok`, [kind, key],
+  ));
+}
+
+async function orderLines(db: Queryable, orderId: string, delivered = false): Promise<string> {
+  const rows = await db.query<{ name: string; bpc: number; cases: number; loose: number }>(
+    `SELECT p.name, p.bottles_per_case AS bpc,
+            ${delivered ? 'oli.delivered_cases' : 'oli.cases'} AS cases,
+            ${delivered ? 'oli.delivered_loose' : 'oli.loose_bottles'} AS loose
+     FROM order_line_items oli JOIN products p ON p.id = oli.product_id
+     WHERE oli.order_id = $1 ORDER BY p.name`, [orderId],
+  );
+  return rows
+    .filter((r) => num(r.cases) > 0 || num(r.loose) > 0)
+    .map((r) => (num(r.bpc) > 0
+      ? `  ${num(r.cases)} case${num(r.cases) === 1 ? '' : 's'} ${r.name}`
+      : `  ${num(r.loose)} x ${r.name}`))
+    .join('\n');
+}
+
+/**
+ * "Thank you, we have your order." Sent for orders placed on the portal and
+ * orders the office takes, but not for occurrences a standing order raises on
+ * its own a week ahead (the delivery email covers those), nor counter sales.
+ */
+export async function sendOrderPlacedEmail(db: Db, orderId: string): Promise<{ sent: boolean; reason?: string }> {
+  if (!mailConfigured()) return { sent: false, reason: 'email is not set up' };
+  if ((await getSetting(db, 'order_placed_emails', 'true')) !== 'true') return { sent: false, reason: 'switched off' };
+  const o = await db.maybeOne<{
+    order_number: string; customer_id: string; name: string; email: string | null; order_emails: boolean;
+    delivery_mode: string; requested_delivery_date: string | null; grand_total_cents: number;
+    gct_cents: number; subtotal_cents: number; discount_amount_cents: number; customer_po: string | null;
+    parent_recurring_id: string | null; needs_review: boolean; address: string | null;
+  }>(
+    `SELECT o.order_number, o.customer_id, c.name, c.email, c.order_emails, o.delivery_mode,
+            o.requested_delivery_date::text AS requested_delivery_date, o.grand_total_cents,
+            o.gct_cents, o.subtotal_cents, o.discount_amount_cents, o.customer_po,
+            o.parent_recurring_id, o.needs_review,
+            COALESCE(ca.label || ': ' || ca.address_line1, c.delivery_address) AS address
+     FROM customer_orders o JOIN customers c ON c.id = o.customer_id
+     LEFT JOIN customer_addresses ca ON ca.id = o.address_id
+     WHERE o.id = $1`, [orderId],
+  );
+  if (!o) return { sent: false, reason: 'no such order' };
+  if (o.delivery_mode === 'Counter' || o.parent_recurring_id) return { sent: false, reason: 'not for this kind of order' };
+  if (!o.order_emails || !o.email?.trim()) return { sent: false, reason: 'no email for this customer' };
+  if (await alreadySent(db, 'OrderPlaced', o.order_number)) return { sent: false, reason: 'already sent' };
+
+  const when = o.delivery_mode === 'Pickup'
+    ? (o.requested_delivery_date ? `Ready for you to collect on ${fmtDate(o.requested_delivery_date)}.` : 'We will have it ready for you to collect.')
+    : o.needs_review
+      ? `You asked for delivery today. Orders for the same day after our cut-off need a quick check, so we will confirm the day with you shortly.`
+      : o.requested_delivery_date
+        ? `Delivery on ${fmtDate(o.requested_delivery_date)}${o.address ? ` to ${o.address}` : ''}.`
+        : 'It will go out on the next round for your area.';
+  const text = [
+    `Good day ${o.name},`,
+    '',
+    `Thank you for your order ${o.order_number}${o.customer_po ? ` (your PO ${o.customer_po})` : ''}.`,
+    '',
+    await orderLines(db, orderId),
+    '',
+    `Subtotal: ${cash(num(o.subtotal_cents))}`,
+    ...(num(o.discount_amount_cents) > 0 ? [`Discount: -${cash(num(o.discount_amount_cents))}`] : []),
+    `GCT: ${cash(num(o.gct_cents))}`,
+    `Total: ${cash(num(o.grand_total_cents))}`,
+    '',
+    when,
+    'The invoice is made out from what is actually delivered.',
+    '',
+    `See your orders any time at ${siteUrl()}`,
+    '',
+    'Alka Vida · 1506 Investments Limited',
+  ].join('\n');
+  try {
+    await sendMail({ to: o.email.trim(), subject: `Alka Vida order ${o.order_number} received`, text });
+    await logAuto(db, 'OrderPlaced', o.customer_id, o.email.trim(), o.order_number, 'order confirmation', true);
+    return { sent: true };
+  } catch (err) {
+    await logAuto(db, 'OrderPlaced', o.customer_id, o.email.trim(), o.order_number, (err as Error).message, false);
+    return { sent: false, reason: (err as Error).message };
+  }
+}
+
+/** "Your water was delivered today", with the invoice attached when there is one. */
+export async function sendDeliveredEmail(db: Db, stopId: string): Promise<{ sent: boolean; reason?: string }> {
+  if (!mailConfigured()) return { sent: false, reason: 'email is not set up' };
+  if ((await getSetting(db, 'order_delivered_emails', 'true')) !== 'true') return { sent: false, reason: 'switched off' };
+  const s = await db.maybeOne<{
+    order_id: string; order_number: string; customer_id: string; name: string; email: string | null;
+    order_emails: boolean; stop_outcome: string; invoice_id: string | null; day: string;
+    empties: number; fulls: number; invoice_cycle: string;
+  }>(
+    `SELECT st.order_id, o.order_number, st.customer_id, c.name, c.email, c.order_emails,
+            st.stop_outcome, st.invoice_id, ds.delivery_date::text AS day,
+            st.bottles_empties_picked_up AS empties, st.bottles_delivered_full AS fulls, c.invoice_cycle
+     FROM delivery_stops st JOIN customers c ON c.id = st.customer_id
+     JOIN customer_orders o ON o.id = st.order_id
+     JOIN delivery_sheets ds ON ds.id = st.delivery_sheet_id
+     WHERE st.id = $1`, [stopId],
+  );
+  if (!s || s.stop_outcome !== 'Delivered') return { sent: false, reason: 'not delivered' };
+  if (!s.order_emails || !s.email?.trim()) return { sent: false, reason: 'no email for this customer' };
+  const key = `${s.order_number}@${stopId}`;
+  if (await alreadySent(db, 'OrderDelivered', key)) return { sent: false, reason: 'already sent' };
+
+  let attachment: { filename: string; content: Buffer } | null = null;
+  let invoiceLine = '';
+  if (s.invoice_id) {
+    const doc = await renderInvoicePdf(db, s.invoice_id);
+    attachment = { filename: doc.filename, content: doc.pdf };
+    const inv = await db.one<{ invoice_number: string; balance_cents: number; due_date: string | null }>(
+      `SELECT invoice_number, balance_cents, due_date::text AS due_date FROM invoice_ledger WHERE invoice_id = $1`,
+      [s.invoice_id],
+    );
+    invoiceLine = `Invoice ${inv.invoice_number} is attached`
+      + (num(inv.balance_cents) > 0 ? `: ${cash(num(inv.balance_cents))} to pay${inv.due_date ? `, due ${fmtDate(inv.due_date)}` : ''}.` : ', paid in full. Thank you.');
+  } else if (s.invoice_cycle === 'Weekly' || s.invoice_cycle === 'Monthly') {
+    invoiceLine = `This delivery will be on your ${s.invoice_cycle.toLowerCase()} invoice.`;
+  }
+  const text = [
+    `Good day ${s.name},`,
+    '',
+    `Your order ${s.order_number} was delivered on ${fmtDate(s.day)}:`,
+    '',
+    await orderLines(db, s.order_id, true),
+    ...(num(s.fulls) > 0 || num(s.empties) > 0
+      ? ['', `5-gallon bottles: ${num(s.fulls)} full left with you, ${num(s.empties)} empties collected.`] : []),
+    '',
+    ...(invoiceLine ? [invoiceLine, ''] : []),
+    `Your account and invoices: ${siteUrl()}`,
+    '',
+    'Thank you for choosing Alka Vida.',
+    '1506 Investments Limited',
+  ].join('\n');
+  try {
+    await sendMail({
+      to: s.email.trim(), subject: `Alka Vida order ${s.order_number} delivered`, text,
+      attachments: attachment ? [attachment] : undefined,
+    });
+    await logAuto(db, 'OrderDelivered', s.customer_id, s.email.trim(), key, 'delivery confirmation', true);
+    return { sent: true };
+  } catch (err) {
+    await logAuto(db, 'OrderDelivered', s.customer_id, s.email.trim(), key, (err as Error).message, false);
+    return { sent: false, reason: (err as Error).message };
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* News & offers                                                       */
+/* ------------------------------------------------------------------ */
+
+export interface NewsInput {
+  kind?: 'News' | 'Promotion' | 'Closure' | 'Update';
+  title?: string; body?: string;
+  startsOn?: string | null; endsOn?: string | null;
+  published?: boolean; pinned?: boolean;
+}
+
+const KINDS = ['News', 'Promotion', 'Closure', 'Update'];
+
+export async function listNews(db: Db, opts: { live?: boolean } = {}) {
+  return db.query(
+    `SELECT id, kind, title, body, starts_on::text AS starts_on, ends_on::text AS ends_on,
+            published, pinned, created_at, updated_at,
+            (published AND starts_on <= business_today()
+              AND (ends_on IS NULL OR ends_on >= business_today())) AS live
+     FROM news_posts
+     WHERE NOT $1::boolean
+        OR (published AND starts_on <= business_today()
+            AND (ends_on IS NULL OR ends_on >= business_today()))
+     ORDER BY pinned DESC, starts_on DESC, created_at DESC
+     LIMIT 100`, [opts.live === true],
+  );
+}
+
+export async function saveNews(db: Db, actor: Actor, id: string | null, input: NewsInput): Promise<{ id: string }> {
+  requireRole(actor, 'admin', 'user');
+  const title = input.title?.trim();
+  if (!title) throw new RuleViolation('a post needs a headline');
+  const kind = KINDS.includes(input.kind ?? '') ? input.kind! : 'News';
+  if (input.endsOn && input.startsOn && input.endsOn < input.startsOn) {
+    throw new RuleViolation('it cannot stop showing before it starts');
+  }
+  return db.tx(async (t) => {
+    let postId = id;
+    if (postId) {
+      await t.query(
+        `UPDATE news_posts SET kind = $2, title = $3, body = $4,
+           starts_on = COALESCE($5::date, starts_on), ends_on = $6::date,
+           published = $7, pinned = $8, updated_at = now()
+         WHERE id = $1`,
+        [postId, kind, title, input.body?.trim() ?? '', input.startsOn || null, input.endsOn || null,
+         input.published !== false, !!input.pinned],
+      );
+    } else {
+      const row = await t.one<{ id: string }>(
+        `INSERT INTO news_posts (kind, title, body, starts_on, ends_on, published, pinned, created_by)
+         VALUES ($1,$2,$3,COALESCE($4::date, business_today()),$5::date,$6,$7,$8) RETURNING id`,
+        [kind, title, input.body?.trim() ?? '', input.startsOn || null, input.endsOn || null,
+         input.published !== false, !!input.pinned, actor.id],
+      );
+      postId = row.id;
+    }
+    await audit(t, actor, id ? 'update' : 'create', 'NewsPost', postId, title, { kind });
+    return { id: postId! };
+  });
+}
+
+export async function deleteNews(db: Db, actor: Actor, id: string): Promise<void> {
+  requireRole(actor, 'admin', 'user');
+  await db.tx(async (t) => {
+    await t.query(`DELETE FROM news_posts WHERE id = $1`, [id]);
+    await audit(t, actor, 'delete', 'NewsPost', id, id, {});
+  });
+}
+
+/* ------------------------------------------------------------------ */
+/* Customer lists                                                      */
+/* ------------------------------------------------------------------ */
+
+export interface ListCriteria {
+  zones?: string[];
+  days?: string[];
+  accountTypes?: string[];
+  cycles?: string[];
+  priceTierIds?: string[];
+  /** Owes anything at all. */
+  owes?: boolean;
+  /** Has an invoice past its due date. */
+  overdue?: boolean;
+  /** Ordered within the last N days. */
+  orderedWithinDays?: number | null;
+  /** Has NOT ordered for N days (or ever). */
+  quietForDays?: number | null;
+  /** Can sign in to the portal. */
+  onPortal?: boolean;
+}
+
+export interface ListMember {
+  id: string; name: string; email: string | null; phone: string | null; whatsapp: string | null;
+  delivery_zone: string | null; account_type: string; marketing_opt_out: boolean;
+  balance_cents: number;
+}
+
+/** Customers matching a rule, plus anyone added by hand, less anyone left out. */
+export async function resolveList(
+  db: Queryable, criteria: ListCriteria, includeIds: string[] = [], excludeIds: string[] = [],
+): Promise<ListMember[]> {
+  const c = criteria ?? {};
+  const arr = (v: unknown) => (Array.isArray(v) && v.length ? v.map(String) : null);
+  const n = (v: unknown) => (v === null || v === undefined || v === '' ? null : Math.max(0, Math.round(Number(v)) || 0));
+  return db.query<ListMember>(
+    `SELECT c.id, c.name, c.email, c.phone, c.whatsapp, c.delivery_zone, c.account_type,
+            c.marketing_opt_out, COALESCE(b.balance_cents, 0)::bigint AS balance_cents
+     FROM customers c
+     LEFT JOIN customer_balances b ON b.customer_id = c.id
+     WHERE c.active AND c.name <> 'Cash Walk-In'
+       AND NOT (c.id = ANY($10::uuid[]))
+       AND (c.id = ANY($9::uuid[]) OR (
+             ($1::text[] IS NULL OR c.delivery_zone = ANY($1::text[]))
+         AND ($2::text[] IS NULL OR c.delivery_days && $2::text[])
+         AND ($3::text[] IS NULL OR c.account_type = ANY($3::text[]))
+         AND ($4::text[] IS NULL OR c.invoice_cycle = ANY($4::text[]))
+         AND ($5::uuid[] IS NULL OR c.price_tier_id = ANY($5::uuid[]))
+         AND (NOT $6::boolean OR COALESCE(b.balance_cents, 0) > 0)
+         AND (NOT $7::boolean OR EXISTS (
+               SELECT 1 FROM invoice_ledger l WHERE l.customer_id = c.id AND NOT l.is_credit_note
+                 AND l.status <> 'Cancelled' AND l.balance_cents > 0
+                 AND l.due_date < business_today()))
+         AND ($8::int IS NULL OR EXISTS (
+               SELECT 1 FROM customer_orders o WHERE o.customer_id = c.id AND o.status <> 'Cancelled'
+                 AND o.order_date >= business_today() - $8::int))
+         AND ($11::int IS NULL OR NOT EXISTS (
+               SELECT 1 FROM customer_orders o WHERE o.customer_id = c.id AND o.status <> 'Cancelled'
+                 AND o.order_date >= business_today() - $11::int))
+         AND (NOT $12::boolean OR c.user_id IS NOT NULL)
+       ))
+     ORDER BY c.name`,
+    [arr(c.zones), arr(c.days), arr(c.accountTypes), arr(c.cycles), arr(c.priceTierIds),
+     !!c.owes, !!c.overdue, n(c.orderedWithinDays), includeIds ?? [], excludeIds ?? [],
+     n(c.quietForDays), !!c.onPortal],
+  );
+}
+
+export async function listCustomerLists(db: Db) {
+  const lists = await db.query<{
+    id: string; name: string; criteria: ListCriteria; include_ids: string[]; exclude_ids: string[];
+    updated_at: string;
+  }>(`SELECT id, name, criteria, include_ids, exclude_ids, updated_at FROM customer_lists ORDER BY name`);
+  const out = [];
+  for (const l of lists) {
+    const members = await resolveList(db, l.criteria, l.include_ids, l.exclude_ids);
+    out.push({ ...l, size: members.length, withEmail: members.filter((m) => m.email?.trim()).length });
+  }
+  return out;
+}
+
+export async function saveCustomerList(
+  db: Db, actor: Actor, id: string | null,
+  input: { name?: string; criteria?: ListCriteria; includeIds?: string[]; excludeIds?: string[] },
+): Promise<{ id: string }> {
+  requireRole(actor, 'admin', 'user');
+  const name = input.name?.trim();
+  if (!name) throw new RuleViolation('give the list a name, e.g. "Kingston, Mondays"');
+  return db.tx(async (t) => {
+    const dup = await t.maybeOne(`SELECT 1 FROM customer_lists WHERE lower(name) = lower($1) AND ($2::uuid IS NULL OR id <> $2::uuid)`, [name, id]);
+    if (dup) throw new RuleViolation(`there is already a list called "${name}"`);
+    let listId = id;
+    const vals = [name, JSON.stringify(input.criteria ?? {}), input.includeIds ?? [], input.excludeIds ?? []];
+    if (listId) {
+      await t.query(
+        `UPDATE customer_lists SET name = $2, criteria = $3::jsonb, include_ids = $4::uuid[],
+           exclude_ids = $5::uuid[], updated_at = now() WHERE id = $1`, [listId, ...vals],
+      );
+    } else {
+      const row = await t.one<{ id: string }>(
+        `INSERT INTO customer_lists (name, criteria, include_ids, exclude_ids, created_by)
+         VALUES ($1,$2::jsonb,$3::uuid[],$4::uuid[],$5) RETURNING id`, [...vals, actor.id],
+      );
+      listId = row.id;
+    }
+    await audit(t, actor, id ? 'update' : 'create', 'CustomerList', listId, name, {});
+    return { id: listId! };
+  });
+}
+
+export async function deleteCustomerList(db: Db, actor: Actor, id: string): Promise<void> {
+  requireRole(actor, 'admin', 'user');
+  await db.tx(async (t) => {
+    await t.query(`DELETE FROM customer_lists WHERE id = $1`, [id]);
+    await audit(t, actor, 'delete', 'CustomerList', id, id, {});
+  });
+}
+
+/* ------------------------------------------------------------------ */
+/* WhatsApp                                                            */
+/* ------------------------------------------------------------------ */
+
+/**
+ * A number as WhatsApp wants it: digits only, with the country code. A
+ * Jamaican number written the usual way (876-555-1234, or just 555-1234) gets
+ * the +1 876 it needs.
+ */
+export function whatsappDigits(raw: string | null | undefined): string | null {
+  const d = (raw ?? '').replace(/\D/g, '');
+  if (!d) return null;
+  if (d.length === 7) return `1876${d}`;
+  if (d.length === 10) return `1${d}`;
+  if (d.length >= 11) return d;
+  return null;
+}
+
+export function whatsappLink(raw: string | null | undefined, text?: string): string | null {
+  const digits = whatsappDigits(raw);
+  if (!digits) return null;
+  return `https://wa.me/${digits}${text ? `?text=${encodeURIComponent(text)}` : ''}`;
+}
+
+export async function businessWhatsapp(db: Queryable): Promise<{ number: string; link: string | null }> {
+  const number = (await getSetting(db, 'whatsapp_number', '')).trim();
+  return { number, link: whatsappLink(number, 'Hi Alka Vida, I would like to place an order:') };
+}
+
+/* ------------------------------------------------------------------ */
+/* Messages to customers                                               */
+/* ------------------------------------------------------------------ */
+
+export interface BroadcastInput {
+  subject?: string;
+  body?: string;
+  purpose?: 'Marketing' | 'Service';
+  listId?: string | null;
+  criteria?: ListCriteria | null;
+  customerIds?: string[] | null;
+  /** Also put it on the portal's News & offers. */
+  postAsNews?: { kind?: NewsInput['kind']; endsOn?: string | null } | null;
+}
+
+/**
+ * Queue a message to a list (or a rule, or picked customers) and start
+ * sending. Marketing respects each customer's opt-out; Service messages
+ * (closures, blackout days, a change of delivery day) go to everyone.
+ * Resend's free plan sends 100 emails a day, so at most the daily cap goes
+ * now and the rest go on the hourly check over the next day or two.
+ */
+export async function createBroadcast(db: Db, actor: Actor, input: BroadcastInput) {
+  requireRole(actor, 'admin', 'user');
+  const subject = input.subject?.trim();
+  const body = input.body?.trim();
+  if (!subject) throw new RuleViolation('the message needs a subject');
+  if (!body) throw new RuleViolation('the message needs some words');
+  const purpose = input.purpose === 'Service' ? 'Service' : 'Marketing';
+
+  let listName: string | null = null;
+  let members: ListMember[];
+  if (input.listId) {
+    const l = await db.maybeOne<{ name: string; criteria: ListCriteria; include_ids: string[]; exclude_ids: string[] }>(
+      `SELECT name, criteria, include_ids, exclude_ids FROM customer_lists WHERE id = $1`, [input.listId],
+    );
+    if (!l) throw new RuleViolation('that list no longer exists');
+    listName = l.name;
+    members = await resolveList(db, l.criteria, l.include_ids, l.exclude_ids);
+  } else if (input.customerIds?.length) {
+    members = await resolveList(db, { zones: ['__none__'] }, input.customerIds, []);
+    listName = `${members.length} chosen customer${members.length === 1 ? '' : 's'}`;
+  } else {
+    members = await resolveList(db, input.criteria ?? {}, [], []);
+    listName = 'Customers matching a filter';
+  }
+  if (members.length === 0) throw new RuleViolation('nobody is on that list');
+
+  const id = await db.tx(async (t) => {
+    let newsId: string | null = null;
+    if (input.postAsNews) {
+      const n = await t.one<{ id: string }>(
+        `INSERT INTO news_posts (kind, title, body, ends_on, created_by)
+         VALUES ($1,$2,$3,$4::date,$5) RETURNING id`,
+        [KINDS.includes(input.postAsNews.kind ?? '') ? input.postAsNews.kind : (purpose === 'Service' ? 'Update' : 'Promotion'),
+         subject, body, input.postAsNews.endsOn || null, actor.id],
+      );
+      newsId = n.id;
+    }
+    const b = await t.one<{ id: string }>(
+      `INSERT INTO broadcasts (subject, body, purpose, list_id, list_name, criteria, news_post_id,
+                               created_by, created_by_name)
+       VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7,$8,$9) RETURNING id`,
+      [subject, body, purpose, input.listId ?? null, listName,
+       input.criteria ? JSON.stringify(input.criteria) : null, newsId, actor.id, actor.name],
+    );
+    for (const m of members) {
+      const email = m.email?.trim() || null;
+      const skip = !email ? 'no email address' : (purpose === 'Marketing' && m.marketing_opt_out ? 'opted out of offers' : null);
+      await t.query(
+        `INSERT INTO broadcast_recipients (broadcast_id, customer_id, email, whatsapp, status, error)
+         VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT DO NOTHING`,
+        [b.id, m.id, email, whatsappDigits(m.whatsapp ?? m.phone), skip ? 'Skipped' : 'Queued', skip],
+      );
+    }
+    await audit(t, actor, 'create', 'Broadcast', b.id, subject, { purpose, listName, recipients: members.length });
+    return b.id;
+  });
+
+  const sent = await sendQueuedMessages(db);
+  return { id, recipients: members.length, ...sent };
+}
+
+/** Send what is queued, up to what is left of today's allowance. */
+export async function sendQueuedMessages(db: Db): Promise<{ sentNow: number; stillQueued: number; problem?: string }> {
+  const queued = async () => num((await db.one<{ n: number }>(
+    `SELECT COUNT(*)::int AS n FROM broadcast_recipients WHERE status = 'Queued'`)).n);
+  if (!mailConfigured()) return { sentNow: 0, stillQueued: await queued(), problem: 'email is not set up' };
+  const cap = Math.max(0, Number(await getSetting(db, 'broadcast_daily_cap', '80')) || 0);
+  const today = num((await db.one<{ n: number }>(
+    `SELECT COUNT(*)::int AS n FROM broadcast_recipients
+     WHERE status IN ('Sent','Failed') AND business_date(sent_at) = business_today()`)).n);
+  const room = Math.max(0, cap - today);
+  const batch = await db.query<{
+    id: string; email: string; customer_id: string; name: string; subject: string; body: string; purpose: string;
+  }>(
+    `SELECT r.id, r.email, r.customer_id, c.name, b.subject, b.body, b.purpose
+     FROM broadcast_recipients r JOIN broadcasts b ON b.id = r.broadcast_id
+     JOIN customers c ON c.id = r.customer_id
+     WHERE r.status = 'Queued' ORDER BY b.created_at, c.name LIMIT $1`, [room],
+  );
+  let sentNow = 0;
+  for (const r of batch) {
+    const text = [
+      `Good day ${r.name},`, '', r.body, '',
+      `Order or see your account: ${siteUrl()}`, '',
+      'Alka Vida · 1506 Investments Limited',
+      ...(r.purpose === 'Marketing'
+        ? ['', 'To stop receiving offers from us, reply "stop" and we will take you off the list.'] : []),
+    ].join('\n');
+    try {
+      await sendMail({ to: r.email, subject: r.subject, text });
+      await db.query(`UPDATE broadcast_recipients SET status = 'Sent', sent_at = now(), error = NULL WHERE id = $1`, [r.id]);
+      sentNow += 1;
+    } catch (err) {
+      await db.query(`UPDATE broadcast_recipients SET status = 'Failed', sent_at = now(), error = $2 WHERE id = $1`,
+        [r.id, (err as Error).message.slice(0, 300)]);
+    }
+  }
+  return { sentNow, stillQueued: await queued() };
+}
+
+export async function listBroadcasts(db: Db) {
+  return db.query(
+    `SELECT b.id, b.subject, b.purpose, b.list_name, b.created_at, b.created_by_name,
+            COUNT(r.*)::int AS recipients,
+            COUNT(r.*) FILTER (WHERE r.status = 'Sent')::int AS sent,
+            COUNT(r.*) FILTER (WHERE r.status = 'Queued')::int AS queued,
+            COUNT(r.*) FILTER (WHERE r.status = 'Failed')::int AS failed,
+            COUNT(r.*) FILTER (WHERE r.status = 'Skipped')::int AS skipped
+     FROM broadcasts b LEFT JOIN broadcast_recipients r ON r.broadcast_id = b.id
+     GROUP BY b.id ORDER BY b.created_at DESC LIMIT 50`,
+  );
+}
+
+/** One message with everyone it went to, and a WhatsApp link for each. */
+export async function getBroadcast(db: Db, id: string) {
+  const b = await db.maybeOne<{ id: string; subject: string; body: string; purpose: string; list_name: string | null; created_at: string }>(
+    `SELECT id, subject, body, purpose, list_name, created_at FROM broadcasts WHERE id = $1`, [id],
+  );
+  if (!b) return null;
+  const rows = await db.query<{
+    customer_id: string; name: string; email: string | null; whatsapp: string | null;
+    status: string; error: string | null; sent_at: string | null;
+  }>(
+    `SELECT r.customer_id, c.name, r.email, r.whatsapp, r.status, r.error, r.sent_at
+     FROM broadcast_recipients r JOIN customers c ON c.id = r.customer_id
+     WHERE r.broadcast_id = $1 ORDER BY c.name`, [id],
+  );
+  const waText = `${b.subject}\n\n${b.body}\n\nOrder online: ${siteUrl()}`;
+  return {
+    ...b,
+    recipients: rows.map((r) => ({ ...r, whatsappLink: r.whatsapp ? `https://wa.me/${r.whatsapp}?text=${encodeURIComponent(waText)}` : null })),
+  };
+}

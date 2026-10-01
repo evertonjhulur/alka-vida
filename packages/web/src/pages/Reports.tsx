@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { api } from '../lib/api';
+import { downloadCsv } from '../lib/csv';
 import { money, day, todayInJamaica } from '../lib/format';
 
 /**
@@ -16,11 +17,19 @@ interface Sales {
   totals: {
     netCents: number; grossCents: number; invoices: number; customers: number;
     newCustomers: number | null; creditNoteCents: number; creditNotes: number;
+    creditNoteNetCents: number; creditNoteGctCents: number;
+    netAfterCreditsCents: number; grossAfterCreditsCents: number; gctCents: number; gctAfterCreditsCents: number;
   };
   byProduct: Array<{ productId: string; name: string; bottlesPerCase: number; cases: number; bottles: number; cents: number }>;
   byZone: Array<{ zone: string; invoices: number; cents: number }>;
   topCustomers: Array<{ customerId: string; name: string; invoices: number; cents: number }>;
   bottles: { out: number; back: number; lost: number };
+}
+interface Txn {
+  invoiceId: string; number: string; date: string; type: string; customerId: string; customer: string;
+  orders: string | null; customerPo: string | null; against: string | null;
+  subtotalCents: number; discountCents: number; netCents: number; gctCents: number; totalCents: number;
+  balanceCents: number; status: string; zone: string | null; deliveredOn: string | null;
 }
 interface RoundRow {
   id: string; date: string; zone: string; driver: string | null; status: string; started: boolean;
@@ -49,7 +58,7 @@ interface MaterialCost {
 }
 
 const TABS = [
-  ['sales', 'Sales'], ['margin', 'Margin'], ['rounds', 'Rounds and cash'], ['owed', 'Money owed'], ['bottles', 'Bottles'],
+  ['sales', 'Sales'], ['transactions', 'Sales transactions'], ['margin', 'Margin'], ['rounds', 'Rounds and cash'], ['owed', 'Money owed'], ['bottles', 'Bottles'],
   ['discounts', 'Discounts'], ['materials', 'Material cost'],
 ] as const;
 type Tab = typeof TABS[number][0];
@@ -74,13 +83,6 @@ function rangeFor(p: Period, custom: { from: string; to: string }): { from: stri
   return { from: '', to: '', label: 'all time' };
 }
 
-function downloadCsv(name: string, rows: Array<Array<string | number>>) {
-  const csv = rows.map((r) => r.map((c) => `"${String(c).replace(/"/g, '""')}"`).join(',')).join('\n');
-  const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv' }));
-  const a = document.createElement('a');
-  a.href = url; a.download = name; a.click();
-  URL.revokeObjectURL(url);
-}
 const dollars = (c: number | null) => (c === null ? '' : (c / 100).toFixed(2));
 
 export default function Reports() {
@@ -97,6 +99,7 @@ export default function Reports() {
   const [pool, setPool] = useState<Pool[] | null>(null);
   const [disc, setDisc] = useState<{ totals: DiscountTotals; byClient: PerClient[] } | null>(null);
   const [materials, setMaterials] = useState<MaterialCost[] | null>(null);
+  const [txns, setTxns] = useState<Txn[] | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const q = new URLSearchParams();
@@ -110,6 +113,7 @@ export default function Reports() {
     if (tab === 'sales' || tab === 'bottles') api.get<Sales>(`/api/reports/sales?${qs}`).then(setSales).catch(fail);
     if (tab === 'rounds') api.get<Rounds>(`/api/reports/rounds?${qs}`).then(setRounds).catch(fail);
     if (tab === 'margin') api.get<Margin[]>(`/api/reports/margin?${qs}`).then(setMargin).catch(fail);
+    if (tab === 'transactions') api.get<Txn[]>(`/api/reports/sales-transactions?${qs}`).then(setTxns).catch(fail);
     if (tab === 'discounts') api.get<{ totals: DiscountTotals; byClient: PerClient[] }>(`/api/reports/discounts?${qs}`).then(setDisc).catch(fail);
   }, [tab, qs]);
   useEffect(() => {
@@ -125,15 +129,31 @@ export default function Reports() {
     if (tab === 'sales' && sales) {
       downloadCsv(file('sales'), [
         ['Sales', range.label], [],
-        ['Sales before GCT', dollars(sales.totals.netCents)], ['Sales with GCT', dollars(sales.totals.grossCents)],
-        ['Invoices', sales.totals.invoices], ['Customers buying', sales.totals.customers],
-        ['Credit notes', dollars(sales.totals.creditNoteCents)], [],
+        ['Invoiced before GCT', dollars(sales.totals.netCents)],
+        ['Less credit notes before GCT', dollars(-sales.totals.creditNoteNetCents)],
+        ['Net sales before GCT (post this)', dollars(sales.totals.netAfterCreditsCents)],
+        ['GCT, after credit notes', dollars(sales.totals.gctAfterCreditsCents)],
+        ['Net sales with GCT', dollars(sales.totals.grossAfterCreditsCents)],
+        ['Invoices', sales.totals.invoices], ['Credit notes', sales.totals.creditNotes],
+        ['Customers buying', sales.totals.customers], [],
         ['Product', 'Cases', 'Bottles', 'Sales (before discount and GCT)'],
         ...sales.byProduct.map((p) => [p.name, p.cases, p.bottles, dollars(p.cents)]), [],
         ['Where it went', 'Invoices', 'Sales before GCT'],
         ...sales.byZone.map((z) => [z.zone, z.invoices, dollars(z.cents)]), [],
         ['Customer', 'Invoices', 'Sales before GCT'],
         ...sales.topCustomers.map((c) => [c.name, c.invoices, dollars(c.cents)]),
+      ]);
+    } else if (tab === 'transactions' && txns) {
+      downloadCsv(file('sales-transactions'), [
+        ['Date', 'Type', 'Number', 'Customer', 'Order', 'Customer PO', 'Against invoice', 'Subtotal', 'Discount',
+          'Net before GCT', 'GCT', 'Total', 'Still owed', 'Status', 'Round', 'Delivered'],
+        ...txns.map((t) => [t.date, t.type, t.number, t.customer, t.orders ?? '', t.customerPo ?? '', t.against ?? '',
+          dollars(t.subtotalCents), dollars(t.discountCents), dollars(t.netCents), dollars(t.gctCents), dollars(t.totalCents),
+          t.type === 'Invoice' ? dollars(t.balanceCents) : '', t.status, t.zone ?? '', t.deliveredOn ?? '']),
+        [],
+        ['', '', '', '', '', '', 'Totals', dollars(txns.reduce((a, t) => a + t.subtotalCents, 0)),
+          dollars(txns.reduce((a, t) => a + t.discountCents, 0)), dollars(txns.reduce((a, t) => a + t.netCents, 0)),
+          dollars(txns.reduce((a, t) => a + t.gctCents, 0)), dollars(txns.reduce((a, t) => a + t.totalCents, 0))],
       ]);
     } else if (tab === 'rounds' && rounds) {
       downloadCsv(file('rounds-and-cash'), [
@@ -174,6 +194,49 @@ export default function Reports() {
   }
 
   // ---- tabs ----
+  const transactionsTab = () => {
+    if (!txns) return <p className="muted">Loading…</p>;
+    if (txns.length === 0) return <div className="panel"><p className="muted" style={{ margin: 0 }}>No invoices or credit notes in {range.label}.</p></div>;
+    const sum = (k: 'subtotalCents' | 'discountCents' | 'netCents' | 'gctCents' | 'totalCents') => txns.reduce((a, t) => a + t[k], 0);
+    return (
+      <div className="panel" style={{ padding: 0 }}>
+        <div className="panel-pad">
+          <h2 className="side-h" style={{ margin: 0 }}>What makes up the sales total</h2>
+          <div className="muted small">Every invoice and credit note dated {range.label === 'all time' ? 'at any time' : `in ${range.label}`}, with the order it came from. Credit notes are negative, so the totals match the Sales tab.</div>
+        </div>
+        <table className="orders-table">
+          <thead>
+            <tr><th>Date</th><th>Number</th><th>Customer</th><th>Order</th>
+              <th className="num">Before GCT</th><th className="num">GCT</th><th className="num">Total</th><th>Status</th></tr>
+          </thead>
+          <tbody>
+            {txns.map((t) => (
+              <tr key={t.invoiceId}>
+                <td data-label="Date">{day(t.date)}</td>
+                <td data-label="Number"><Link to={`/invoices/${t.invoiceId}`}>{t.number}</Link>
+                  {t.type !== 'Invoice' && <div className="muted small">credit note{t.against ? ` on ${t.against}` : ''}</div>}</td>
+                <td data-label="Customer"><Link to={`/customers/${t.customerId}`}>{t.customer}</Link></td>
+                <td data-label="Order" className="small">{t.orders ?? '—'}{t.customerPo && <div className="muted">PO {t.customerPo}</div>}</td>
+                <td data-label="Before GCT" className="num">{money(t.netCents)}
+                  {t.discountCents !== 0 && <div className="muted small">after {money(Math.abs(t.discountCents))} off</div>}</td>
+                <td data-label="GCT" className="num">{money(t.gctCents)}</td>
+                <td data-label="Total" className="num"><strong>{money(t.totalCents)}</strong></td>
+                <td data-label="Status" className="small">{t.status}</td>
+              </tr>
+            ))}
+            <tr className="group-row">
+              <td colSpan={4}><strong>{txns.length} documents</strong></td>
+              <td className="num"><strong>{money(sum('netCents'))}</strong></td>
+              <td className="num"><strong>{money(sum('gctCents'))}</strong></td>
+              <td className="num"><strong>{money(sum('totalCents'))}</strong></td>
+              <td />
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    );
+  };
+
   const salesTab = () => {
     if (!sales) return <p className="muted">Loading…</p>;
     const t = sales.totals;
@@ -184,8 +247,8 @@ export default function Reports() {
     return (
       <>
         <div className="stat-row">
-          <div className="stat"><div className="stat-label">Sales</div><div className="stat-value">{money(t.netCents)}</div>
-            <div className="stat-note">{money(t.grossCents)} with GCT</div></div>
+          <div className="stat"><div className="stat-label">Net sales</div><div className="stat-value">{money(t.netAfterCreditsCents)}</div>
+            <div className="stat-note">{money(t.grossAfterCreditsCents)} with GCT{t.creditNotes > 0 ? ', after credit notes' : ''}</div></div>
           <div className="stat"><div className="stat-label">Deliveries and collections</div><div className="stat-value">{t.invoices}</div>
             <div className="stat-note">average {money(Math.round(t.netCents / Math.max(t.invoices, 1)))}</div></div>
           <div className="stat"><div className="stat-label">Customers buying</div><div className="stat-value">{t.customers}</div>
@@ -193,9 +256,20 @@ export default function Reports() {
           <div className="stat"><div className="stat-label">Returnable bottles</div><div className="stat-value">{sales.bottles.out} out · {sales.bottles.back} back</div>
             <div className="stat-note">{Math.max(sales.bottles.out - sales.bottles.back - sales.bottles.lost, 0)} still with customers</div></div>
         </div>
-        {t.creditNotes > 0 && (
-          <p className="muted small">Credit notes in this period: {t.creditNotes}, {money(t.creditNoteCents)}. Not taken off the figures above.</p>
-        )}
+        <section className="panel" style={{ maxWidth: 520 }}>
+          <h2 className="side-h">For QuickBooks, {range.label}</h2>
+          <div className="total-line"><span>Invoiced, before GCT</span><span>{money(t.netCents)}</span></div>
+          <div className="total-line"><span>Less {t.creditNotes} credit note{t.creditNotes === 1 ? '' : 's'}, before GCT</span><span>−{money(t.creditNoteNetCents)}</span></div>
+          <div className="total-line grand"><span>Net sales, before GCT</span><span>{money(t.netAfterCreditsCents)}</span></div>
+          <div className="total-line"><span>GCT collected, after credit notes</span><span>{money(t.gctAfterCreditsCents)}</span></div>
+          <div className="total-line"><span>Net sales with GCT</span><span>{money(t.grossAfterCreditsCents)}</span></div>
+          <p className="muted small" style={{ marginBottom: 0 }}>
+            Credit notes are taken off. The charts below are what was invoiced, before credit notes.{' '}
+            <button type="button" className="as-link small" onClick={() => setParams({ tab: 'transactions' }, { replace: true })}>
+              See every invoice and credit note
+            </button>
+          </p>
+        </section>
         <div className="report-grid">
           <section className="panel">
             {top && <h2 className="side-h">{short(top.name)} brings in the most: {pct(top.cents, productTotal)}% of sales</h2>}
@@ -471,7 +545,7 @@ export default function Reports() {
     );
   };
 
-  const body = tab === 'sales' ? salesTab() : tab === 'margin' ? marginTab() : tab === 'rounds' ? roundsTab() : tab === 'owed' ? owedTab()
+  const body = tab === 'sales' ? salesTab() : tab === 'transactions' ? transactionsTab() : tab === 'margin' ? marginTab() : tab === 'rounds' ? roundsTab() : tab === 'owed' ? owedTab()
     : tab === 'bottles' ? bottlesTab() : tab === 'discounts' ? discountsTab() : materialsTab();
 
   return (

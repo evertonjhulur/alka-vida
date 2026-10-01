@@ -184,3 +184,21 @@ export async function downloadPost(path: string, body: unknown, filename: string
   a.remove();
   URL.revokeObjectURL(url);
 }
+
+/**
+ * Open a PDF from the API in a new tab, where the browser's own Print button
+ * prints it (team feedback, point 6: "downloadable or printable"). The tab is
+ * opened first, synchronously, so a pop-up blocker treats it as the click it is.
+ */
+export async function openPdf(path: string): Promise<void> {
+  const win = window.open('', '_blank');
+  try {
+    const blob = await requestBlob(path);
+    const url = URL.createObjectURL(blob);
+    if (win) win.location.href = url; else window.location.href = url;
+    setTimeout(() => URL.revokeObjectURL(url), 60_000);
+  } catch (err) {
+    win?.close();
+    throw err;
+  }
+}

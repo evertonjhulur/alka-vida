@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { api, download } from '../lib/api';
-import { money, toCents, when } from '../lib/format';
+import { money, toCents, when, day, todayInJamaica } from '../lib/format';
 import { ask } from '../components/Dialog';
 
 /**
@@ -43,6 +43,8 @@ export default function PurchaseOrders() {
   const [envRate, setEnvRate] = useState(0.375);
   const [open, setOpen] = useState<PODetail | null>(null);
   const [receipts, setReceipts] = useState<Record<string, string>>({});
+  /** The day it actually arrived (team feedback, point 18); blank = today. */
+  const [arrivedOn, setArrivedOn] = useState('');
   const [mailTo, setMailTo] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
@@ -161,8 +163,10 @@ export default function PurchaseOrders() {
         receipts: Object.entries(receipts)
           .map(([poLineItemId, q]) => ({ poLineItemId, quantityReceived: Number(q) || 0 }))
           .filter((r) => r.quantityReceived > 0),
+        receivedOn: arrivedOn || null,
       });
-    return `Received. ${result.batchIds.length} stock batch(es) created at this order's prices; production draws from them oldest first.`;
+    setArrivedOn('');
+    return `Received${arrivedOn ? ` (arrived ${day(arrivedOn)})` : ''}. ${result.batchIds.length} stock batch(es) created at this order's prices; production draws from them oldest first.`;
   }, 'Could not record the receipt');
 
   const emailIt = () => act(async () => {
@@ -399,7 +403,14 @@ export default function PurchaseOrders() {
               Env levy {money(Number(open.env_tax_cents))} · <strong>Total {money(Number(open.grand_total_cents))}</strong>
             </div>
             {!['Received', 'Cancelled'].includes(open.status) && (
-              <button disabled={busy} onClick={receive}>{busy ? 'Recording…' : 'Record what arrived'}</button>
+              <span className="row" style={{ gap: 8, alignItems: 'flex-end' }}>
+                <span className="field" style={{ marginBottom: 0 }}>
+                  <label htmlFor="arr">Arrived on</label>
+                  <input id="arr" type="date" value={arrivedOn} max={todayInJamaica()}
+                         onChange={(e) => setArrivedOn(e.target.value)} />
+                </span>
+                <button disabled={busy} onClick={receive}>{busy ? 'Recording…' : 'Record what arrived'}</button>
+              </span>
             )}
           </div>
         </div>

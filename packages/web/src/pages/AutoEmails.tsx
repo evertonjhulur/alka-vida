@@ -21,6 +21,83 @@ interface LogRow {
   period_key: string | null; detail: string | null; ok: boolean;
 }
 
+interface Ordering {
+  sameDayCutoff: string; whatsappNumber: string; broadcastDailyCap: number;
+  orderPlacedEmails: boolean; orderDeliveredEmails: boolean; mailConfigured: boolean;
+}
+
+/**
+ * Ordering and customer messages (team feedback, 1 Oct 2026): the same-day
+ * cut-off, the business WhatsApp number customers order on, order
+ * confirmation emails, and how many message emails go out a day.
+ */
+function OrderingSettings({ isAdmin }: { isAdmin: boolean }) {
+  const [o, setO] = useState<Ordering | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState<string | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  useEffect(() => { api.get<Ordering>('/api/settings/ordering').then(setO).catch((e) => setErr(e.message)); }, []);
+  if (!o) return err ? <div className="notice error">{err}</div> : null;
+  const set = <K extends keyof Ordering>(k: K, v: Ordering[K]) => setO({ ...o, [k]: v });
+  async function save(e: React.FormEvent) {
+    e.preventDefault();
+    setBusy(true); setErr(null); setNote(null);
+    try {
+      setO(await api.put<Ordering>('/api/settings/ordering', {
+        sameDayCutoff: o!.sameDayCutoff, whatsappNumber: o!.whatsappNumber,
+        broadcastDailyCap: o!.broadcastDailyCap, orderPlacedEmails: o!.orderPlacedEmails,
+        orderDeliveredEmails: o!.orderDeliveredEmails,
+      }));
+      setNote('Saved.');
+    } catch (e2) { setErr(e2 instanceof Error ? e2.message : 'Could not save'); } finally { setBusy(false); }
+  }
+  return (
+    <form className="panel" onSubmit={save}>
+      <h2 style={{ marginTop: 0 }}>Orders and messages</h2>
+      {err && <div className="notice error">{err}</div>}
+      {note && <div className="notice ok">{note}</div>}
+      <fieldset className="form-block" disabled={!isAdmin}>
+        <legend>Same-day orders</legend>
+        <div className="field">
+          <label htmlFor="cut">Cut-off time for same-day delivery</label>
+          <input id="cut" type="time" value={o.sameDayCutoff} onChange={(e) => set('sameDayCutoff', e.target.value)} />
+          <div className="muted small">
+            An order for today placed after this time still comes in, but waits in Needs a decision until an
+            administrator approves it. Not approved, it goes on the customer's next delivery day instead.
+          </div>
+        </div>
+      </fieldset>
+      <fieldset className="form-block" disabled={!isAdmin}>
+        <legend>Emails to customers about their orders</legend>
+        <label className="check"><input type="checkbox" checked={o.orderPlacedEmails} onChange={(e) => set('orderPlacedEmails', e.target.checked)} />
+          When an order is placed (portal or office)</label>
+        <label className="check"><input type="checkbox" checked={o.orderDeliveredEmails} onChange={(e) => set('orderDeliveredEmails', e.target.checked)} />
+          When it is delivered, with the invoice attached</label>
+        <div className="muted small">A customer can turn these off for themselves in their portal profile, or the office on their Details tab.</div>
+      </fieldset>
+      <fieldset className="form-block" disabled={!isAdmin}>
+        <legend>WhatsApp and messages</legend>
+        <div className="row">
+          <div className="field">
+            <label htmlFor="wa">Business WhatsApp number</label>
+            <input id="wa" type="tel" value={o.whatsappNumber} placeholder="876-555-1234"
+                   onChange={(e) => set('whatsappNumber', e.target.value)} />
+            <div className="muted small">Shows an "Order on WhatsApp" button on the customer portal. Blank hides it.</div>
+          </div>
+          <div className="field">
+            <label htmlFor="cap">Message emails a day</label>
+            <input id="cap" type="number" min="0" style={{ width: 100 }} value={o.broadcastDailyCap}
+                   onChange={(e) => set('broadcastDailyCap', Number(e.target.value))} />
+            <div className="muted small">Resend's free plan allows 100 emails a day in all; this leaves room for invoices.</div>
+          </div>
+        </div>
+      </fieldset>
+      {isAdmin ? <button disabled={busy}>{busy ? 'Saving…' : 'Save'}</button>
+        : <p className="muted small">Only an administrator can change these.</p>}
+    </form>
+  );
+}
+
 export default function AutoEmails({ session }: { session: Session }) {
   const [s, setS] = useState<Settings | null>(null);
   const [log, setLog] = useState<LogRow[]>([]);
@@ -58,8 +135,8 @@ export default function AutoEmails({ session }: { session: Session }) {
 
   return (
     <>
-      <h1>Automatic emails</h1>
-      <p className="subtitle">What Alka Vida sends on its own. It checks when it is opened and every hour while it runs.</p>
+      <h1>Emails &amp; ordering</h1>
+      <p className="subtitle">What Alka Vida sends on its own, and the rules for taking orders. It checks when it is opened and every hour while it runs.</p>
       {error && <div className="notice error">{error}</div>}
       {msg && <div className="notice ok">{msg}</div>}
       {!s.mailConfigured && (
@@ -69,7 +146,9 @@ export default function AutoEmails({ session }: { session: Session }) {
           still raised either way.
         </div>
       )}
+      <OrderingSettings isAdmin={isAdmin} />
       <form className="panel" onSubmit={save}>
+        <h2 style={{ marginTop: 0 }}>Statements and reminders</h2>
         <fieldset className="form-block" disabled={!isAdmin}>
           <legend>Monthly statements</legend>
           <label className="check">

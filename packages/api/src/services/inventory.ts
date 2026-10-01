@@ -9,7 +9,7 @@
 
 import type { Db, Queryable } from '../db/index.ts';
 import type { Actor } from './core.ts';
-import { audit, nextNumber, requireRole, num } from './core.ts';
+import { audit, businessToday, nextNumber, requireRole, num } from './core.ts';
 import type { Cents } from '@alka/shared';
 import {
   drawFifo, blendedAverageCost, blendedAverageBySupplier, RuleViolation, type Batch, GCT_RATE,
@@ -240,8 +240,15 @@ export async function receivePurchaseOrder(
   actor: Actor,
   poId: string,
   receipts: Array<{ poLineItemId: string; quantityReceived: number }>,
+  /** The day it actually arrived (team feedback, point 18); blank = today. */
+  receivedOn?: string | null,
 ): Promise<{ status: string; batchIds: string[] }> {
   requireRole(actor, 'admin', 'user');
+  const day = receivedOn ? String(receivedOn).slice(0, 10) : null;
+  if (day && !/^\d{4}-\d{2}-\d{2}$/.test(day)) throw new RuleViolation('the date it arrived is not a date');
+  if (day && day > businessToday()) throw new RuleViolation('it cannot have arrived in the future');
+  // Noon Jamaica time, so the day reads the same everywhere it is shown.
+  const at = day ? `${day}T12:00:00-05:00` : null;
 
   return db.tx(async (t) => {
     const po = await t.one<{ supplier_id: string; po_number: string; status: string }>(
@@ -268,11 +275,11 @@ export async function receivePurchaseOrder(
       const batch = await t.one<{ id: string }>(
         `INSERT INTO material_batches
            (raw_material_id, supplier_id, po_id, po_line_item_id,
-            unit_cost_cents, quantity_received, quantity_remaining)
-         VALUES ($1,$2,$3,$4,$5,$6,$6)
+            unit_cost_cents, quantity_received, quantity_remaining, received_date)
+         VALUES ($1,$2,$3,$4,$5,$6,$6,COALESCE($7::timestamptz, now()))
          RETURNING id`,
         [line.raw_material_id, po.supplier_id, poId, line.id,
-         num(line.unit_cost_cents), r.quantityReceived],
+         num(line.unit_cost_cents), r.quantityReceived, at],
       );
       batchIds.push(batch.id);
 
@@ -287,11 +294,11 @@ export async function receivePurchaseOrder(
       await t.query(
         `INSERT INTO inventory_transactions
            (item_type, item_id, item_name, quantity, direction, reference,
-            reference_type, unit_cost_cents, total_cost_cents, batch_ids)
-         VALUES ('RawMaterial',$1,$2,$3,'in',$4,'PurchaseOrder',$5,$6,$7)`,
+            reference_type, unit_cost_cents, total_cost_cents, batch_ids, txn_date)
+         VALUES ('RawMaterial',$1,$2,$3,'in',$4,'PurchaseOrder',$5,$6,$7,COALESCE($8::timestamptz, now()))`,
         [line.raw_material_id, material.name, r.quantityReceived, po.po_number,
          num(line.unit_cost_cents),
-         Math.round(num(line.unit_cost_cents) * r.quantityReceived), [batch.id]],
+         Math.round(num(line.unit_cost_cents) * r.quantityReceived), [batch.id], at],
       );
     }
 
@@ -302,12 +309,12 @@ export async function receivePurchaseOrder(
     );
     const status = num(outstanding.c) === 0 ? 'Received' : 'Partially Received';
     await t.query(
-      `UPDATE purchase_orders SET status = $2, receiving_date = business_today() WHERE id = $1`,
-      [poId, status],
+      `UPDATE purchase_orders SET status = $2, receiving_date = COALESCE($3::date, business_today()) WHERE id = $1`,
+      [poId, status, day],
     );
 
     await audit(t, actor, 'receive', 'PurchaseOrder', poId, po.po_number,
-      { receipts, batchIds, status });
+      { receipts, batchIds, status, receivedOn: day });
 
     return { status, batchIds };
   });
@@ -441,9 +448,14 @@ export async function completeProduction(
   input: {
     productId: string; cases?: number; looseBottles?: number;
     operator?: string; notes?: string | null;
+    /** The day it was made (team feedback, point 19); blank = today. */
+    productionDate?: string | null;
   },
 ): Promise<{ batchId: string; bottlesProduced: number; materialCostCents: Cents }> {
   requireRole(actor, 'admin', 'user');
+  const day = input.productionDate ? String(input.productionDate).slice(0, 10) : null;
+  if (day && !/^\d{4}-\d{2}-\d{2}$/.test(day)) throw new RuleViolation('the production date is not a date');
+  if (day && day > businessToday()) throw new RuleViolation('a run cannot be recorded for a day still to come');
 
   return db.tx(async (t) => {
     const product = await t.one<{ name: string; bottles_per_case: number }>(
@@ -460,9 +472,9 @@ export async function completeProduction(
     if (bottles <= 0) throw new RuleViolation('a production run must produce at least one bottle');
 
     const batch = await t.one<{ id: string }>(
-      `INSERT INTO production_batches (operator, status, notes)
-       VALUES ($1,'Completed',$2) RETURNING id`,
-      [input.operator ?? actor.name, input.notes ?? null],
+      `INSERT INTO production_batches (operator, status, notes, batch_date)
+       VALUES ($1,'Completed',$2, COALESCE($3::date, business_today())) RETURNING id`,
+      [input.operator ?? actor.name, input.notes ?? null, day],
     );
     await t.query(
       `INSERT INTO production_batch_line_items
@@ -501,6 +513,8 @@ export async function completeProduction(
           reference_type, total_cost_cents)
        VALUES ('FinishedGoods',$1,$2,$3,'in',$4,'ProductionBatch',$5)`,
       [input.productId, product.name, bottles, `Production ${batch.id}`, materialCost],
+      // (dated now: a backdated run still entered stock today, which is what
+      // a later stock count compares against)
     );
 
     await audit(t, actor, 'create', 'ProductionBatch', batch.id, product.name,
@@ -609,7 +623,7 @@ export async function getPurchaseOrder(db: Db, poId: string) {
 
 export async function listProductionBatches(db: Db, limit = 50) {
   return db.query(
-    `SELECT pb.id, pb.batch_date, pb.operator, pb.status, pb.notes,
+    `SELECT pb.id, pb.batch_date::text AS batch_date, pb.operator, pb.status, pb.notes,
             p.name AS product_name, li.cases, li.loose_bottles, li.total_bottles,
             (SELECT COALESCE(SUM(total_cost_cents),0) FROM inventory_transactions it
              WHERE it.reference = 'Production ' || pb.id::text
@@ -617,7 +631,7 @@ export async function listProductionBatches(db: Db, limit = 50) {
      FROM production_batches pb
      LEFT JOIN production_batch_line_items li ON li.batch_id = pb.id
      LEFT JOIN products p ON p.id = li.product_id
-     ORDER BY pb.created_at DESC
+     ORDER BY pb.batch_date DESC, pb.created_at DESC
      LIMIT $1`,
     [limit],
   );

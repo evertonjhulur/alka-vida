@@ -15,6 +15,20 @@ export default function Login({ onSignedIn }: { onSignedIn: (s: Session) => void
   const [password, setPassword] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [forgot, setForgot] = useState(false);
+  const [resetSent, setResetSent] = useState(false);
+
+  /** "Forgotten your password?": a reset link by email, never a yes/no on the address. */
+  async function sendReset(e: React.FormEvent) {
+    e.preventDefault();
+    setBusy(true); setError(null);
+    try {
+      await api.post('/api/auth/forgot-password', { email });
+      setResetSent(true);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not send the link');
+    } finally { setBusy(false); }
+  }
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
@@ -47,6 +61,36 @@ export default function Login({ onSignedIn }: { onSignedIn: (s: Session) => void
       </section>
 
       <section className="signin-side">
+        {forgot ? (
+          <form className="login-card" onSubmit={sendReset}>
+            <h1>Reset your password</h1>
+            {error && <div className="notice error">{error}</div>}
+            {resetSent ? (
+              <div className="notice ok">
+                If <strong>{email}</strong> has an Alka Vida login, a link to choose a new
+                password is on its way. It works once, for 24 hours. Check your spam folder
+                if it does not arrive in a few minutes.
+              </div>
+            ) : (
+              <>
+                <p className="muted small" style={{ marginTop: 0 }}>
+                  Enter the email you sign in with and we will email you a link to choose a new password.
+                </p>
+                <div className="field">
+                  <label htmlFor="remail">Email</label>
+                  <input id="remail" type="email" autoComplete="username" value={email} required
+                         style={{ width: '100%' }} onChange={(e) => setEmail(e.target.value)} />
+                </div>
+                <button disabled={busy}>{busy ? 'Sending…' : 'Email me a link'}</button>
+              </>
+            )}
+            <p className="small" style={{ margin: '12px 0 0' }}>
+              <button type="button" className="as-link" onClick={() => { setForgot(false); setResetSent(false); setError(null); }}>
+                ‹ Back to sign in
+              </button>
+            </p>
+          </form>
+        ) : (
         <form className="login-card" onSubmit={submit}>
           <h1>Sign in</h1>
           {error && <div className="notice error">{error}</div>}
@@ -61,13 +105,16 @@ export default function Login({ onSignedIn }: { onSignedIn: (s: Session) => void
                    style={{ width: '100%' }} onChange={(e) => setPassword(e.target.value)} />
           </div>
           <button disabled={busy}>{busy ? 'Signing in…' : 'Sign in'}</button>
-          <p className="muted small" style={{ margin: '12px 0 0' }}>
-            Forgotten your password? Ask the office to send you a new link.
+          <p className="small" style={{ margin: '12px 0 0' }}>
+            <button type="button" className="as-link" onClick={() => { setForgot(true); setError(null); }}>
+              Forgotten your password?
+            </button>
           </p>
           <div className="signin-foot">
             Buying water for a business or home? <Link to="/register">Open an account</Link>
           </div>
         </form>
+        )}
       </section>
     </div>
   );

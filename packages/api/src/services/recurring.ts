@@ -511,3 +511,65 @@ export async function endOwnSchedule(
   await assertOwnSchedule(db, customerId, scheduleId);
   await endSchedule(db, actor, scheduleId, reason ?? 'cancelled by the customer');
 }
+
+/**
+ * Standing orders expected on a day that have not been raised yet (team
+ * feedback, 1 Oct 2026, point 16: "standing orders do not appear on the
+ * delivery rounds").
+ *
+ * An occurrence is raised as a real order - and so lands on its round - a
+ * week before it is due. Further ahead than that, the round has nothing to
+ * show. This lists what IS coming for the day being looked at, so the rounds
+ * screen can show it, and raiseThrough() raises them on the spot.
+ */
+export async function expectedOn(db: Db, date: string) {
+  const schedules = await db.query<{
+    id: string; customer_id: string; customer_name: string; recurrence_pattern: RecurrencePattern;
+    next_delivery_date: string | null; recurrence_ends_on: string | null; zone: string | null;
+    order_number: string; delivery_mode: string;
+  }>(
+    `SELECT o.id, o.customer_id, c.name AS customer_name, o.recurrence_pattern,
+            o.next_delivery_date::text AS next_delivery_date,
+            o.recurrence_ends_on::text AS recurrence_ends_on,
+            COALESCE(ca.delivery_zone, c.delivery_zone) AS zone, o.order_number, o.delivery_mode
+     FROM customer_orders o JOIN customers c ON c.id = o.customer_id
+     LEFT JOIN customer_addresses ca ON ca.id = o.address_id
+     WHERE o.is_recurring AND o.parent_recurring_id IS NULL AND NOT o.recurrence_paused
+       AND o.status <> 'Cancelled' AND c.active AND o.next_delivery_date IS NOT NULL`,
+  );
+  const out = [];
+  for (const s of schedules) {
+    if (!s.recurrence_pattern || !s.next_delivery_date) continue;
+    let d = s.next_delivery_date;
+    let guard = 0;
+    while (d < date && guard++ < 400) d = nextOccurrence(d, s.recurrence_pattern);
+    if (d !== date) continue;
+    if (s.recurrence_ends_on && d > s.recurrence_ends_on) continue;
+    const raised = await db.maybeOne(
+      `SELECT 1 FROM customer_orders WHERE parent_recurring_id = $1 AND requested_delivery_date = $2::date`,
+      [s.id, date],
+    );
+    if (raised) continue;
+    const lines = await scheduleLines(db, s.id);
+    const names = await db.query<{ id: string; name: string; bpc: number }>(
+      `SELECT id, name, bottles_per_case AS bpc FROM products WHERE id = ANY($1::uuid[])`,
+      [lines.map((l) => l.product_id)],
+    );
+    out.push({
+      scheduleId: s.id, customerId: s.customer_id, customerName: s.customer_name,
+      zone: s.zone, deliveryMode: s.delivery_mode, fromOrder: s.order_number, pattern: s.recurrence_pattern,
+      lineSummary: lines.map((l) => {
+        const p = names.find((n) => n.id === l.product_id);
+        return num(p?.bpc) > 0 ? `${num(l.cases)} cs ${p?.name ?? ''}` : `${num(l.loose_bottles)} x ${p?.name ?? ''}`;
+      }).join(', '),
+    });
+  }
+  return out.sort((a, b) => String(a.zone).localeCompare(String(b.zone)) || a.customerName.localeCompare(b.customerName));
+}
+
+/** Raise every standing order due on or before `date` now, so they go on their rounds. */
+export async function raiseThrough(db: Db, actor: Actor, date: string): Promise<GenerationResult> {
+  const today = await businessToday(db);
+  const ahead = Math.max(0, Math.round((Date.parse(`${date}T00:00:00Z`) - Date.parse(`${today}T00:00:00Z`)) / 86_400_000));
+  return generateDueOrders(db, actor, { today, options: { leadDays: Math.max(ahead, DEFAULT_PLAN_OPTIONS.leadDays), maxPerRun: 60 } });
+}

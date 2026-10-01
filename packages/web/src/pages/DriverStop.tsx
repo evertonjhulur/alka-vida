@@ -38,6 +38,11 @@ interface Stop {
   invoice_cycle?: string | null;
   customer_notes?: string | null;
   driver_notes?: string | null;
+  delivery_instructions?: string | null;
+  order_notes?: string | null;
+  customer_po?: string | null;
+  sheet_date?: string | null;
+  bottlesHeld?: number;
   /** Always tax-inclusive: the invoice total, or the order total before one exists. */
   amountOwedCents: number;
   lines: StopLine[];
@@ -74,7 +79,12 @@ export default function DriverStop() {
   const [method, setMethod] = useState('');
   const [empties, setEmpties] = useState('');
   const [lost, setLost] = useState('');
+  const [emptiesTouched, setEmptiesTouched] = useState(false);
   const [notes, setNotes] = useState('');
+  /** "Another day" (point 15): which day, and why. */
+  const [moving, setMoving] = useState(false);
+  const [moveTo, setMoveTo] = useState('');
+  const [moveWhy, setMoveWhy] = useState('');
   const [alloc, setAlloc] = useState<Record<string, string>>({});
 
   const [saved, setSaved] = useState<string | null>(null);
@@ -121,6 +131,10 @@ export default function DriverStop() {
       return sum + qty * (l.bottles_per_case > 0 ? l.bottles_per_case : 1);
     }, 0);
   const fullsShown = fullsTouched ? fulls : String(bottlesFromLines);
+  // A 5-gallon delivery is normally an exchange: full ones in, empties out,
+  // up to what they are holding. Suggested, and the driver changes it.
+  const emptiesShown = emptiesTouched ? empties
+    : (carriesReturnables ? String(Math.min(Number(fullsShown) || 0, Math.max(stop.bottlesHeld ?? 0, 0))) : '');
 
   const collectedCents = method ? toCents(collected || '0') : 0;
   const allocatedCents = Object.values(alloc)
@@ -132,7 +146,7 @@ export default function DriverStop() {
    * them can prevent this from succeeding - a payment problem must never
    * block recording that goods were delivered.
    */
-  async function record(outcome: string) {
+  async function record(outcome: string, extra: Record<string, unknown> = {}) {
     setBusy(true);
     setError(null);
     setSaved(null);
@@ -155,11 +169,15 @@ export default function DriverStop() {
         // What actually went out on loan. Without this the pool never learns
         // the bottles left the truck.
         bottlesDeliveredFull: outcome === 'Delivered' ? Number(fullsShown) || 0 : 0,
-        bottlesEmptiesPickedUp: Number(empties) || 0,
+        bottlesEmptiesPickedUp: Number(emptiesShown) || 0,
         bottlesLostDamaged: Number(lost) || 0,
         driverNotes: notes || null,
+        ...extra,
       });
-      setSaved(`Recorded: ${OUTCOME_WORDS[outcome] ?? outcome}${paid > 0 ? `, ${money(paid)} ${method.toLowerCase()}` : ''}.`);
+      setSaved(`Recorded: ${OUTCOME_WORDS[outcome] ?? outcome}`
+        + (extra.rescheduleTo ? ` (moved to ${new Date(`${extra.rescheduleTo}T12:00:00`).toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short' })})` : '')
+        + `${paid > 0 ? `, ${money(paid)} ${method.toLowerCase()}` : ''}.`);
+      setMoving(false);
       window.scrollTo({ top: 0, behavior: 'smooth' });
       await load();
     } catch (err) {
@@ -258,18 +276,24 @@ export default function DriverStop() {
           <div>
             <div className="stop-name">{stop.customer_name}</div>
             <div className="muted">{stop.delivery_address ?? 'No address on file'}</div>
-            {stop.order_ref && <div className="muted small">{stop.order_ref}</div>}
+            {stop.order_ref && <div className="muted small">{stop.order_ref}{stop.customer_po ? ` · PO ${stop.customer_po}` : ''}</div>}
           </div>
         </div>
+        {(stop.delivery_instructions || stop.order_notes || stop.customer_notes) && (
+          <div className="stop-notes" style={{ marginTop: 10 }}>
+            {stop.delivery_instructions && <div><strong>Delivery notes:</strong> {stop.delivery_instructions}</div>}
+            {stop.order_notes && !/^Standing order for/.test(stop.order_notes) && <div><strong>On this order:</strong> {stop.order_notes}</div>}
+            {stop.customer_notes && <div><strong>Office notes:</strong> {stop.customer_notes}</div>}
+          </div>
+        )}
         <div className="stop-links">
           {stop.contact_phone && <a className="button-link secondary" href={`tel:${stop.contact_phone.replace(/[^\d+]/g, '')}`}>Call {stop.contact_phone}</a>}
           <button type="button" className="secondary" aria-expanded={notesOpen} onClick={() => setNotesOpen(!notesOpen)}>
-            Notes for this stop{stop.customer_notes ? ' •' : ''}
+            Add a note
           </button>
         </div>
         {notesOpen && (
           <div style={{ marginTop: 10 }}>
-            {stop.customer_notes && <p className="notice info" style={{ margin: '0 0 8px' }}>{stop.customer_notes}</p>}
             <label htmlFor="notes">Your note (the office sees it)</label>
             <textarea id="notes" rows={2} style={{ width: '100%', boxSizing: 'border-box' }}
                       value={notes} onChange={(e) => setNotes(e.target.value)} />
@@ -315,7 +339,10 @@ export default function DriverStop() {
           <div className="field">
             <label htmlFor="empties">Empties picked up</label>
             <input id="empties" type="number" min="0" inputMode="numeric" placeholder="0"
-                   value={empties} onChange={(e) => setEmpties(e.target.value)} />
+                   value={emptiesShown} onChange={(e) => { setEmptiesTouched(true); setEmpties(e.target.value); }} />
+            {carriesReturnables && (stop.bottlesHeld ?? 0) > 0 && (
+              <div className="muted small">They have {stop.bottlesHeld} of our bottles.</div>
+            )}
           </div>
           <div className="field">
             <label htmlFor="lost">Lost or damaged</label>
@@ -366,8 +393,39 @@ export default function DriverStop() {
           <div className="not-delivered">
             <button type="button" className="secondary" disabled={busy} onClick={() => record('Customer Not Home')}>Not home</button>
             <button type="button" className="secondary" disabled={busy} onClick={() => record('Refused')}>Refused</button>
-            <button type="button" className="secondary" disabled={busy} onClick={() => record('Rescheduled')}>Another day</button>
+            <button type="button" className="secondary" disabled={busy} aria-expanded={moving}
+                    onClick={() => {
+                      setMoving(!moving);
+                      if (!moveTo) {
+                        const base = stop.sheet_date ?? new Date().toISOString().slice(0, 10);
+                        const d = new Date(`${base}T12:00:00Z`); d.setUTCDate(d.getUTCDate() + 1);
+                        setMoveTo(d.toISOString().slice(0, 10));
+                      }
+                    }}>Another day</button>
           </div>
+          {moving && (
+            <section className="panel" style={{ marginTop: 10 }}>
+              <h2 className="side-h">Deliver it another day</h2>
+              <div className="field">
+                <label htmlFor="mv-day">Which day?</label>
+                <input id="mv-day" type="date" value={moveTo} min={new Date().toISOString().slice(0, 10)}
+                       style={{ width: '100%', boxSizing: 'border-box' }} onChange={(e) => setMoveTo(e.target.value)} />
+              </div>
+              <div className="field">
+                <label htmlFor="mv-why">Why?</label>
+                <input id="mv-why" value={moveWhy} placeholder="e.g. closed today, asked for Friday"
+                       style={{ width: '100%', boxSizing: 'border-box' }} onChange={(e) => setMoveWhy(e.target.value)} />
+              </div>
+              <div className="row" style={{ gap: 8 }}>
+                <button type="button" disabled={busy || !moveTo}
+                        onClick={() => record('Rescheduled', { rescheduleTo: moveTo, rescheduleReason: moveWhy || null, outcomeNotes: moveWhy || null })}>
+                  Move it to that day
+                </button>
+                <button type="button" className="secondary" onClick={() => setMoving(false)}>Cancel</button>
+              </div>
+              <p className="muted small" style={{ marginBottom: 0 }}>It goes on that day's round for this area, and the office sees why.</p>
+            </section>
+          )}
           <p className="muted small" style={{ textAlign: 'center' }}>
             Recording the stop always works, whatever happens with the money.
           </p>

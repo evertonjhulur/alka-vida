@@ -18,8 +18,10 @@ import { audit, num, requireRole } from './core.ts';
 import type { Cents, PaymentMethod, StopOutcome } from '@alka/shared';
 import { RuleViolation, validateAllocation, assertQuantityShape, totalBottles } from '@alka/shared';
 import { createInvoice, openInvoicesForCustomer } from './invoices.ts';
-import { deliveryTarget, refreshOrderStatus, summariseOrderLines } from './orders.ts';
-import { applyDeliveryMovement } from './bottles.ts';
+import { deliveryTarget, placeOnDeliverySheet, refreshOrderStatus, summariseOrderLines } from './orders.ts';
+import { applyDeliveryMovement, bottleAccount } from './bottles.ts';
+import { takeFinishedGoods, deliveredBottles } from './stockmoves.ts';
+import { businessToday } from './core.ts';
 
 export interface DeliveredLineInput {
   orderLineId: string;
@@ -41,6 +43,9 @@ export interface MarkStopInput {
   paymentAmountCents?: Cents;
   driverNotes?: string | null;
   signature?: string | null;
+  /** "Another day": the day it should go instead, and why. */
+  rescheduleTo?: string | null;
+  rescheduleReason?: string | null;
 }
 
 export interface MarkStopResult {
@@ -51,6 +56,8 @@ export interface MarkStopResult {
   /** Tax-inclusive. This is the only figure a driver is ever shown as owed. */
   amountOwedCents: Cents;
   orderStatus: string | null;
+  /** When rescheduled: the round it went on to. */
+  rescheduledTo?: string | null;
 }
 
 /**
@@ -70,14 +77,16 @@ export async function markStop(
     const stop = await t.maybeOne<{
       id: string; order_id: string | null; customer_id: string;
       delivery_sheet_id: string; invoice_id: string | null; settled_at: string | null;
+      stop_outcome: string;
     }>(
-      `SELECT id, order_id, customer_id, delivery_sheet_id, invoice_id, settled_at
-       FROM delivery_stops WHERE id = $1`, [input.stopId],
+      `SELECT id, order_id, customer_id, delivery_sheet_id, invoice_id, settled_at, stop_outcome
+       FROM delivery_stops WHERE id = $1 FOR UPDATE`, [input.stopId],
     );
     if (!stop) throw new RuleViolation(`delivery stop ${input.stopId} not found`);
 
-    const sheet = await t.one<{ status: string }>(
-      `SELECT status FROM delivery_sheets WHERE id = $1`, [stop.delivery_sheet_id],
+    const sheet = await t.one<{ status: string; delivery_date: string }>(
+      `SELECT status, delivery_date::text AS delivery_date FROM delivery_sheets WHERE id = $1`,
+      [stop.delivery_sheet_id],
     );
     // Once a sheet is Completed it locks. Corrections go through the
     // reversal / reassignment / invoice-editing mechanisms instead.
@@ -114,9 +123,28 @@ export async function markStop(
     let invoiceNumber: string | null = null;
     let orderStatus: string | null = null;
 
+    // A stop already recorded Delivered has moved its stock and bottles; doing
+    // it again would move them twice.
+    if (input.outcome === 'Delivered' && stop.stop_outcome === 'Delivered') {
+      throw new RuleViolation(
+        'this stop is already recorded as delivered. To change it, correct it on the round.',
+      );
+    }
+
+    let rescheduledTo: string | null = null;
+    if (input.outcome === 'Rescheduled' && stop.order_id && input.rescheduleTo) {
+      rescheduledTo = await rescheduleStop(t, stop.id, stop.order_id, stop.customer_id,
+        sheet.delivery_date, input.rescheduleTo, input.rescheduleReason ?? null);
+    }
+
     if (input.outcome === 'Delivered' && stop.order_id) {
       await writeDeliveredQuantities(t, input.stopId, stop.order_id, input.deliveredLines);
       await moveBottlePool(t, actor, input.stopId, stop.customer_id, input);
+      const ref = await t.one<{ order_number: string }>(
+        `SELECT order_number FROM customer_orders WHERE id = $1`, [stop.order_id],
+      );
+      await takeFinishedGoods(t, await deliveredBottles(t, stop.order_id), ref.order_number,
+        `Delivered on the ${sheet.delivery_date} round`);
 
       // An invoice is generated only here, and only once per stop - unless the
       // customer is billed weekly or monthly, when the delivery waits on the
@@ -153,8 +181,45 @@ export async function markStop(
     }
 
     return { stopId: input.stopId, outcome: input.outcome, invoiceId, invoiceNumber,
-             amountOwedCents, orderStatus };
+             amountOwedCents, orderStatus, rescheduledTo };
   });
+}
+
+/**
+ * "Another day" (team feedback, 1 Oct 2026, point 15): the driver or office
+ * says which day and why. The order's delivery date moves, and it goes on
+ * that day's round for its zone (made if there is none yet). This stop stays
+ * on today's round marked Rescheduled, so the round still shows what happened.
+ */
+async function rescheduleStop(
+  t: Queryable, stopId: string, orderId: string, customerId: string,
+  fromDate: string, to: string, reason: string | null,
+): Promise<string> {
+  const day = String(to).slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) throw new RuleViolation('choose the day it should go instead');
+  if (day < businessToday()) throw new RuleViolation('the new day cannot be in the past');
+  if (day === fromDate) throw new RuleViolation('choose a different day from this round\'s');
+  const order = await t.one<{ address_id: string | null; status: string; order_number: string }>(
+    `SELECT address_id, status, order_number FROM customer_orders WHERE id = $1`, [orderId],
+  );
+  if (order.status === 'Cancelled' || order.status === 'Delivered') {
+    throw new RuleViolation(`${order.order_number} is ${order.status.toLowerCase()}`);
+  }
+  await t.query(
+    `UPDATE delivery_stops SET rescheduled_to = $2, reschedule_reason = $3,
+            outcome_notes = COALESCE(outcome_notes, $4)
+     WHERE id = $1`,
+    [stopId, day, reason?.trim() || null, reason?.trim() ? `Moved to ${day}: ${reason.trim()}` : `Moved to ${day}`],
+  );
+  await t.query(`UPDATE customer_orders SET requested_delivery_date = $2 WHERE id = $1`, [orderId, day]);
+  // Already on that day's round (moved twice)? Leave it where it is.
+  const there = await t.maybeOne(
+    `SELECT 1 FROM delivery_stops st JOIN delivery_sheets ds ON ds.id = st.delivery_sheet_id
+     WHERE st.order_id = $1 AND ds.delivery_date = $2::date AND ds.status = 'Open' AND st.id <> $3`,
+    [orderId, day, stopId],
+  );
+  if (!there) await placeOnDeliverySheet(t, orderId, customerId, day, order.address_id);
+  return day;
 }
 
 /**
@@ -345,7 +410,9 @@ export async function getStopForDriver(db: Db, stopId: string) {
     // Where the stop sits on its round ("Stop 3 of 5", same order as the
     // round page), the customer's terms, and their standing notes.
     `SELECT s.*, c.name AS customer_name, c.payment_terms, c.notes AS customer_notes, c.invoice_cycle,
-            d.zone AS sheet_zone,
+            COALESCE(ca.delivery_instructions, c.delivery_instructions) AS delivery_instructions,
+            o.notes AS order_notes, o.customer_po, o.requested_delivery_date::text AS order_date_wanted,
+            d.zone AS sheet_zone, d.delivery_date::text AS sheet_date,
             (SELECT COUNT(*) FROM delivery_stops x
               WHERE x.delivery_sheet_id = s.delivery_sheet_id)::int AS stop_count,
             (SELECT COUNT(*) FROM delivery_stops x JOIN customers xc ON xc.id = x.customer_id
@@ -354,6 +421,8 @@ export async function getStopForDriver(db: Db, stopId: string) {
                      OR (x.sequence_no = s.sequence_no AND xc.name <= c.name)))::int AS stop_position
      FROM delivery_stops s JOIN customers c ON c.id = s.customer_id
      JOIN delivery_sheets d ON d.id = s.delivery_sheet_id
+     LEFT JOIN customer_orders o ON o.id = s.order_id
+     LEFT JOIN customer_addresses ca ON ca.id = o.address_id
      WHERE s.id = $1`, [stopId],
   );
   if (!stop) return null;
@@ -385,12 +454,17 @@ export async function getStopForDriver(db: Db, stopId: string) {
     .map((i) => ({ ...i, isThisDelivery: i.invoiceId === stop.invoice_id }))
     .sort((a, b) => Number(b.isThisDelivery) - Number(a.isThisDelivery));
 
+  // How many of our 5-gallon bottles they are holding, so the driver's
+  // screen can expect the empties back (an exchange) rather than assume none.
+  const bottlesHeld = (await bottleAccount(db, stop.customer_id as string)).closingHolding;
+
   return {
     ...stop,
     // Tax-inclusive, always.
     amountOwedCents,
     lines,
     openInvoices,
+    bottlesHeld,
   };
 }
 
@@ -483,9 +557,12 @@ export async function getSheet(db: Db, sheetId: string) {
   const stops = await db.query(
     `SELECT s.*, c.name AS customer_name,
             o.grand_total_cents AS order_total_cents, o.delivery_mode,
+            o.notes AS order_notes, o.customer_po,
+            COALESCE(ca.delivery_instructions, c.delivery_instructions) AS delivery_instructions,
             i.invoice_number
      FROM delivery_stops s JOIN customers c ON c.id = s.customer_id
      LEFT JOIN customer_orders o ON o.id = s.order_id
+     LEFT JOIN customer_addresses ca ON ca.id = o.address_id
      LEFT JOIN invoices i ON i.id = s.invoice_id
      WHERE s.delivery_sheet_id = $1
      ORDER BY s.sequence_no, c.name`,

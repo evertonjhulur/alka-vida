@@ -18,12 +18,15 @@ import { audit, requireRole, num } from './core.ts';
 import type { Cents } from '@alka/shared';
 import { computeTotals, RuleViolation } from '@alka/shared';
 import { applyStopCorrection, type StopCorrection } from './settlement.ts';
+import { applyPaymentChange, type PaymentChange } from './payments.ts';
+import { placeOnDeliverySheet, sameDayCheck } from './orders.ts';
+import { businessToday } from './core.ts';
 
 export interface PendingApproval {
   /** For a StopCorrection, the proposed changes awaiting approval. */
   payload?: Record<string, unknown> | null;
   id: string;
-  requestType: 'Discount' | 'CreditNote';
+  requestType: 'Discount' | 'CreditNote' | 'StopCorrection' | 'SameDayOrder' | 'PaymentChange';
   entityType: string;
   entityId: string;
   entityLabel: string | null;
@@ -149,7 +152,7 @@ export async function listPendingApprovals(db: Db): Promise<PendingApproval[]> {
   );
   return rows.map((r) => ({
     id: r.id as string,
-    requestType: r.request_type as 'Discount' | 'CreditNote' | 'StopCorrection',
+    requestType: r.request_type as PendingApproval['requestType'],
     payload: (r.payload as Record<string, unknown>) ?? null,
     entityType: r.entity_type as string,
     entityId: r.entity_id as string,
@@ -195,7 +198,15 @@ export async function reviewApproval(
       throw new RuleViolation(`this request was already ${req.status.toLowerCase()}`);
     }
 
-    if (decision === 'Approved') {
+    if (req.request_type === 'SameDayOrder') {
+      await decideSameDayOrder(t, actor, req.entity_id, decision);
+    } else if (req.request_type === 'PaymentChange') {
+      if (decision === 'Approved') {
+        await applyPaymentChange(t, actor, req.entity_id,
+          (req.payload ?? {}) as unknown as PaymentChange, req.reason ?? 'approved change');
+      }
+      // Rejected: the payment stays exactly as posted.
+    } else if (decision === 'Approved') {
       if (req.request_type === 'StopCorrection') {
         // Applied by the same code path an admin correcting directly uses,
         // and attributed to the admin who approved it.
@@ -204,7 +215,7 @@ export async function reviewApproval(
       } else if (req.request_type === 'Discount') {
         await applyDiscountToInvoice(t, req.entity_id, num(req.discount_percent),
           num(req.discount_fixed_cents ?? 0));
-      } else {
+      } else if (req.request_type === 'CreditNote') {
         // A credit note becomes live: its value posts to the ledger, with the
         // GCT split it was raised with (older requests carry none).
         const p = (req.payload ?? {}) as unknown as { subtotalCents?: number; gctCents?: number };
@@ -228,7 +239,7 @@ export async function reviewApproval(
            discount_fixed_cents = 0
          WHERE id = $1`, [req.entity_id],
       );
-    } else {
+    } else if (req.request_type === 'CreditNote') {
       await t.query(
         `UPDATE invoices SET credit_status = 'Rejected' WHERE id = $1`, [req.entity_id],
       );
@@ -246,5 +257,50 @@ export async function reviewApproval(
     });
 
     return { status: decision };
+  });
+}
+
+/**
+ * A same-day order that came in after the cut-off.
+ *
+ * Approved: it goes on today's round after all (or the day it asked for, if
+ * that has not passed). Not approved: it is NOT cancelled - the customer
+ * still wants the water - it goes on their next delivery day instead.
+ */
+async function decideSameDayOrder(
+  t: Parameters<typeof audit>[0], actor: Actor, orderId: string, decision: 'Approved' | 'Rejected',
+): Promise<void> {
+  const o = await t.one<{
+    customer_id: string; status: string; requested_delivery_date: string | null;
+    address_id: string | null; delivery_mode: string; order_number: string;
+  }>(
+    `SELECT customer_id, status, requested_delivery_date::text AS requested_delivery_date,
+            address_id, delivery_mode, order_number
+     FROM customer_orders WHERE id = $1 FOR UPDATE`, [orderId],
+  );
+  if (o.status === 'Cancelled') return;
+  const today = businessToday();
+  let date: string | null;
+  if (decision === 'Approved') {
+    date = o.requested_delivery_date && o.requested_delivery_date > today ? o.requested_delivery_date : today;
+  } else {
+    // Next delivery day from tomorrow: sameDayCheck with no date asked for.
+    const next = await sameDayCheck(t, { ...actor, role: 'admin' }, o.customer_id,
+      o.delivery_mode as never, null, o.address_id);
+    date = next.date && next.date > today ? next.date : null;
+    if (!date) {
+      const tomorrow = await t.one<{ d: string }>(`SELECT (business_today() + 1)::text AS d`);
+      date = tomorrow.d;
+    }
+  }
+  await t.query(
+    `UPDATE customer_orders SET needs_review = false, requested_delivery_date = $2 WHERE id = $1`,
+    [orderId, date],
+  );
+  if (o.delivery_mode === 'Delivery') {
+    await placeOnDeliverySheet(t, orderId, o.customer_id, date, o.address_id);
+  }
+  await audit(t, actor, 'update', 'CustomerOrder', orderId, o.order_number, {
+    sameDayDecision: decision, deliveryDate: date,
   });
 }

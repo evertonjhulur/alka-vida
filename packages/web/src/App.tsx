@@ -19,7 +19,7 @@ import Statement from './pages/Statement';
 import Reports from './pages/Reports';
 import DriverRoute from './pages/DriverRoute';
 import DriverStop from './pages/DriverStop';
-import Portal from './pages/Portal';
+import Portal, { PortalInvoice } from './pages/Portal';
 import RawMaterials from './pages/RawMaterials';
 import Suppliers from './pages/Suppliers';
 import Pricing from './pages/Pricing';
@@ -48,6 +48,7 @@ import Quotes from './pages/Quotes';
 import QuoteAccept from './pages/QuoteAccept';
 import CreditNotes from './pages/CreditNotes';
 import AutoEmails from './pages/AutoEmails';
+import Messages from './pages/Messages';
 
 interface NavItem {
   to: string;
@@ -90,6 +91,7 @@ const NAV: NavItem[] = [
   { to: '/quotes', label: 'Quotes', roles: ['admin', 'user'], section: 'Sales', badge: 'quotes' },
   { to: '/recurring', label: 'Standing orders', roles: ['admin', 'user'], section: 'Sales' },
   { to: '/customers', label: 'Customers', roles: ['admin', 'user'], section: 'Sales' },
+  { to: '/messages', label: 'Messages & news', roles: ['admin', 'user'], section: 'Sales' },
 
   { to: '/delivery', label: 'Delivery rounds', roles: ['admin', 'user'], section: 'Deliveries' },
   { to: '/bottle-pool', label: 'Bottle pool', roles: ['admin', 'user'], section: 'Deliveries' },
@@ -109,18 +111,20 @@ const NAV: NavItem[] = [
   // Set up once, changed rarely. Logins are the administrator's alone.
   { to: '/pricing', label: 'Products & pricing', roles: ['admin', 'user'], section: 'Settings' },
   { to: '/zones', label: 'Delivery zones', roles: ['admin', 'user'], section: 'Settings' },
-  { to: '/auto-emails', label: 'Automatic emails', roles: ['admin', 'user'], section: 'Settings' },
+  { to: '/auto-emails', label: 'Emails & ordering', roles: ['admin', 'user'], section: 'Settings' },
   // Logins are the administrator's alone, so office staff see just Employees.
   { to: '/employees', label: 'People and logins', roles: ['admin'], section: 'Settings', also: ['/users'] },
   { to: '/employees', label: 'Employees', roles: ['user'], section: 'Settings' },
 
   { to: '/route', label: 'My route', roles: ['driver'] },
   // The portal, as separate modules rather than tabs inside one screen.
+  { to: '/portal/home', label: 'Home', roles: ['customer'] },
   { to: '/portal/order', label: 'Place an order', roles: ['customer'] },
   { to: '/portal/orders', label: 'My orders', roles: ['customer'] },
   { to: '/portal/repeats', label: 'Standing orders', roles: ['customer'] },
-  { to: '/portal/account', label: 'Statements & invoices', roles: ['customer'] },
+  { to: '/portal/account', label: 'Statements & invoices', roles: ['customer'], also: ['/portal/invoices'] },
   { to: '/portal/quotes', label: 'Quotes', roles: ['customer'] },
+  { to: '/portal/profile', label: 'My profile', roles: ['customer'] },
 
   // Everybody's own password; with Sign out, not in any section.
   { to: '/my-account', label: 'My password', roles: ['admin', 'user', 'driver'], placement: 'account' },
@@ -195,7 +199,7 @@ function Shell({ session }: { session: Session }) {
    * driver's phone that was half the screen given to navigation they did not
    * need, with the actual stop pushed below the fold.
    */
-  const compactNav = items.length <= 5;
+  const compactNav = items.length <= 5 || session.role === 'customer';
 
   /** The grouped list, shared by the desktop sidebar and the phone drawer. */
   const groupedLinks = (withActions: boolean) => (
@@ -252,9 +256,10 @@ function Shell({ session }: { session: Session }) {
         </div>
 
         {compactNav && (
-          <nav className="topbar-tabs">
+          <nav className={`topbar-tabs${items.length > 5 ? ' many' : ''}`}>
             {items.map((n) => (
-              <NavLink key={n.to} to={n.to} end={exactMatch(n.to)}>
+              <NavLink key={n.to} to={n.to} end={exactMatch(n.to)}
+                       className={({ isActive }) => (isActive || n.also?.some((a) => pathname.startsWith(a)) ? 'active' : '')}>
                 {n.label}{badgeFor(n)}
               </NavLink>
             ))}
@@ -304,6 +309,7 @@ function Shell({ session }: { session: Session }) {
           <Route path="/quotes/:quoteId/:mode" element={<Quotes />} />
           <Route path="/credit-notes" element={<Keyed><CreditNotes session={session} /></Keyed>} />
           <Route path="/auto-emails" element={<AutoEmails session={session} />} />
+          <Route path="/messages" element={<Messages session={session} />} />
           <Route path="/payments" element={<Payments />} />
           <Route path="/invoices/:invoiceId" element={<InvoiceDetail session={session} />} />
           <Route path="/statement" element={<Statement />} />
@@ -322,7 +328,8 @@ function Shell({ session }: { session: Session }) {
           <Route path="/route" element={<DriverRoute session={session} />} />
           <Route path="/route/stop/:stopId" element={<DriverStop />} />
           {/* Four modules, one screen behind them. */}
-          <Route path="/portal" element={<Navigate to="/portal/order" replace />} />
+          <Route path="/portal" element={<Navigate to="/portal/home" replace />} />
+          <Route path="/portal/invoices/:invoiceId" element={<PortalInvoice />} />
           <Route path="/portal/:tab" element={<Portal session={session} />} />
           <Route path="/users" element={<>{session.role === 'admin' && <SectionTabs tabs={PEOPLE} />}<Users session={session} /></>} />
           <Route path="/zones" element={<Zones session={session} />} />

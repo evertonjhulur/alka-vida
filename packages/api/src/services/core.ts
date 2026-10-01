@@ -113,6 +113,41 @@ export async function withIdempotency<T extends { id: string }>(
   return { result, replayed: false, resultId: result.id };
 }
 
+/**
+ * The address people open the app at, for links in emails.
+ *
+ * PORTAL_URL when it is set; on Railway, the public domain Railway gives the
+ * service (RAILWAY_PUBLIC_DOMAIN, set automatically); otherwise this computer.
+ */
+export function siteUrl(): string {
+  const set = process.env.PORTAL_URL?.trim();
+  if (set) return set.replace(/\/+$/, '');
+  const railway = process.env.RAILWAY_PUBLIC_DOMAIN?.trim();
+  if (railway) return `https://${railway.replace(/^https?:\/\//, '').replace(/\/+$/, '')}`;
+  return `http://localhost:${process.env.PORT ?? 3001}`;
+}
+
+/** The time of day in the business timezone, as HH:MM (24-hour). */
+export function businessTimeNow(at: Date = new Date()): string {
+  return new Intl.DateTimeFormat('en-GB', {
+    timeZone: BUSINESS_TIMEZONE, hour: '2-digit', minute: '2-digit', hour12: false,
+  }).format(at);
+}
+
+/** One value from system_settings, or the fallback when it is not there. */
+export async function getSetting(t: Queryable, key: string, fallback = ''): Promise<string> {
+  const row = await t.maybeOne<{ value: string }>(
+    `SELECT value FROM system_settings WHERE key = $1`, [key],
+  );
+  return row?.value ?? fallback;
+}
+
+/** Days to pay from payment terms: "Net 30" -> 30, "Cash on delivery" -> 0. */
+export function termsDays(terms: string | null | undefined): number {
+  const m = /(\d+)/.exec(terms ?? '');
+  return m ? Number(m[1]) : 0;
+}
+
 /** numeric() columns come back from pg as strings; normalise to number. */
 export function num(v: unknown): number {
   if (v === null || v === undefined) return 0;

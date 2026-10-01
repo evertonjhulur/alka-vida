@@ -115,6 +115,27 @@ export default function BottlePool({ session }: { session: Session }) {
             Bottles reported lost or damaged are written off as a business loss.
             They are never charged to the customer.
           </p>
+
+          {/* Team feedback, 1 Oct 2026, point 12: where the numbers come from. */}
+          <details className="explain" open={pool.cleanReady === 0 || undefined}>
+            <summary style={{ cursor: 'pointer' }}><strong>Where these numbers come from</strong></summary>
+            <ol>
+              <li><strong>Clean, ready</strong> starts at the count entered when the system began, and goes
+                <em> down</em> by every full 5-gallon that leaves: on a delivery round (the driver's "Full bottles out"),
+                at the counter, or on a collection. It goes <em>up</em> when returned bottles are washed below.</li>
+              <li><strong>Out with customers</strong> goes up by every full bottle that leaves and down by every
+                empty the driver (or the counter) takes back. The driver's screen now suggests the empties as an
+                exchange, up to what the customer is holding; change it if they gave back fewer.</li>
+              <li><strong>Returned, awaiting wash</strong> is the empties brought back. Washing moves them to clean.</li>
+              <li><strong>Lost or damaged</strong> is what drivers report lost and what is scrapped at washing.</li>
+            </ol>
+            <p className="small" style={{ marginBottom: 0 }}>
+              Clean stock cannot go below zero: if more bottles leave than the system has as clean, it stops at
+              zero and the difference does not show anywhere. If you see 0 clean here, count the bottles in the
+              plant and correct the pool (administrators) so the figures start from the truth.
+              Before 1 Oct 2026, bottles sold at the counter or collected were not counted here at all.
+            </p>
+          </details>
         </div>
       )}
 

@@ -629,3 +629,54 @@ link); special prices AND price lists; extra addresses of both kinds.
   ledger rows now give ISO dates.
 - All mail goes through `documents.sendMail`; tests catch it with
   `setMailSinkForTests`.
+
+### Florida team's testing round, 1 Oct 2026
+
+Their 23-point list, tested on the Railway copy. Migration 017, routes in
+`routes/feedback.ts`, services `messaging.ts`, `portal.ts`, `stockmoves.ts`,
+tests in `test/feedback.test.ts` (25). Totals: 400 API + 68 shared passing.
+
+Everton's rulings: a same-day order after the cut-off is **taken but waits for
+approval** (Needs a decision: "Deliver today" / "Next delivery day" — never
+cancelled); customers can cancel **until the driver starts the round**;
+changing a posted payment **needs approval** (an admin's own change applies at
+once); News & offers **and** messages to customers, with **lists by zone or
+any rule**, and **WhatsApp** (click-to-chat links per customer and an "Order on
+WhatsApp" button — bulk WhatsApp needs Meta's paid API, not built).
+
+- Portal: Home (balance, overdue, next due, next delivery, News & offers,
+  WhatsApp), My profile (contact, main address, delivery notes, extra addresses,
+  email choices), order form shows Subtotal / GCT / Total stacked, delivery
+  address, customer PO; "Delivery date" column; invoices open, print and
+  download; order number + PO printed under the invoice number.
+- Every invoice now gets a due date from the terms (`termsDays`); 017
+  backfills. Overdue = balance on invoices past due (`accountPosition`).
+- Forgotten password: `requestPasswordReset` reuses `user_invitations`
+  (purpose 'reset'). Same answer whether or not the address exists.
+- Links in emails use `siteUrl()`: PORTAL_URL, else Railway's automatic
+  RAILWAY_PUBLIC_DOMAIN, else localhost.
+- Order placed / delivered emails (`sendOrderPlacedEmail`,
+  `sendDeliveredEmail`, fire-and-forget from the routes, logged in auto_emails,
+  never twice; delivered attaches the invoice). Settings › Emails & ordering.
+- Editing an order's date or address moves its pending stop to the right round
+  (unless that round has started — warning instead).
+- "Another day" on a stop takes a date and a reason (`rescheduleStop`).
+- Delivery notes (customer / address `delivery_instructions`, order notes)
+  show under the order on rounds and the driver's stop.
+- Standing orders: raised straight away when a schedule starts; Delivery rounds
+  lists ones expected on a chosen day beyond the 7-day lead, with "Put them on
+  their rounds now" (`expectedOn`, `raiseThrough`).
+- **Finished goods now go down when sold** (delivery, collection, counter;
+  reference_type 'Sale'). They never did before. Counter/collection 5-gallon
+  bottles move the pool and are recorded per customer
+  (`customer_bottle_moves`); holdings union stops + moves. Driver's empties are
+  suggested as an exchange up to what the customer holds.
+- Payment dates typed as a day are stored at noon Jamaica (`paymentInstant`):
+  a bare date cast to timestamptz is midnight UTC = 7pm the day before.
+- Stock counts: finished goods in cases + loose; a difference needs a reason
+  (service-enforced); count sheet + `/api/audits/batch`; variance report CSV.
+- Reports: credit notes come off sales (net/GCT after credits for QuickBooks);
+  Sales transactions tab lists every invoice/credit note with its order.
+- Exports (CSV, opens in Excel): invoices, raw materials, stock, movements.
+- Dates: PO "Arrived on", production date, payment "Date paid".
+- Logins filter by role. Orders filter by a date range (server-side).

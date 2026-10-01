@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useState, type ReactNode } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
+import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { api } from '../lib/api';
 import { money, date, day, relDay, toCents, todayInJamaica } from '../lib/format';
 
@@ -25,7 +25,9 @@ interface Order {
   stop_id: string | null; stop_outcome: string | null; sheet_id: string | null;
   sheet_zone: string | null; sheet_date: string | null; sheet_status: string | null;
   sheet_started: boolean | null;
+  customer_po?: string | null; address_id?: string | null; needs_review?: boolean;
 }
+interface Addr { id: string; label: string; address_line1: string | null; is_delivery: boolean }
 interface Product {
   id: string; product_id?: string; name: string; bottles_per_case: number;
   price_per_case_cents: number; price_per_bottle_cents: number;
@@ -37,7 +39,7 @@ interface OrderLine {
 }
 
 type Show = 'waiting' | 'delivered' | 'cancelled' | 'all';
-type When = 'any' | 'today' | 'week' | 'late';
+type When = 'any' | 'today' | 'week' | 'late' | 'range';
 type Panel = 'collect' | 'repeat' | 'offround' | 'cancel';
 
 const GCT_RATE = 0.15;
@@ -57,6 +59,7 @@ function standing(o: Order, today: string): { label: string; tone: string } {
     };
   }
   if (o.status === 'Partially Delivered') return { label: 'Part delivered', tone: 'warn' };
+  if (o.needs_review) return { label: 'Needs approval', tone: 'warn' };
 
   const forDay = o.requested_delivery_date ? date(o.requested_delivery_date) : null;
   if (o.delivery_mode === 'Pickup') {
@@ -93,13 +96,20 @@ function origin(o: Order): string {
 
 export default function Orders() {
   const navigate = useNavigate();
+  const [params] = useSearchParams();
   const [orders, setOrders] = useState<Order[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
-  const [find, setFind] = useState('');
-  const [show, setShow] = useState<Show>('waiting');
+  const [find, setFind] = useState(params.get('find') ?? '');
+  const [show, setShow] = useState<Show>(params.get('find') ? 'all' : 'waiting');
+  /** A date range (team feedback, point 10.1), on the delivery date or the day placed. */
+  const [range, setRange] = useState({ from: '', to: '', by: 'delivery' as 'delivery' | 'placed' });
+  const [poEdit, setPoEdit] = useState('');
+  const [addrEdit, setAddrEdit] = useState('');
+  const [addrs, setAddrs] = useState<Addr[]>([]);
+  const [empties, setEmpties] = useState('');
   const [how, setHow] = useState('');
   const [when, setWhen] = useState<When>('any');
   const [limit, setLimit] = useState(50);
@@ -120,9 +130,13 @@ export default function Orders() {
   const [chargeGct, setChargeGct] = useState(true);
 
   async function load() {
-    setOrders(await api.get<Order[]>('/api/orders?limit=500'));
+    // A date range asks the server, so orders older than the latest 500 are
+    // found too; otherwise the latest 500 are filtered here.
+    const q = when === 'range' && (range.from || range.to)
+      ? `&from=${range.from}&to=${range.to}&dateBy=${range.by}` : '';
+    setOrders(await api.get<Order[]>(`/api/orders?limit=500${q}`));
   }
-  useEffect(() => { load().catch((e) => setError(e.message)); }, []);
+  useEffect(() => { load().catch((e) => setError(e.message)); }, [when, range.from, range.to, range.by]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // A click anywhere else closes the ⋯ menu.
   useEffect(() => {
@@ -156,6 +170,9 @@ export default function Orders() {
       setDiscountAs(fixed > 0 ? '$' : '%');
       setDiscount(fixed > 0 ? (fixed / 100).toFixed(2) : String(Number(o.discount_percent) || 0));
       setChargeGct(!o.gct_exempt);
+      setPoEdit(o.customer_po ?? '');
+      setAddrEdit(o.address_id ?? '');
+      setAddrs(await api.get<Addr[]>(`/api/customers/${o.customer_id}/addresses`).catch(() => []));
       setEditing(o);
       window.scrollTo({ top: 0, behavior: 'smooth' });
     } catch (e) {
@@ -203,14 +220,19 @@ export default function Orders() {
         });
       if (payload.length === 0) throw new Error('An order needs at least one line.');
 
-      const r = await api.patch<{ grandTotalCents: number }>(`/api/orders/${editing.id}`, {
+      const r = await api.patch<{ grandTotalCents: number; warnings?: string[] }>(`/api/orders/${editing.id}`, {
         lines: payload,
         requestedDeliveryDate: reqDate || null,
         discountPercent: totals.pct,
         discountFixedCents: totals.fixed,
         gctExempt: !chargeGct,
+        customerPo: poEdit,
+        ...(editing.delivery_mode === 'Delivery' ? { addressId: addrEdit || null } : {}),
       });
-      setMsg(`${editing.order_number} updated. New total ${money(r.grandTotalCents)}.`);
+      const moved = reqDate && reqDate !== (editing.requested_delivery_date ?? '').slice(0, 10);
+      setMsg(`${editing.order_number} updated. New total ${money(r.grandTotalCents)}.`
+        + (moved && editing.delivery_mode === 'Delivery' ? ` It is now on the round for ${day(reqDate)}.` : '')
+        + (r.warnings?.length ? ` ${r.warnings.join(' ')}` : ''));
       setEditing(null);
       await load();
     } catch (err) {
@@ -227,7 +249,7 @@ export default function Orders() {
     await act(async () => {
       const out = await api.post<{ invoiceNumber: string | null; balanceCents: number }>(
         `/api/orders/${o.id}/collect`,
-        { amountPaidCents: toCents(paidNow || '0'), method: paidHow },
+        { amountPaidCents: toCents(paidNow || '0'), method: paidHow, emptiesReturned: Number(empties) || 0 },
       );
       return out.invoiceNumber
         ? `${o.order_number} collected. Invoice ${out.invoiceNumber} raised, balance ${money(out.balanceCents)}.`
@@ -280,7 +302,7 @@ export default function Orders() {
   const openPanel = (o: Order, kind: Panel) => {
     setMenuFor(null);
     setError(null);
-    if (kind === 'collect') { setPaidNow(''); setPaidHow('Cash'); }
+    if (kind === 'collect') { setPaidNow(''); setPaidHow('Cash'); setEmpties(''); }
     if (kind === 'repeat') setRepeatEvery('Weekly');
     setOpen(open?.id === o.id && open.kind === kind ? null : { id: o.id, kind });
   };
@@ -304,6 +326,10 @@ export default function Orders() {
     if (when === 'today') return d === today;
     if (when === 'week') return d >= today && d <= weekEnd;
     if (when === 'late') return d < today && waiting(o);
+    if (when === 'range') {
+      const d2 = range.by === 'placed' ? date(o.order_date) : d;
+      return (!range.from || d2 >= range.from) && (!range.to || d2 <= range.to);
+    }
     return true;
   };
   const shown = orders
@@ -374,6 +400,13 @@ export default function Orders() {
               Paid in full
             </button>
           </div>
+          {/gallon/i.test(o.lines_summary ?? '') && (
+            <div className="field">
+              <label htmlFor={`emp-${o.id}`}>5-gal empties handed in</label>
+              <input id={`emp-${o.id}`} type="number" min="0" style={{ width: 90 }} value={empties}
+                     onChange={(e) => setEmpties(e.target.value)} />
+            </div>
+          )}
           <div className="field">
             <button disabled={busy} onClick={() => collect(o)}>
               {busy ? 'Saving…' : `${o.order_number} collected`}
@@ -469,9 +502,25 @@ export default function Orders() {
           <form onSubmit={saveEdit}>
             <div className="row">
               <div className="field">
-                <label htmlFor="rd">Requested delivery date</label>
+                <label htmlFor="rd">Delivery date</label>
                 <input id="rd" type="date" value={reqDate}
                        onChange={(e) => setReqDate(e.target.value)} />
+                {editing.delivery_mode === 'Delivery' && (
+                  <div className="muted small">A new date moves it to that day's round.</div>
+                )}
+              </div>
+              {editing.delivery_mode === 'Delivery' && (
+                <div className="field">
+                  <label htmlFor="ad">Deliver to</label>
+                  <select id="ad" value={addrEdit} onChange={(e) => setAddrEdit(e.target.value)}>
+                    <option value="">Main address</option>
+                    {addrs.filter((a) => a.is_delivery).map((a) => <option key={a.id} value={a.id}>{a.label}</option>)}
+                  </select>
+                </div>
+              )}
+              <div className="field">
+                <label htmlFor="po">Customer's PO no.</label>
+                <input id="po" style={{ width: 130 }} value={poEdit} onChange={(e) => setPoEdit(e.target.value)} />
               </div>
               <div className="field">
                 <label htmlFor="dp">Discount</label>
@@ -613,14 +662,34 @@ export default function Orders() {
               <option value="today">Today</option>
               <option value="week">This week</option>
               <option value="late">Late (before today)</option>
+              <option value="range">Dates…</option>
             </select>
           </div>
+          {when === 'range' && (
+            <>
+              <div className="field">
+                <label htmlFor="rfrom">From</label>
+                <input id="rfrom" type="date" value={range.from} onChange={(e) => setRange({ ...range, from: e.target.value })} />
+              </div>
+              <div className="field">
+                <label htmlFor="rto">To</label>
+                <input id="rto" type="date" value={range.to} onChange={(e) => setRange({ ...range, to: e.target.value })} />
+              </div>
+              <div className="field">
+                <label htmlFor="rby">By</label>
+                <select id="rby" value={range.by} onChange={(e) => setRange({ ...range, by: e.target.value as 'delivery' | 'placed' })}>
+                  <option value="delivery">Delivery date</option>
+                  <option value="placed">Day placed</option>
+                </select>
+              </div>
+            </>
+          )}
         </div>
 
         <table className="orders-table">
           <thead>
             <tr>
-              <th>Order</th><th>Customer</th><th>For</th><th>How</th>
+              <th>Order</th><th>Customer</th><th>Delivery date</th><th>How</th>
               <th>Status</th><th className="num">Total</th><th />
             </tr>
           </thead>
@@ -634,12 +703,13 @@ export default function Orders() {
                     <td data-label="Order">
                       <strong>{o.order_number}</strong>
                       <div className="muted small">{origin(o)}</div>
+                      {o.customer_po && <div className="muted small">PO {o.customer_po}</div>}
                     </td>
                     <td data-label="Customer">
                       <Link to={`/customers/${o.customer_id}?tab=orders`}>{o.customer_name}</Link>
                       <div className="muted small">{short(o.lines_summary)}</div>
                     </td>
-                    <td data-label="For">{o.delivery_mode === 'Counter' ? day(o.order_date) : day(o.requested_delivery_date)}</td>
+                    <td data-label="Delivery date">{o.delivery_mode === 'Counter' ? day(o.order_date) : day(o.requested_delivery_date)}</td>
                     <td data-label="How">{howLabel(o)}</td>
                     <td data-label="Status"><span className={`chip ${st.tone}`}>{st.label}</span></td>
                     <td data-label="Total" className="num">{money(Number(o.grand_total_cents))}</td>

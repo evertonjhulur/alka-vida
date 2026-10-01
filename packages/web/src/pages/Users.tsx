@@ -49,6 +49,7 @@ export default function Users({ session }: { session: Session }) {
   const [ed, setEd] = useState({ name: '', email: '', role: 'user' as Role });
 
   const [search, setSearch] = useState('');
+  const [roleFilter, setRoleFilter] = useState<Role | ''>('');
 
   const [pwFor, setPwFor] = useState<string | null>(null);
   const [pw, setPw] = useState('');
@@ -156,9 +157,9 @@ export default function Users({ session }: { session: Session }) {
   }
 
   const needle = search.trim().toLowerCase();
-  const matches = (u: User) => needle === '' || [
+  const matches = (u: User) => (roleFilter === '' || u.role === roleFilter) && (needle === '' || [
     u.name, u.email, ROLE_LABEL[u.role], u.role, u.customer_name ?? '',
-  ].some((f) => f.toLowerCase().includes(needle));
+  ].some((f) => f.toLowerCase().includes(needle)));
 
   const active = users.filter((u) => u.active && matches(u));
   const withdrawn = users.filter((u) => !u.active && matches(u));
@@ -408,9 +409,18 @@ export default function Users({ session }: { session: Session }) {
                    placeholder="name, email, or role"
                    onChange={(e) => setSearch(e.target.value)} />
           </div>
-          {search && (
+          <div className="field">
+            <label htmlFor="urole">Role</label>
+            <select id="urole" value={roleFilter} onChange={(e) => setRoleFilter(e.target.value as Role | '')}>
+              <option value="">Every role</option>
+              {(Object.keys(ROLE_LABEL) as Role[]).map((r) => (
+                <option key={r} value={r}>{ROLE_LABEL[r]} ({users.filter((u) => u.role === r && u.active).length})</option>
+              ))}
+            </select>
+          </div>
+          {(search || roleFilter) && (
             <div className="field">
-              <button className="secondary" onClick={() => setSearch('')}>Clear</button>
+              <button className="secondary" onClick={() => { setSearch(''); setRoleFilter(''); }}>Clear</button>
             </div>
           )}
         </div>

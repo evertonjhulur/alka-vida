@@ -1,6 +1,7 @@
 import { Fragment, useEffect, useState } from 'react';
 import { api, type Session } from '../lib/api';
-import { money, toCents, date, when } from '../lib/format';
+import { money, toCents, date, when, todayInJamaica } from '../lib/format';
+import { downloadCsv, dollars } from '../lib/csv';
 import { ask, askText } from '../components/Dialog';
 
 interface SupplierRef { id: string; name: string; unitCostCents: number }
@@ -622,10 +623,31 @@ export default function RawMaterials({ session }: { session: Session }) {
 
   return (
     <>
-      <h1>Raw materials</h1>
-      <p className="subtitle">
-        Stock, reorder levels, FIFO batches and who supplies each item.
-      </p>
+      <div className="panel-head record-head">
+        <div>
+          <h1>Raw materials</h1>
+          <p className="subtitle" style={{ marginBottom: 0 }}>
+            Stock, reorder levels, FIFO batches and who supplies each item.
+          </p>
+        </div>
+        <div className="record-actions">
+          {/* Team feedback, point 17: the whole list for Excel. */}
+          <button type="button" className="secondary" disabled={materials.length === 0} onClick={() => downloadCsv(
+            `raw-materials-${todayInJamaica()}`,
+            [
+              ['Material', 'Category', 'Size', 'Unit', 'On hand', 'Reorder at', 'Needs reorder', 'Open batches',
+                'Average cost', 'Stock value', 'Suppliers', 'Consigned', 'Made to order', 'Retired', 'Notes'],
+              ...materials.map((m) => [
+                m.name, m.category, m.size_spec ?? '', m.unit_of_measure, Number(m.quantity_on_hand),
+                Number(m.reorder_point), m.needs_reorder ? 'Yes' : '', Number(m.open_batches),
+                dollars(m.blended_cost_cents), dollars(m.stock_value_cents),
+                (m.suppliers ?? []).map((s) => s.name).filter(Boolean).join('; '),
+                m.consigned ? 'Yes' : '', m.made_to_order ? 'Yes' : '', m.retired_at ? 'Yes' : '', m.notes ?? '',
+              ]),
+            ],
+          )}>Export to Excel</button>
+        </div>
+      </div>
 
       {error && <div className="notice error">{error}</div>}
       {msg && <div className="notice ok">{msg}</div>}

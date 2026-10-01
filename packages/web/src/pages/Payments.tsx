@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api, idempotencyKey } from '../lib/api';
 import { money, toCents, day } from '../lib/format';
+import { todayInJamaica as todayJa } from '../lib/format';
 import CustomerPicker, { type PickerCustomer } from '../components/CustomerPicker';
 
 /**
@@ -39,7 +40,7 @@ export default function Payments() {
   const [customers, setCustomers] = useState<PickerCustomer[]>([]);
   const [unapplied, setUnapplied] = useState<Unapplied[]>([]);
   const [open, setOpen] = useState<Invoice[]>([]);
-  const [form, setForm] = useState({ customerId: '', amount: '', method: 'Bank Transfer', reference: '', notes: '', receipt: true });
+  const [form, setForm] = useState({ customerId: '', amount: '', method: 'Bank Transfer', reference: '', notes: '', receipt: true, date: '' });
   const [ticked, setTicked] = useState<string[] | null>(null); // null = follow the amount, oldest first
   const [applyTo, setApplyTo] = useState<Record<string, string>>({});
   const [error, setError] = useState<string | null>(null);
@@ -110,13 +111,14 @@ export default function Payments() {
         customerId: form.customerId,
         amountCents: received,
         method: form.method,
+        paymentDate: form.date || null,
         reference: form.reference || null,
         notes: form.notes || null,
         allocations: plan.rows.map((r) => ({ invoiceId: r.inv.invoice_id, amountCents: r.cents })),
         idempotencyKey: idempotencyKey('receive'),
         sendReceipt: form.receipt,
       });
-      setForm({ ...form, amount: '', reference: '', notes: '' });
+      setForm({ ...form, amount: '', reference: '', notes: '', date: '' });
       setTicked(null);
       return `${money(received)} from ${who} recorded. ${money(out.allocatedCents)} against invoices` +
         (out.unappliedCents > 0 ? `, ${money(out.unappliedCents)} on their account.` : '.') +
@@ -183,6 +185,11 @@ export default function Payments() {
             <select id="pmeth" value={form.method} onChange={(e) => setForm({ ...form, method: e.target.value })}>
               {METHODS.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
             </select>
+          </div>
+          <div className="field">
+            <label htmlFor="pdate">Date paid</label>
+            <input id="pdate" type="date" value={form.date} max={todayJa()}
+                   onChange={(e) => setForm({ ...form, date: e.target.value })} />
           </div>
           <div className="field">
             <label htmlFor="pref">Bank ref or cheque no.</label>

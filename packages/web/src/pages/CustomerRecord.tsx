@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link, useParams, useSearchParams } from 'react-router-dom';
 import { api, downloadPost, type Session } from '../lib/api';
-import { money, date, statusTone, toCents, when } from '../lib/format';
+import { money, date, statusTone, toCents, todayInJamaica, when } from '../lib/format';
 import { StatementView } from './Statement';
 import CustomerForm, { customerToForm, formToPayload, BLANK_CUSTOMER, type CustomerFormValues } from '../components/CustomerForm';
 import { AddressesPanel, SpecialPricesPanel } from '../components/CustomerExtras';
@@ -20,6 +20,8 @@ interface Waiting {
 interface Order {
   id: string; order_number: string; order_date: string; status: string;
   delivery_mode: string; source: string; grand_total_cents: string;
+  requested_delivery_date?: string | null; fulfilled_on?: string | null;
+  customer_po?: string | null; needs_review?: boolean; lines_summary?: string | null;
 }
 interface Invoice {
   invoice_id: string; invoice_number: string; invoice_date: string;
@@ -29,11 +31,13 @@ interface Invoice {
 interface Payment {
   id: string; payment_date: string; amount_cents: string; method: string | null;
   reference: string | null; is_reversal: boolean; invoice_number: string | null;
+  invoice_id?: string | null; reversed?: boolean;
 }
 interface History {
   customer: Customer; orders: Order[]; invoices: Invoice[];
-  payments: Payment[]; balanceCents: number;
+  payments: Payment[]; balanceCents: number; overdueCents?: number; overdueInvoices?: number;
 }
+interface PickCustomer { id: string; name: string }
 interface Bottles {
   openingHolding: number; delivered: number; returned: number;
   lost: number; closingHolding: number;
@@ -92,7 +96,16 @@ export default function CustomerRecord({ session }: { session: Session }) {
   const [busy, setBusy] = useState(false);
 
   const [payOpen, setPayOpen] = useState(false);
-  const [pay, setPay] = useState({ amount: '', method: 'Cash', invoiceId: '', reference: '', receipt: true });
+  const [pay, setPay] = useState({ amount: '', method: 'Cash', date: '', reference: '', receipt: true });
+  /** How much of the payment goes on each open invoice (point 11.1). */
+  const [alloc, setAlloc] = useState<Record<string, string>>({});
+  /** Changing a posted payment (point 11.2). */
+  const [change, setChange] = useState<{
+    p: Payment; amount: string; date: string; method: string; reference: string;
+    customerId: string; invoiceId: string; reason: string;
+  } | null>(null);
+  const [allCustomers, setAllCustomers] = useState<PickCustomer[]>([]);
+  const [targetInvoices, setTargetInvoices] = useState<Invoice[]>([]);
   const [picked, setPicked] = useState<string[]>([]);
   const [waiting, setWaiting] = useState<Waiting[]>([]);
   const [sendOpen, setSendOpen] = useState(false);
@@ -149,25 +162,86 @@ export default function CustomerRecord({ session }: { session: Session }) {
     } finally { setBusy(false); }
   }
 
+  const allocatedCents = Object.values(alloc).reduce((t, v) => t + toCents(v || '0'), 0);
+  const payCents = pay.amount ? toCents(pay.amount) : allocatedCents;
+
   async function takePayment(e: React.FormEvent) {
     e.preventDefault();
     await run(async () => {
-      const r = await api.post<{ receipt?: { sentTo: string; receiptNumber: string }; receiptError?: string }>('/api/payments', {
+      const allocations = Object.entries(alloc)
+        .map(([invoiceId, v]) => ({ invoiceId, amountCents: toCents(v || '0') }))
+        .filter((a) => a.amountCents > 0);
+      const r = await api.post<{
+        allocatedCents: number; unappliedCents: number;
+        receipt?: { sentTo: string; receiptNumber: string }; receiptError?: string;
+      }>('/api/payments/receive', {
         customerId,
-        // Blank means it is not against any one invoice - which is a real
-        // thing here, not a fallback. It simply sits on the account.
-        invoiceId: pay.invoiceId || null,
-        amountCents: toCents(pay.amount),
+        amountCents: payCents,
         method: pay.method,
+        paymentDate: pay.date || null,
         reference: pay.reference || null,
+        allocations,
         sendReceipt: pay.receipt,
       });
-      setMsg(`Payment of ${money(toCents(pay.amount))} recorded.`
+      setMsg(`Payment of ${money(payCents)} recorded`
+        + (r.allocatedCents ? `, ${money(r.allocatedCents)} against ${allocations.length} invoice${allocations.length === 1 ? '' : 's'}` : '')
+        + (r.unappliedCents ? `, ${money(r.unappliedCents)} left on the account` : '') + '.'
         + (r.receipt ? ` Receipt ${r.receipt.receiptNumber} emailed to ${r.receipt.sentTo}.` : '')
         + (r.receiptError ? ` No receipt was sent: ${r.receiptError}` : ''));
-      setPay({ amount: '', method: 'Cash', invoiceId: '', reference: '', receipt: true });
+      setPay({ amount: '', method: 'Cash', date: '', reference: '', receipt: true });
+      setAlloc({});
       setPayOpen(false);
     }, 'Could not record the payment');
+  }
+
+  /** Fill an invoice up to what it owes, or as far as the amount typed reaches. */
+  function fillInvoice(i: Invoice, on: boolean) {
+    setAlloc((cur) => {
+      const next = { ...cur };
+      if (!on) { delete next[i.invoice_id]; return next; }
+      const owed = Number(i.balance_cents);
+      if (!pay.amount) { next[i.invoice_id] = (owed / 100).toFixed(2); return next; }
+      const used = Object.entries(next).filter(([k]) => k !== i.invoice_id)
+        .reduce((t, [, v]) => t + toCents(v || '0'), 0);
+      const room = Math.max(toCents(pay.amount) - used, 0);
+      const take = Math.min(owed, room);
+      if (take > 0) next[i.invoice_id] = (take / 100).toFixed(2);
+      return next;
+    });
+  }
+
+  async function openChange(p: Payment) {
+    setChange({
+      p, amount: (Number(p.amount_cents) / 100).toFixed(2), date: p.payment_date, method: p.method ?? 'Cash',
+      reference: p.reference ?? '', customerId: customerId!, invoiceId: p.invoice_id ?? '', reason: '',
+    });
+    if (allCustomers.length === 0) api.get<PickCustomer[]>('/api/customers').then(setAllCustomers).catch(() => {});
+  }
+  useEffect(() => {
+    if (!change) return;
+    api.get<Invoice[]>(`/api/invoices?customerId=${change.customerId}`)
+      .then((rows) => setTargetInvoices(rows.filter((i) => !i.is_credit_note && i.status !== 'Cancelled')))
+      .catch(() => setTargetInvoices([]));
+  }, [change?.customerId]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  async function submitChange(e: React.FormEvent) {
+    e.preventDefault();
+    if (!change) return;
+    const p = change.p;
+    const changes: Record<string, unknown> = {};
+    if (toCents(change.amount) !== Number(p.amount_cents)) changes.amountCents = toCents(change.amount);
+    if (change.date && change.date !== p.payment_date) changes.paymentDate = change.date;
+    if (change.method !== (p.method ?? '')) changes.method = change.method;
+    if (change.reference !== (p.reference ?? '')) changes.reference = change.reference;
+    if (change.customerId !== customerId) changes.customerId = change.customerId;
+    if ((change.invoiceId || null) !== (p.invoice_id ?? null) || change.customerId !== customerId) {
+      changes.invoiceId = change.invoiceId || null;
+    }
+    await run(async () => {
+      const r = await api.post<{ applied: boolean }>(`/api/payments/${p.id}/change`, { changes, reason: change.reason });
+      setMsg(r.applied ? 'Payment changed.' : 'Change sent to an administrator for approval. Nothing moves until it is approved.');
+      setChange(null);
+    }, 'Could not change the payment');
   }
 
   async function downloadStatement() {
@@ -241,7 +315,10 @@ export default function CustomerRecord({ session }: { session: Session }) {
 
   const c = h.customer;
   const open = h.invoices.filter((i) => Number(i.balance_cents) > 0);
-  const late = open.filter((i) => i.status === 'Overdue');
+  const completed = h.orders.filter((o) => o.status === 'Delivered').slice(0, 5);
+  const pendingOrders = h.orders.filter((o) => o.status === 'Pending' || o.status === 'Partially Delivered');
+  const nextPending = pendingOrders.filter((o) => o.requested_delivery_date)
+    .sort((a, b) => String(a.requested_delivery_date).localeCompare(String(b.requested_delivery_date)))[0];
   const active = schedules.filter((s) => !s.paused);
   const next = active
     .filter((s) => s.nextDeliveryDate)
@@ -293,12 +370,12 @@ export default function CustomerRecord({ session }: { session: Session }) {
     </>
   );
 
-  const orderTable = (rows: Order[]) => (
+  const orderTable = (rows: Order[], empty = 'No orders yet.', dateLabel = 'Delivery') => (
     <>
       <table>
         <thead>
           <tr>
-            <th>Order</th><th>Date</th><th>How</th>
+            <th>Order</th><th>{dateLabel}</th><th>How</th>
             <th className="num">Total</th><th>Status</th>
           </tr>
         </thead>
@@ -307,24 +384,26 @@ export default function CustomerRecord({ session }: { session: Session }) {
             <tr key={o.id}>
               <td className="lead">
                 <span>
-                  {o.order_number}
+                  <Link to={`/orders?find=${o.order_number}`}>{o.order_number}</Link>
+                  {o.lines_summary && <div className="muted small">{o.lines_summary.replace(/Alka Vida\s+/gi, '')}</div>}
                   {o.source === 'Portal' && <div className="muted small">placed by the customer</div>}
+                  {o.customer_po && <div className="muted small">PO {o.customer_po}</div>}
                 </span>
-                <span className={`chip ${statusTone(o.status)} phone-only`}>{o.status}</span>
+                <span className={`chip ${statusTone(o.status)} phone-only`}>{o.needs_review ? 'Needs approval' : o.status}</span>
               </td>
-              <td data-label="Date">{when(o.order_date)}</td>
+              <td data-label={dateLabel}>{when(o.fulfilled_on ?? o.requested_delivery_date ?? o.order_date)}</td>
               <td data-label="How" className="small">
                 {o.delivery_mode === 'Pickup' ? 'Collection' : o.delivery_mode}
               </td>
               <td data-label="Total" className="num money">{money(Number(o.grand_total_cents))}</td>
               <td className="on-desktop">
-                <span className={`chip ${statusTone(o.status)}`}>{o.status}</span>
+                <span className={`chip ${o.needs_review ? 'warn' : statusTone(o.status)}`}>{o.needs_review ? 'Needs approval' : o.status}</span>
               </td>
             </tr>
           ))}
         </tbody>
       </table>
-      {rows.length === 0 && <p className="muted">No orders yet.</p>}
+      {rows.length === 0 && <p className="muted">{empty}</p>}
     </>
   );
 
@@ -471,10 +550,16 @@ export default function CustomerRecord({ session }: { session: Session }) {
           <form onSubmit={takePayment}>
             <div className="row">
               <div className="field">
-                <label htmlFor="amt">Amount</label>
-                <input id="amt" type="number" step="0.01" min="0" required
+                <label htmlFor="amt">Amount received</label>
+                <input id="amt" type="number" step="0.01" min="0"
                        style={{ width: 140 }} value={pay.amount}
+                       placeholder={allocatedCents ? (allocatedCents / 100).toFixed(2) : ''}
                        onChange={(e) => setPay({ ...pay, amount: e.target.value })} />
+              </div>
+              <div className="field">
+                <label htmlFor="pdate">Date paid</label>
+                <input id="pdate" type="date" value={pay.date} max={todayInJamaica()}
+                       onChange={(e) => setPay({ ...pay, date: e.target.value })} />
               </div>
               <div className="field">
                 <label htmlFor="pm">How</label>
@@ -483,41 +568,130 @@ export default function CustomerRecord({ session }: { session: Session }) {
                   {METHODS.map((m) => <option key={m} value={m}>{m}</option>)}
                 </select>
               </div>
-              <div className="field" style={{ flex: '1 1 260px' }}>
-                <label htmlFor="inv">Against which invoice?</label>
-                <select id="inv" style={{ width: '100%' }} value={pay.invoiceId}
-                        onChange={(e) => setPay({ ...pay, invoiceId: e.target.value })}>
-                  <option value="">Leave it on the account</option>
-                  {open.map((i) => (
-                    <option key={i.invoice_id} value={i.invoice_id}>
-                      {i.invoice_number} — {money(Number(i.balance_cents))} outstanding
-                    </option>
-                  ))}
-                </select>
-              </div>
               <div className="field">
                 <label htmlFor="ref">Reference</label>
                 <input id="ref" style={{ width: 160 }} value={pay.reference}
                        placeholder="cheque no., slip"
                        onChange={(e) => setPay({ ...pay, reference: e.target.value })} />
               </div>
-              <div className="field">
-                <button disabled={busy || !(Number(pay.amount) > 0)}>
-                  {busy ? 'Recording…' : 'Record payment'}
-                </button>
-              </div>
             </div>
+
+            {open.filter((i) => !i.is_credit_note).length > 0 && (
+              <>
+                <div className="panel-head" style={{ marginTop: 6 }}>
+                  <span className="label" style={{ margin: 0 }}>Which invoices does it pay?</span>
+                  <span className="row" style={{ gap: 10 }}>
+                    <button type="button" className="as-link small"
+                            onClick={() => { setAlloc({}); open.filter((i) => !i.is_credit_note).forEach((i) => fillInvoice(i, true)); }}>
+                      Tick them all
+                    </button>
+                    <button type="button" className="as-link small" onClick={() => setAlloc({})}>Clear</button>
+                  </span>
+                </div>
+                <table className="alloc-table">
+                  <thead><tr><th className="tick-col" /><th>Invoice</th><th>Due</th><th className="num">Owed</th><th className="num">Apply</th></tr></thead>
+                  <tbody>
+                    {open.filter((i) => !i.is_credit_note).map((i) => {
+                      const v = alloc[i.invoice_id] ?? '';
+                      return (
+                        <tr key={i.invoice_id}>
+                          <td className="tick-col">
+                            <input type="checkbox" aria-label={`Pay ${i.invoice_number}`}
+                                   checked={toCents(v || '0') > 0}
+                                   onChange={(e) => fillInvoice(i, e.target.checked)} />
+                          </td>
+                          <td>{i.invoice_number}{i.status === 'Overdue' && <span className="chip bad" style={{ marginLeft: 6 }}>overdue</span>}</td>
+                          <td className="small">{i.due_date ? when(i.due_date) : '—'}</td>
+                          <td className="num">{money(Number(i.balance_cents))}</td>
+                          <td className="num">
+                            <input type="number" step="0.01" min="0" value={v} aria-label={`Amount for ${i.invoice_number}`}
+                                   onChange={(e) => setAlloc({ ...alloc, [i.invoice_id]: e.target.value })} />
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </>
+            )}
+            <div style={{ maxWidth: 360, marginTop: 8 }}>
+              <div className="total-line"><span>Received</span><span>{money(payCents)}</span></div>
+              <div className="total-line"><span>Against invoices</span><span>{money(allocatedCents)}</span></div>
+              <div className="total-line"><span>Left on the account</span><span>{money(Math.max(payCents - allocatedCents, 0))}</span></div>
+            </div>
+            {allocatedCents > payCents && (
+              <div className="notice warn">More is applied to invoices than was received. Lower an amount or the total.</div>
+            )}
             <label className="check">
               <input type="checkbox" checked={pay.receipt}
                      onChange={(e) => setPay({ ...pay, receipt: e.target.checked })} />
               Email a receipt to {c.email || 'them (no address on file)'}
             </label>
-            {!pay.invoiceId && (
-              <p className="muted small" style={{ margin: 0 }}>
-                Money left on the account is not applied to anything until somebody
-                puts it against an invoice. It still counts towards what they owe.
-              </p>
-            )}
+            <button disabled={busy || !(payCents > 0) || allocatedCents > payCents}>
+              {busy ? 'Recording…' : `Record ${money(payCents)}`}
+            </button>
+          </form>
+        </div>
+      )}
+
+      {change && (
+        <div className="panel">
+          <h2 style={{ marginTop: 0 }}>Change the payment of {money(Number(change.p.amount_cents))} on {when(change.p.payment_date)}</h2>
+          <form onSubmit={submitChange}>
+            <div className="row">
+              <div className="field">
+                <label htmlFor="ch-amt">Amount</label>
+                <input id="ch-amt" type="number" step="0.01" min="0" style={{ width: 130 }} value={change.amount}
+                       onChange={(e) => setChange({ ...change, amount: e.target.value })} />
+              </div>
+              <div className="field">
+                <label htmlFor="ch-date">Date paid</label>
+                <input id="ch-date" type="date" value={change.date} onChange={(e) => setChange({ ...change, date: e.target.value })} />
+              </div>
+              <div className="field">
+                <label htmlFor="ch-m">How</label>
+                <select id="ch-m" value={change.method} onChange={(e) => setChange({ ...change, method: e.target.value })}>
+                  {METHODS.map((m) => <option key={m} value={m}>{m}</option>)}
+                </select>
+              </div>
+              <div className="field">
+                <label htmlFor="ch-ref">Reference</label>
+                <input id="ch-ref" value={change.reference} onChange={(e) => setChange({ ...change, reference: e.target.value })} />
+              </div>
+            </div>
+            <div className="row">
+              <div className="field grow">
+                <label htmlFor="ch-c">Customer</label>
+                <select id="ch-c" value={change.customerId}
+                        onChange={(e) => setChange({ ...change, customerId: e.target.value, invoiceId: '' })}>
+                  <option value={customerId}>{c.name} (this customer)</option>
+                  {allCustomers.filter((x) => x.id !== customerId).map((x) => <option key={x.id} value={x.id}>{x.name}</option>)}
+                </select>
+              </div>
+              <div className="field grow">
+                <label htmlFor="ch-i">Against</label>
+                <select id="ch-i" value={change.invoiceId} onChange={(e) => setChange({ ...change, invoiceId: e.target.value })}>
+                  <option value="">Nothing in particular (on the account)</option>
+                  {targetInvoices.filter((i) => Number(i.balance_cents) > 0 || i.invoice_id === change.p.invoice_id).map((i) => (
+                    <option key={i.invoice_id} value={i.invoice_id}>{i.invoice_number} — {money(Number(i.balance_cents))} owed</option>
+                  ))}
+                </select>
+              </div>
+            </div>
+            <div className="field">
+              <label htmlFor="ch-why">Why? (required)</label>
+              <input id="ch-why" style={{ width: '100%' }} value={change.reason} required
+                     onChange={(e) => setChange({ ...change, reason: e.target.value })} />
+            </div>
+            <p className="muted small">
+              {session.role === 'admin'
+                ? 'As an administrator your change applies straight away. A different amount reverses the original and posts the correct one, so both stay on the record.'
+                : 'This goes to an administrator to approve. Nothing changes until they do.'}
+            </p>
+            <div className="row" style={{ gap: 8 }}>
+              <button disabled={busy || !change.reason.trim()}>{session.role === 'admin' ? 'Change it' : 'Ask for approval'}</button>
+              <button type="button" className="secondary" onClick={() => setChange(null)}>Cancel</button>
+            </div>
           </form>
         </div>
       )}
@@ -526,18 +700,23 @@ export default function CustomerRecord({ session }: { session: Session }) {
         <div className="fig">
           <div className="fig-label">{h.balanceCents < 0 ? 'In credit' : 'Owes'}</div>
           <div className="fig-value">{money(Math.abs(h.balanceCents))}</div>
-          <div className={`fig-sub${late.length ? ' bad' : ''}`}>
-            {open.length} open invoice{open.length === 1 ? '' : 's'}
-            {late.length ? `, ${late.length} overdue` : open.length ? ', none late' : ''}
+          <div className={`fig-sub${(h.overdueCents ?? 0) > 0 ? ' bad' : ''}`}>
+            {(h.overdueCents ?? 0) > 0
+              ? `${money(h.overdueCents ?? 0)} overdue (${h.overdueInvoices} invoice${h.overdueInvoices === 1 ? '' : 's'})`
+              : `${open.length} open invoice${open.length === 1 ? '' : 's'}${open.length ? ', none late' : ''}`}
           </div>
         </div>
         <div className="fig">
           <div className="fig-label">Next delivery</div>
-          <div className="fig-value" style={{ fontSize: next ? 22 : 17 }}>
-            {next ? when(next.nextDeliveryDate) : 'None booked'}
+          <div className="fig-value" style={{ fontSize: next || nextPending ? 22 : 17 }}>
+            {nextPending?.requested_delivery_date && (!next || String(nextPending.requested_delivery_date) <= String(next.nextDeliveryDate))
+              ? when(nextPending.requested_delivery_date)
+              : next ? when(next.nextDeliveryDate) : 'None booked'}
           </div>
           <div className="fig-sub">
-            {next ? `${next.lineSummary}, ${PATTERN_WORDS[next.pattern]}` : 'no standing order'}
+            {nextPending?.requested_delivery_date && (!next || String(nextPending.requested_delivery_date) <= String(next.nextDeliveryDate))
+              ? `${nextPending.order_number}${nextPending.lines_summary ? `, ${nextPending.lines_summary.replace(/Alka Vida\s+/gi, '')}` : ''}`
+              : next ? `${next.lineSummary}, ${PATTERN_WORDS[next.pattern]}` : 'nothing on order'}
           </div>
         </div>
         <div className="fig">
@@ -577,20 +756,19 @@ export default function CustomerRecord({ session }: { session: Session }) {
           <div>
             <div className="panel phone-cards">
               <div className="panel-head">
-                <h2>Open invoices</h2>
-                <button type="button" className="as-link small"
-                        onClick={() => setTab('invoices')}>Full statement</button>
-              </div>
-              {invoiceTable(open, 'Nothing outstanding.')}
-              {onAccountNotice()}
-            </div>
-            <div className="panel phone-cards">
-              <div className="panel-head">
                 <h2>Recent orders</h2>
                 <button type="button" className="as-link small"
                         onClick={() => setTab('orders')}>All orders</button>
               </div>
-              {orderTable(h.orders.slice(0, 5))}
+              {orderTable(completed, 'Nothing delivered yet.', 'Delivered')}
+              {onAccountNotice()}
+            </div>
+            <div className="panel phone-cards">
+              <div className="panel-head">
+                <h2>Pending orders</h2>
+                <Link className="small" to={`/orders/new?customer=${c.id}`}>New order</Link>
+              </div>
+              {orderTable(pendingOrders, 'Nothing waiting to be delivered.', 'Delivery')}
             </div>
           </div>
           <div>
@@ -740,10 +918,16 @@ export default function CustomerRecord({ session }: { session: Session }) {
                   <td data-label="Amount" className="num money">{money(Number(p.amount_cents))}</td>
                   <td className="num">
                     {!p.is_reversal && Number(p.amount_cents) > 0 && (
-                      <button type="button" className="as-link small" disabled={busy}
-                              onClick={() => run(async () => {
-                                await downloadPost('/api/receipts.pdf', { paymentIds: [p.id] }, `receipt-${p.id.slice(0, 8)}.pdf`);
-                              }, 'Could not build the receipt')}>Receipt</button>
+                      <span className="row" style={{ gap: 10, justifyContent: 'flex-end' }}>
+                        <button type="button" className="as-link small" disabled={busy}
+                                onClick={() => run(async () => {
+                                  await downloadPost('/api/receipts.pdf', { paymentIds: [p.id] }, `receipt-${p.id.slice(0, 8)}.pdf`);
+                                }, 'Could not build the receipt')}>Receipt</button>
+                        {!p.reversed && (
+                          <button type="button" className="as-link small" disabled={busy}
+                                  onClick={() => { openChange(p); window.scrollTo({ top: 0, behavior: 'smooth' }); }}>Change</button>
+                        )}
+                      </span>
                     )}
                   </td>
                 </tr>

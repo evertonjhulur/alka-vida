@@ -9,15 +9,45 @@ interface Sheet {
   started_at: string | null;
 }
 
+interface Expected {
+  scheduleId: string; customerName: string; zone: string | null; lineSummary: string;
+  fromOrder: string; pattern: string; deliveryMode: string;
+}
+
 export default function DeliverySheets() {
   const [sheets, setSheets] = useState<Sheet[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [msg, setMsg] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
   /** Blank means every date. A day is picked from the calendar. */
   const [day, setDay] = useState('');
+  /** Standing orders due on the chosen day but not raised yet (point 16). */
+  const [expected, setExpected] = useState<Expected[]>([]);
 
+  const loadSheets = () => api.get<Sheet[]>('/api/delivery-sheets').then(setSheets);
+  useEffect(() => { loadSheets().catch((e) => setError(e.message)); }, []);
   useEffect(() => {
-    api.get<Sheet[]>('/api/delivery-sheets').then(setSheets).catch((e) => setError(e.message));
-  }, []);
+    if (!day) { setExpected([]); return; }
+    api.get<Expected[]>(`/api/recurring/expected?date=${day}`).then(setExpected).catch(() => setExpected([]));
+  }, [day]);
+
+  async function raiseNow() {
+    setBusy(true); setError(null); setMsg(null);
+    try {
+      const r = await api.post<{ created: unknown[]; problems: Array<{ customerName: string; reason: string }> }>(
+        '/api/recurring/raise-through', { date: day });
+      setMsg(`${r.created.length} standing order${r.created.length === 1 ? '' : 's'} raised and put on their rounds.`
+        + (r.problems.length ? ` Not raised: ${r.problems.map((p) => `${p.customerName} (${p.reason})`).join('; ')}.` : ''));
+      await loadSheets();
+      setExpected(await api.get<Expected[]>(`/api/recurring/expected?date=${day}`));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Could not raise them');
+    } finally { setBusy(false); }
+  }
+  const tomorrow = (() => {
+    const d = new Date(`${todayInJamaica()}T12:00:00Z`); d.setUTCDate(d.getUTCDate() + 1);
+    return d.toISOString().slice(0, 10);
+  })();
 
   /*
    * Rounds accumulate - one per zone per day, for as long as the business has
@@ -35,6 +65,7 @@ export default function DeliverySheets() {
         Orders are auto-routed onto the sheet for the customer's zone and requested date.
       </p>
       {error && <div className="notice error">{error}</div>}
+      {msg && <div className="notice ok">{msg}</div>}
 
       <div className="panel">
         <div className="row" style={{ alignItems: 'flex-end' }}>
@@ -53,6 +84,9 @@ export default function DeliverySheets() {
             <button className="secondary" onClick={() => setDay(todayInJamaica())}>
               Today
             </button>{' '}
+            <button className="secondary" onClick={() => setDay(tomorrow)}>
+              Tomorrow
+            </button>{' '}
             <button className="secondary" onClick={() => setDay('')}>
               Show every day
             </button>
@@ -66,6 +100,34 @@ export default function DeliverySheets() {
           </div>
         </div>
       </div>
+
+      {day && expected.length > 0 && (
+        <div className="panel">
+          <div className="panel-head">
+            <h2>Standing orders due {when(day)}, not on a round yet</h2>
+            <button type="button" disabled={busy} onClick={raiseNow}>
+              {busy ? 'Raising…' : 'Put them on their rounds now'}
+            </button>
+          </div>
+          <p className="muted small" style={{ marginTop: 0 }}>
+            Standing orders are raised a week before they are due, then appear on their round.
+            These are further ahead than that; raise them now to plan the day.
+          </p>
+          <table>
+            <thead><tr><th>Customer</th><th>Zone</th><th>What</th><th>Repeats</th></tr></thead>
+            <tbody>
+              {expected.map((e) => (
+                <tr key={e.scheduleId}>
+                  <td>{e.customerName}<div className="muted small">from {e.fromOrder}</div></td>
+                  <td>{e.deliveryMode === 'Pickup' ? 'Collection' : (e.zone ?? <span className="chip warn">no zone</span>)}</td>
+                  <td className="small">{e.lineSummary.replace(/Alka Vida\s+/gi, '')}</td>
+                  <td className="small">{e.pattern === 'Biweekly' ? 'every 2 weeks' : e.pattern.toLowerCase()}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
 
       <div className="panel">
         <table>

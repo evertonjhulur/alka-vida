@@ -175,10 +175,11 @@ async function drawInvoice(doc: PDFKit.PDFDocument, db: Db, invoiceId: string) {
     notes: string | null; credit_status: string;
   };
   const customer = await billTo(db, ledger.customerId);
-  const orders = await db.query<{ order_number: string }>(
-    `SELECT o.order_number FROM invoice_orders io JOIN customer_orders o ON o.id = io.order_id
+  const orders = await db.query<{ order_number: string; customer_po: string | null }>(
+    `SELECT o.order_number, o.customer_po FROM invoice_orders io JOIN customer_orders o ON o.id = io.order_id
      WHERE io.invoice_id = $1 ORDER BY o.order_number`, [invoiceId],
   );
+  const pos = [...new Set(orders.map((o) => o.customer_po).filter(Boolean))] as string[];
   const linked = await db.maybeOne<{ invoice_number: string }>(
     `SELECT li.invoice_number FROM invoices i JOIN invoices li ON li.id = i.linked_invoice_id
      WHERE i.id = $1`, [invoiceId],
@@ -192,7 +193,17 @@ async function drawInvoice(doc: PDFKit.PDFDocument, db: Db, invoiceId: string) {
   doc.fillColor('#000').fontSize(16)
     .text(isCN ? 'CREDIT NOTE' : 'INVOICE', 50, doc.y, { align: 'right', width: 510 });
   doc.fontSize(10)
-    .text(ledger.invoiceNumber, { align: 'right', width: 510 })
+    .text(ledger.invoiceNumber, { align: 'right', width: 510 });
+  // The order it came from, right under the invoice number (team feedback,
+  // 1 Oct 2026, point 6), and the customer's own PO when they gave one.
+  if (!ledger.cycle && orders.length > 0) {
+    doc.fontSize(9).fillColor('#444')
+      .text(`Order ${orders.map((o) => o.order_number).join(', ')}`, { align: 'right', width: 510 });
+  }
+  if (pos.length > 0) {
+    doc.fontSize(9).fillColor('#444').text(`Your PO ${pos.join(', ')}`, { align: 'right', width: 510 });
+  }
+  doc.fontSize(10).fillColor('#000')
     .text(`Date: ${fmtDate(ledger.invoiceDate)}`, { align: 'right', width: 510 });
   if (!isCN) {
     // A weekly or monthly invoice is due on receipt (Everton, 30 Sep 2026).
@@ -218,9 +229,6 @@ async function drawInvoice(doc: PDFKit.PDFDocument, db: Db, invoiceId: string) {
   if (!isCN && customer.payment_terms && !ledger.cycle) doc.text(`Terms: ${customer.payment_terms}`);
   if (ledger.gct_exempt && customer.gct_exempt_ref) doc.text(`GCT exemption: ${customer.gct_exempt_ref}`);
   if (isCN && linked) doc.text(`Against invoice ${linked.invoice_number}`);
-  if (!ledger.cycle && orders.length > 0) {
-    doc.text(`Order${orders.length > 1 ? 's' : ''}: ${orders.map((o) => o.order_number).join(', ')}`);
-  }
   doc.moveDown(1.2);
 
   const left = 50;

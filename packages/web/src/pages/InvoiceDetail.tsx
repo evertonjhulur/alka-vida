@@ -32,6 +32,7 @@ interface CustomerRef {
 interface OrderRef {
   id: string; order_number: string; delivery_mode: string;
   order_date: string; requested_delivery_date: string | null; status: string;
+  customer_po?: string | null;
 }
 interface Delivery {
   zone: string; delivery_date: string; driver_name: string | null; driver_user_name: string | null;
@@ -475,10 +476,17 @@ export default function InvoiceDetail({ session }: { session: Session }) {
             <h1>{i.invoiceNumber}</h1>
             <span className={`chip ${statusTone(i.status)}`}>{statusWords}</span>
           </div>
+          {(i.orders ?? []).length > 0 && (
+            <div className="small" style={{ marginTop: -4, marginBottom: 4 }}>
+              Order {(i.orders ?? []).map((o, n) => (
+                <span key={o.id}>{n > 0 ? ', ' : ''}<Link to={`/orders?find=${o.order_number}`}>{o.order_number}</Link></span>
+              ))}
+              {(i.orders ?? []).some((o) => o.customer_po) && <> · their PO {(i.orders ?? []).map((o) => o.customer_po).filter(Boolean).join(', ')}</>}
+            </div>
+          )}
           <p className="subtitle" style={{ marginBottom: 0 }}>
             {i.customer ? <Link to={`/customers/${i.customer.id}?tab=invoices`}>{i.customer.name}</Link> : 'Customer'}
             {' · '}{origin}
-            {(i.orders ?? []).length > 0 && <> · from {(i.orders ?? []).map((o) => o.order_number).join(', ')}</>}
           </p>
         </div>
         <div className="record-actions">

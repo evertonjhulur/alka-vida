@@ -7,9 +7,12 @@
 
 import type { Db, Queryable } from '../db/index.ts';
 import type { Actor } from './core.ts';
-import { audit, businessToday, nextNumber, num, requireRole } from './core.ts';
+import { audit, businessTimeNow, businessToday, getSetting, nextNumber, num, requireRole } from './core.ts';
 import type { Cents, DeliveryMode, PaymentMethod, RecurrencePattern } from '@alka/shared';
-import { computeTotals, computeLineTotal, totalBottles, RuleViolation, composeAddress } from '@alka/shared';
+import {
+  computeTotals, computeLineTotal, totalBottles, RuleViolation, composeAddress,
+  addDays, nextRunDate,
+} from '@alka/shared';
 
 export interface OrderLineInput {
   productId: string;
@@ -34,9 +37,16 @@ export interface CreateOrderInput {
   /** One of the customer's extra delivery addresses; blank = main address. */
   addressId?: string | null;
   quotationId?: string | null;
+  /** The customer's own purchase order number, printed on the invoice. */
+  customerPo?: string | null;
   paymentMethod?: PaymentMethod | null;
   notes?: string | null;
   source?: 'Admin' | 'Portal';
+  /**
+   * For today, but placed after the same-day cut-off: it waits in Approvals
+   * instead of going straight onto today's round. Set by sameDayCheck.
+   */
+  needsReview?: boolean;
   isRecurring?: boolean;
   recurrencePattern?: RecurrencePattern | null;
   parentRecurringId?: string | null;
@@ -53,6 +63,10 @@ export interface CreateOrderResult {
   deliveryStopId: string | null;
   /** Non-fatal advisories, e.g. a missing delivery zone. */
   warnings: string[];
+  /** The delivery date it was booked for (filled in when none was asked for). */
+  deliveryDate?: string | null;
+  /** True when it is waiting for the office to approve a late same-day order. */
+  needsReview?: boolean;
 }
 
 interface ResolvedLine {
@@ -193,9 +207,10 @@ export async function createOrder(
           is_recurring, recurrence_pattern, parent_recurring_id, payment_method,
           source, delivery_mode, discount_percent,
           subtotal_cents, discount_amount_cents, gct_cents, grand_total_cents,
-          discount_fixed_cents, gct_exempt, address_id, quotation_id)
+          discount_fixed_cents, gct_exempt, address_id, quotation_id,
+          customer_po, needs_review)
        VALUES ($1,$2,COALESCE($3::date, business_today()),$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,
-               $17,$18,$19,$20)
+               $17,$18,$19,$20,$21,$22)
        RETURNING id`,
       [
         orderNumber, input.customerId, input.orderDate ?? null,
@@ -205,6 +220,7 @@ export async function createOrder(
         input.source ?? 'Admin', input.deliveryMode, pct,
         totals.subtotal, totals.discountAmount, totals.gct, totals.grandTotal,
         fixed, gctExempt, input.addressId ?? null, input.quotationId ?? null,
+        input.customerPo?.trim() || null, input.needsReview === true,
       ],
     );
 
@@ -223,8 +239,26 @@ export async function createOrder(
     let stopId: string | null = null;
 
     // Auto-place onto a delivery sheet. Applies IDENTICALLY to one-off and
-    // recurring orders. Pickup orders never touch a delivery sheet at all.
-    if (input.deliveryMode === 'Delivery') {
+    // recurring orders. Pickup orders never touch a delivery sheet at all,
+    // and nor does a late same-day order until the office approves it.
+    if (input.needsReview) {
+      const req = await t.one<{ id: string }>(
+        `INSERT INTO approval_requests
+           (request_type, entity_type, entity_id, entity_label, customer_id,
+            amount_cents, reason, requested_by_id, payload)
+         VALUES ('SameDayOrder','CustomerOrder',$1,$2,$3,$4,$5,$6,$7::jsonb)
+         RETURNING id`,
+        [order.id, orderNumber, input.customerId, totals.grandTotal,
+         `Wanted today (${input.requestedDeliveryDate}), placed after the same-day cut-off`,
+         actor.id,
+         JSON.stringify({ requestedDeliveryDate: input.requestedDeliveryDate, source: input.source ?? 'Admin' })],
+      );
+      warnings.push(
+        `${orderNumber} is for today but came in after the same-day cut-off, so it is waiting `
+        + 'under Needs a decision. Approve it there to put it on today\'s round.',
+      );
+      void req;
+    } else if (input.deliveryMode === 'Delivery') {
       const placement = await placeOnDeliverySheet(t, order.id, input.customerId,
         input.requestedDeliveryDate ?? null, input.addressId ?? null);
       sheetId = placement.sheetId;
@@ -246,6 +280,8 @@ export async function createOrder(
       gctCents: totals.gct,
       grandTotalCents: totals.grandTotal,
       deliverySheetId: sheetId, deliveryStopId: stopId, warnings,
+      deliveryDate: input.requestedDeliveryDate ?? null,
+      needsReview: input.needsReview === true,
     };
   });
 }
@@ -258,6 +294,49 @@ export interface PortalOrderInput {
   notes?: string | null;
   /** One of their own delivery addresses (createOrder checks it is theirs). */
   addressId?: string | null;
+  /** Their own purchase order number, if their accounts department needs one. */
+  customerPo?: string | null;
+}
+
+/**
+ * The same-day cut-off (team feedback, 1 Oct 2026, point 10).
+ *
+ * After the cut-off time (Settings, 10:00 to start) an order for TODAY is
+ * still taken - nobody should be turned away - but it waits in Approvals
+ * rather than landing on a round the driver may already have loaded. An
+ * administrator's own order goes straight through: approving it is theirs.
+ *
+ * With no date asked for, the order goes on the customer's next delivery day
+ * (their own days, else their zone's run days, else any day), counting from
+ * tomorrow once the cut-off has passed. That needs no approval at all.
+ */
+export async function sameDayCheck(
+  t: Queryable, actor: Actor, customerId: string, mode: DeliveryMode,
+  requested: string | null, addressId: string | null = null,
+): Promise<{ date: string | null; needsReview: boolean; afterCutoff: boolean; cutoff: string }> {
+  const cutoff = (await getSetting(t, 'same_day_cutoff', '10:00')).trim() || '10:00';
+  const today = businessToday();
+  const afterCutoff = businessTimeNow() >= cutoff.padStart(5, '0');
+  if (mode === 'Pickup' || mode === 'Counter') {
+    return { date: requested, needsReview: false, afterCutoff, cutoff };
+  }
+  if (requested) {
+    const needsReview = requested === today && afterCutoff && actor.role !== 'admin';
+    return { date: requested, needsReview, afterCutoff, cutoff };
+  }
+  const target = await deliveryTarget(t, customerId, addressId);
+  const c = await t.one<{ delivery_days: string[] | null }>(
+    `SELECT delivery_days FROM customers WHERE id = $1`, [customerId],
+  );
+  let days: string[] = (c.delivery_days ?? []).filter(Boolean);
+  if (days.length === 0 && target.delivery_zone) {
+    const z = await t.maybeOne<{ run_days: string[] | null }>(
+      `SELECT run_days FROM delivery_zones WHERE name = $1`, [target.delivery_zone],
+    );
+    days = (z?.run_days ?? []).filter(Boolean);
+  }
+  const from = afterCutoff ? addDays(today, 1) : today;
+  return { date: nextRunDate(from, days), needsReview: false, afterCutoff, cutoff };
 }
 
 /**
@@ -288,6 +367,8 @@ export async function createPortalOrder(
   if (requested && requested < businessToday()) {
     throw new RuleViolation('a delivery cannot be requested for a date that has passed');
   }
+  const addressId = deliveryMode === 'Delivery' ? (input.addressId || null) : null;
+  const when = await sameDayCheck(db, actor, customerId, deliveryMode, requested, addressId);
 
   return createOrder(db, actor, {
     customerId,
@@ -299,9 +380,11 @@ export async function createPortalOrder(
       looseBottles: l.looseBottles,
     })),
     deliveryMode,
-    requestedDeliveryDate: requested,
+    requestedDeliveryDate: when.date,
+    needsReview: when.needsReview,
     notes: input.notes?.trim() || null,
-    addressId: deliveryMode === 'Delivery' ? (input.addressId || null) : null,
+    customerPo: input.customerPo?.trim() || null,
+    addressId,
     source: 'Portal',
     // Not the customer's to decide. A discount is the office's to give, a
     // standing order is an arrangement rather than an order, how it will be
@@ -345,10 +428,30 @@ export async function cancelOwnOrder(
     );
   }
 
+  // Once the driver has set off with it, it is on the van: the customer has
+  // to ring the office instead (team feedback, 1 Oct 2026, point 7).
+  const onTheRoad = await db.maybeOne(
+    `SELECT 1 FROM delivery_stops st JOIN delivery_sheets ds ON ds.id = st.delivery_sheet_id
+     WHERE st.order_id = $1 AND st.stop_outcome = 'Pending' AND ds.started_at IS NOT NULL`,
+    [orderId],
+  );
+  if (onTheRoad) {
+    throw new RuleViolation(
+      `order ${order.order_number} is already out for delivery, so it can no longer be `
+      + 'cancelled here. Please call us.',
+    );
+  }
+
   await db.tx(async (t) => {
     await t.query(`UPDATE customer_orders SET status = 'Cancelled' WHERE id = $1`, [orderId]);
     await t.query(
       `DELETE FROM delivery_stops WHERE order_id = $1 AND stop_outcome = 'Pending'`,
+      [orderId],
+    );
+    await t.query(
+      `UPDATE approval_requests SET status = 'Rejected', review_notes = 'Cancelled by the customer',
+              reviewed_date = now()
+       WHERE entity_id = $1 AND request_type = 'SameDayOrder' AND status = 'Pending'`,
       [orderId],
     );
     await audit(t, actor, 'update', 'CustomerOrder', orderId, order.order_number, {
@@ -494,6 +597,9 @@ export async function editOrder(
     discountFixedCents?: Cents;
     gctExempt?: boolean;
     notes?: string | null;
+    customerPo?: string | null;
+    /** Change where it goes: one of their addresses, or '' / null for the main one. */
+    addressId?: string | null;
   },
 ): Promise<{ subtotalCents: Cents; gctCents: Cents; grandTotalCents: Cents; warnings: string[] }> {
   requireRole(actor, 'admin', 'user');
@@ -502,10 +608,12 @@ export async function editOrder(
     const order = await t.maybeOne<{
       id: string; customer_id: string; status: string; order_number: string;
       discount_percent: number; requested_delivery_date: string | null;
-      discount_fixed_cents: number; gct_exempt: boolean;
+      discount_fixed_cents: number; gct_exempt: boolean; delivery_mode: string;
+      address_id: string | null; needs_review: boolean;
     }>(
       `SELECT id, customer_id, status, order_number, discount_percent,
-              requested_delivery_date, discount_fixed_cents, gct_exempt
+              requested_delivery_date::text AS requested_delivery_date,
+              discount_fixed_cents, gct_exempt, delivery_mode, address_id, needs_review
        FROM customer_orders WHERE id = $1 FOR UPDATE`,
       [orderId],
     );
@@ -569,6 +677,24 @@ export async function editOrder(
        totals.gct, totals.grandTotal, fixed, gctExempt],
     );
 
+    if (changes.customerPo !== undefined) {
+      await t.query(`UPDATE customer_orders SET customer_po = $2 WHERE id = $1`,
+        [orderId, changes.customerPo?.trim() || null]);
+    }
+    let addressId = order.address_id;
+    if (changes.addressId !== undefined) {
+      addressId = changes.addressId || null;
+      if (addressId) {
+        const a = await t.maybeOne<{ customer_id: string; active: boolean; is_delivery: boolean }>(
+          `SELECT customer_id, active, is_delivery FROM customer_addresses WHERE id = $1`, [addressId],
+        );
+        if (!a || a.customer_id !== order.customer_id || !a.active || !a.is_delivery) {
+          throw new RuleViolation('that delivery address is not one of this customer\'s');
+        }
+      }
+      await t.query(`UPDATE customer_orders SET address_id = $2 WHERE id = $1`, [orderId, addressId]);
+    }
+
     // Keep the driver's stop description in step with the change.
     const summary = await summariseOrderLines(t, orderId);
     await t.query(
@@ -576,6 +702,38 @@ export async function editOrder(
        WHERE order_id = $1 AND stop_outcome = 'Pending'`,
       [orderId, summary],
     );
+
+    /*
+     * A new delivery date (or address) moves the order to the right round
+     * (team feedback, 1 Oct 2026, point 9: the date changed on the order but
+     * the stop stayed on the old round). The pending stop comes off whatever
+     * round it was on and the order is placed again, exactly as a new order
+     * would be. A round already on the road keeps the stop, with a warning,
+     * because the water may be on the van.
+     */
+    const newDate = changes.requestedDeliveryDate ?? null;
+    const dateMoved = !!newDate && newDate !== order.requested_delivery_date;
+    const addressMoved = changes.addressId !== undefined && addressId !== order.address_id;
+    if ((dateMoved || addressMoved) && order.delivery_mode === 'Delivery' && !order.needs_review) {
+      const current = await t.maybeOne<{ id: string; started: boolean; zone: string; day: string }>(
+        `SELECT st.id, (ds.started_at IS NOT NULL) AS started, ds.zone, ds.delivery_date::text AS day
+         FROM delivery_stops st JOIN delivery_sheets ds ON ds.id = st.delivery_sheet_id
+         WHERE st.order_id = $1 AND st.stop_outcome = 'Pending' AND ds.status = 'Open'
+         ORDER BY ds.delivery_date DESC LIMIT 1`,
+        [orderId],
+      );
+      if (current?.started) {
+        warnings.push(
+          `The ${current.zone} round for ${current.day} has already started, so ${order.order_number} `
+          + 'was left on it. Take it off that round first if it is not going today.',
+        );
+      } else {
+        if (current) await t.query(`DELETE FROM delivery_stops WHERE id = $1`, [current.id]);
+        const placed = await placeOnDeliverySheet(t, orderId, order.customer_id,
+          newDate ?? order.requested_delivery_date, addressId);
+        warnings.push(...placed.warnings);
+      }
+    }
 
     await audit(t, actor, 'update', 'CustomerOrder', orderId, order.order_number, {
       linesReplaced: !!changes.lines,
@@ -626,7 +784,11 @@ export async function cancelOrder(
 /** Orders for the office list, newest first. */
 export async function listOrders(
   db: Db,
-  opts: { status?: string; customerId?: string; limit?: number } = {},
+  opts: {
+    status?: string; customerId?: string; limit?: number;
+    /** A date range, on the delivery date (default) or the day it was placed. */
+    from?: string | null; to?: string | null; dateBy?: 'delivery' | 'placed';
+  } = {},
 ) {
   /*
    * Besides the order itself, what the Orders screen needs to say where it
@@ -658,9 +820,14 @@ export async function listOrders(
      LEFT JOIN delivery_sheets ds ON ds.id = st.delivery_sheet_id
      WHERE ($1::text IS NULL OR o.status = $1)
        AND ($2::uuid IS NULL OR o.customer_id = $2::uuid)
+       AND ($4::date IS NULL OR (CASE WHEN $6 THEN o.order_date
+                                      ELSE COALESCE(o.requested_delivery_date, o.order_date) END) >= $4::date)
+       AND ($5::date IS NULL OR (CASE WHEN $6 THEN o.order_date
+                                      ELSE COALESCE(o.requested_delivery_date, o.order_date) END) <= $5::date)
      ORDER BY o.created_at DESC
      LIMIT $3`,
-    [opts.status ?? null, opts.customerId ?? null, opts.limit ?? 100],
+    [opts.status ?? null, opts.customerId ?? null, opts.limit ?? 100,
+     opts.from ?? null, opts.to ?? null, opts.dateBy === 'placed'],
   );
 }
 

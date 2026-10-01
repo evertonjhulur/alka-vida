@@ -71,8 +71,8 @@ export default function Register() {
           <section className="panel">
             <h1 className="public-h1">Thank you, {done}</h1>
             <p>
-              We have your details. Someone from Alka Vida will call to agree your
-              prices and delivery day.
+              We have your details. Someone from Alka Vida will reach out to you to
+              confirm your delivery day.
             </p>
             <p className="muted small">
               Once your account is set up you will get an email with a link to choose

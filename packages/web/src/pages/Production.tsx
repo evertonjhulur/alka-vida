@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { api } from '../lib/api';
-import { money, date, when } from '../lib/format';
+import { money, date, when, todayInJamaica } from '../lib/format';
 
 interface Product { id: string; name: string; bottles_per_case: number }
 
@@ -26,6 +26,8 @@ export default function Production() {
   const [cases, setCases] = useState('');
   const [loose, setLoose] = useState('');
   const [operator, setOperator] = useState('');
+  /** The day it was made (team feedback, point 19); blank = today. */
+  const [madeOn, setMadeOn] = useState('');
   const [check, setCheck] = useState<Feasibility | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
@@ -62,13 +64,14 @@ export default function Production() {
           cases: Number(cases) || 0,
           looseBottles: Number(loose) || 0,
           operator: operator || undefined,
+          productionDate: madeOn || null,
         },
       );
       setMsg(
         `Produced ${result.bottlesProduced} bottles. Materials cost ` +
         `${money(result.materialCostCents)}, drawn from the oldest stock batches first.`,
       );
-      setCases(''); setLoose('');
+      setCases(''); setLoose(''); setMadeOn('');
       await load();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not record the production run');
@@ -119,6 +122,12 @@ export default function Production() {
             <div className="field">
               <label htmlFor="op">Operator</label>
               <input id="op" value={operator} onChange={(e) => setOperator(e.target.value)} />
+            </div>
+            <div className="field">
+              <label htmlFor="pd">Production date</label>
+              <input id="pd" type="date" value={madeOn} max={todayInJamaica()}
+                     onChange={(e) => setMadeOn(e.target.value)} />
+              <div className="muted small">Blank means today.</div>
             </div>
           </div>
 

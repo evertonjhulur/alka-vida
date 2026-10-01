@@ -27,7 +27,7 @@
 import { createHash, randomBytes } from 'node:crypto';
 import type { Db, Queryable } from '../db/index.ts';
 import type { Actor } from './core.ts';
-import { audit, nextNumber, requireRole, num } from './core.ts';
+import { audit, nextNumber, requireRole, num, siteUrl } from './core.ts';
 import type { Cents } from '@alka/shared';
 import { computeTotals, RuleViolation } from '@alka/shared';
 import { createOrder, resolveLines, type CreateOrderInput } from './orders.ts';
@@ -56,7 +56,7 @@ const EDITABLE = ['Draft', 'Sent'];
 const hashToken = (token: string) => createHash('sha256').update(token).digest('hex');
 
 function portalBaseUrl(): string {
-  return (process.env.PORTAL_URL ?? 'http://localhost:3001').replace(/\/+$/, '');
+  return siteUrl();
 }
 export const quoteAcceptLink = (token: string) => `${portalBaseUrl()}/#/quote/${token}`;
 

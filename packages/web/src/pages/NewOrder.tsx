@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
-import { api, idempotencyKey } from '../lib/api';
+import { api, getSession, idempotencyKey } from '../lib/api';
 import { money, day, date, todayInJamaica } from '../lib/format';
 import CustomerPicker from '../components/CustomerPicker';
 
@@ -137,12 +137,29 @@ export default function NewOrder() {
   const [repeatDays, setRepeatDays] = useState<string[]>([]);
   const [lines, setLines] = useState<Line[]>([]);
   const [paidNow, setPaidNow] = useState('');
+  const [emptiesBack, setEmptiesBack] = useState('');
   const [repeat, setRepeat] = useState(false);
   const [pattern, setPattern] = useState<Pattern>('Weekly');
   const [result, setResult] = useState<{ text: string; customerId: string } | null>(null);
   const [warnings, setWarnings] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [customerPo, setCustomerPo] = useState('');
+  /** The same-day cut-off (team feedback, point 10.2). */
+  const [cutoff, setCutoff] = useState('10:00');
+  const isAdmin = getSession()?.role === 'admin';
+  const nowHm = new Intl.DateTimeFormat('en-GB', { timeZone: 'America/Jamaica', hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date());
+  const pastCutoff = nowHm >= cutoff;
+  useEffect(() => {
+    api.get<{ sameDayCutoff: string }>('/api/settings/ordering').then((o) => {
+      setCutoff(o.sameDayCutoff || '10:00');
+      // After the cut-off, a new delivery starts on tomorrow rather than today.
+      const hm = new Intl.DateTimeFormat('en-GB', { timeZone: 'America/Jamaica', hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date());
+      if (hm >= (o.sameDayCutoff || '10:00') && startMode !== 'Counter' && startMode !== 'Pickup') {
+        setRequestedDate((d) => (d === todayInJamaica() ? addDays(d, 1) : d));
+      }
+    }).catch(() => {});
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     api.get<Product[]>('/api/products').then(setProducts).catch(() => {});
@@ -291,6 +308,7 @@ export default function NewOrder() {
           ...money_,
           amountPaidCents: paidNow ? Math.round(Number(paidNow) * 100) : 0,
           method,
+          emptiesReturned: Number(emptiesBack) || 0,
           idempotencyKey: idempotencyKey('counter'),
         });
         setResult({
@@ -307,6 +325,7 @@ export default function NewOrder() {
           deliveryMode,
           requestedDeliveryDate: requestedDate,
           addressId: deliveryMode === 'Delivery' ? (addressId || null) : null,
+          customerPo: customerPo || null,
           ...money_,
           lines: payloadLines,
         });
@@ -466,7 +485,18 @@ export default function NewOrder() {
                   <input id="date" type="date" value={requestedDate} min={todayInJamaica()}
                          onChange={(e) => setRequestedDate(e.target.value)} />
                 </div>
+                <div className="field" style={{ marginBottom: 0 }}>
+                  <label htmlFor="cpo">Customer's PO no. (optional)</label>
+                  <input id="cpo" style={{ width: 150 }} value={customerPo} onChange={(e) => setCustomerPo(e.target.value)} />
+                </div>
                 {roundNote && <div className="small round-note">{roundNote}</div>}
+                {deliveryMode === 'Delivery' && requestedDate === todayInJamaica() && pastCutoff && (
+                  <div className="notice warn" style={{ margin: 0, flexBasis: '100%' }}>
+                    It is past the {cutoff} cut-off for same-day delivery.{' '}
+                    {isAdmin ? 'As an administrator, yours goes straight on today\'s round.'
+                      : 'This order will wait in Needs a decision until an administrator approves it for today.'}
+                  </div>
+                )}
                 {offDay && (
                   <div className="notice warn" style={{ margin: 0, flexBasis: '100%' }}>
                     The {zone} round runs {zoneDays.join(', ')}, not {weekdayOf(requestedDate)}.{' '}
@@ -710,6 +740,13 @@ export default function NewOrder() {
                          placeholder={(totals.grandTotal / 100).toFixed(2)} style={{ width: '100%' }}
                          onChange={(e) => setPaidNow(e.target.value)} />
                 </div>
+                {lines.some((l) => products.find((p) => p.id === l.productId)?.is_returnable) && (
+                  <div className="field" style={{ flex: 1 }}>
+                    <label htmlFor="empt">5-gal empties handed in</label>
+                    <input id="empt" type="number" min="0" value={emptiesBack} placeholder="0" style={{ width: '100%' }}
+                           onChange={(e) => setEmptiesBack(e.target.value)} />
+                  </div>
+                )}
               </div>
             ) : (
               <p className="muted small" style={{ margin: '8px 0 0' }}>
