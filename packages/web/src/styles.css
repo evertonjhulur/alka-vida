@@ -1148,3 +1148,42 @@ a.button-link.whatsapp:hover { background: #178a45; }
   .portal-figures .fig-value { font-size: 17px; }
 }
 .group-row td { background: #f6f8fa; font-size: 13px; }
+
+/* ---------- Everton's round, 7 Oct 2026 ---------- */
+/* Portal home: News & offers first, large, as picture cards (point 2). */
+.news-hero { margin: 4px 0 16px; }
+.news-hero > h2 { margin: 0 0 10px; color: var(--nav); }
+.news-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 14px; }
+.news-card {
+  background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
+  overflow: hidden; box-shadow: var(--shadow); display: flex; flex-direction: column;
+}
+.news-card.lead { grid-column: 1 / -1; }
+.news-card.lead .news-pic { max-height: 380px; }
+.news-pic { display: block; width: 100%; height: auto; max-height: 240px; object-fit: cover; background: #eef3f8; }
+.news-card-body { padding: 14px 16px 16px; }
+.news-card-body h3 { margin: 6px 0 4px; font-size: 19px; color: var(--nav); line-height: 1.25; }
+.news-card.lead .news-card-body h3 { font-size: 23px; }
+.news-card.no-pic { border-top: 6px solid var(--brand); }
+.news-empty { border-top: 6px solid var(--brand); }
+.news-thumbs { display: flex; gap: 6px; margin: 8px 0 4px; flex-wrap: wrap; }
+.news-thumbs img { width: 76px; height: 56px; object-fit: cover; border-radius: 6px; border: 1px solid var(--line); }
+.home-actions { display: flex; flex-wrap: wrap; gap: 10px; margin: 0 0 16px; }
+.home-actions .big, .home-actions a.big { min-height: 48px; font-size: 16px; padding: 0 20px; display: inline-flex; align-items: center; }
+.portal-home .portal-figures { margin: 0; }
+.order-events { margin: 4px 0 0; padding: 0; list-style: none; font-size: 13px; }
+.order-events li { color: var(--info); }
+.order-events li.part { color: var(--warn); }
+/* Office: pictures on a News & offers post. */
+.pic-row { display: flex; flex-wrap: wrap; gap: 8px; margin: 6px 0; }
+.pic-row figure { margin: 0; position: relative; }
+.pic-row img { width: 120px; height: 84px; object-fit: cover; border-radius: 8px; border: 1px solid var(--line); display: block; }
+.pic-row button { position: absolute; top: 4px; right: 4px; min-height: 0; padding: 0 7px; font-size: 13px; }
+/* Driver: partial delivery, bottle charge, payment-only. */
+.part-box { border: 2px solid var(--warn); background: var(--warn-bg); border-radius: 10px; padding: 12px; margin-top: 10px; }
+.bottle-box { border: 1px solid #c3dcf5; background: var(--info-bg); border-radius: 10px; padding: 10px 12px; margin-top: 10px; }
+@media (max-width: 760px) {
+  .news-grid { grid-template-columns: 1fr; }
+  .news-card.lead .news-pic { max-height: 260px; }
+  .home-actions > * { flex: 1 1 100%; justify-content: center; }
+}

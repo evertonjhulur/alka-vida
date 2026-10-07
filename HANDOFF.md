@@ -4,7 +4,8 @@ State of the Alka Vida rebuild. Read `README.md` first for what the system
 does and the rules behind it; this file covers where things stand, what is
 left, and what will bite you.
 
-Last updated after the UX review defect fixes (28 Sep 2026), on branch `operations-fixes`.
+Last updated after Everton's round of 7 Oct 2026 (14 points: portal, emails, office, purchasing).
+See "Everton's round, 7 Oct 2026" at the end.
 
 ---
 
@@ -45,7 +46,7 @@ Working and verified end to end, in the browser as well as in tests:
 | Addresses | Line 1, line 2, town, parish. Composed into `delivery_address`, which stays what the stop and the invoice PDF read (migration 014). |
 | Employees & labour cost | Who works here, paid by the hour or by the trip, and the hours/trips recorded against them. Payroll totals for any date range. **Add from logins** creates a record per existing login — title from the role (`admin`→Manager, `user`→Employee, `driver`→Driver), rate left blank — and is safe to press twice. **Deliberately not wired into costing** (migration 015). A person is managed on their own record at `/employees/:id` — details, rate, and their own work history. |
 
-**Tests: 411 passing** — 68 pure domain (`packages/shared`), 343 API
+**Tests: 488 passing** (7 Oct 2026) — 68 pure domain (`packages/shared`), 420 API
 (`packages/api`, against real PostgreSQL via PGlite).
 
 ```bash
@@ -89,6 +90,10 @@ decision behind them:
 | 012 | user administration — `last_login_at`; `active` now honoured per request |
 | 013 | invitations (token hash, one use, expiry) and customer applications |
 | 014 | addresses in parts; delivery zones as a managed list |
+| 015 | employees and labour |
+| 016 | Everton's revision list (30 Sep) |
+| 017 | the Florida team's round (1 Oct) |
+| 018 | Everton's round of 7 Oct: email ticks + unsubscribe token, walk-in flag, news pictures, "Payment Only" stops and partial deliveries, empties expected, the 5-gallon bottle product flag and bottles sold, PO "Partially Received - Closed" |
 
 ---
 
@@ -680,3 +685,136 @@ WhatsApp" button — bulk WhatsApp needs Meta's paid API, not built).
 - Exports (CSV, opens in Excel): invoices, raw materials, stock, movements.
 - Dates: PO "Arrived on", production date, payment "Date paid".
 - Logins filter by role. Orders filter by a date range (server-side).
+
+
+### Everton's round, 7 Oct 2026
+
+Fourteen points, his rulings final. Migration **018_october_round**, routes in
+`routes/october.ts`, email layout in `services/emailkit.ts`, tests in
+`test/october.test.ts` (20). **Tests: 420 API + 68 shared, all passing.**
+Backup of the folder as it was before this round: `alka-vida-backup-7-Oct-before-round`
+(sent alongside, not in git).
+
+**Portal**
+
+1. **Approving a new customer emails them** "Your account is approved" with a
+   Set my password button (`registration.emailAccountApproved`, called from
+   `approveApplication`; logged in `auto_emails` as `AccountApproved`). The
+   link is still shown on Needs a decision, which now says whether the email
+   went.
+2. **Home redone** (`Portal.tsx`): the "Order water, and see what you owe."
+   line is gone. News & offers is first and large, as picture cards (a post
+   with a picture leads, full width); then Place an order / WhatsApp /
+   Invoices; then Your next delivery and Your account.
+3. **News & offers pictures.** Uploaded on Messages & news › News & offers
+   (and on Send a message). The browser shrinks each photo to 1600px JPEG
+   (`web/src/lib/pictures.ts`), `POST /api/news/images` stores it in the
+   database (`news_images`, bytea - Railway's disk is wiped on deploy), and a
+   post is saved with `imageIds`. Served publicly at
+   `/api/public/news-images/:id` so the portal and email clients can show
+   them. Pictures uploaded but never saved with a post are removed after a
+   day. A post can be emailed from its row ("Email it"), pictures and all.
+4. **My Profile › Emails from us** gains "Order cancelled" and "Service
+   announcements" (`customers.cancel_emails`, `service_emails`); the office
+   sees the same ticks on the customer's Details tab. Every category checks
+   its own tick (`emailkit.customerWants`):
+   orders (placed, delivered, part delivered, rescheduled) `order_emails`;
+   cancelled `cancel_emails`; monthly statement `auto_statements`; reminders
+   `auto_reminders`; offers `NOT marketing_opt_out`; service `service_emails`
+   (Service messages used to go to everyone). New: an "Order cancelled" email
+   (`sendOrderCancelledEmail`, from both cancel routes).
+5. **Unsubscribe without logging in.** Every non-essential email carries a
+   link `/unsubscribe?t=<customers.email_token>&c=<category>` plus a
+   `List-Unsubscribe` header. Opening the link only ASKS (mail scanners open
+   links); the button POSTs. There is an "every non-essential email" option
+   and an undo. Essential mail (invoice, receipt, quote or statement the
+   office sends, password links, the approval) has no link and no tick.
+
+**Emails and look**
+
+6. **One layout for every email** (`emailkit.renderEmail` / `customerEmail`):
+   logo (or the ALKA VIDA wordmark when no logo file is present - which is
+   the case on Railway, since the logo is not in git), a blue #0E76BC band,
+   indigo #2D3590 headings, a footer band with the current offer (newest
+   live Promotion, with its first picture), "Contact orders@alkavidaja.com
+   for any orders or queries", and the unsubscribe link. Every email is HTML
+   with a plain-text twin. The order confirmation has the tick, "Thank you
+   for your order", order number, items, Subtotal / GCT / Total, delivery
+   address and date. Invoices, statements, reminders, receipts, quotes, the
+   invitation, password reset, PO (to suppliers: no offer, no unsubscribe),
+   messages and the delivered email all use it. PDFs: titles in indigo,
+   table rules in blue, and the contact line in the footer. The contact
+   address is a setting (Settings › Emails & ordering; `contact_email`).
+7. **Domain.** Nothing in the code said alkavidja.com; 018 corrects it in
+   settings and news text if it was typed anywhere there. **Railway's
+   MAIL_FROM and MAIL_REPLY_TO could not be read from here (values are
+   hidden) - check them in Railway › @alka/web › Variables, and that the
+   sending domain verified in Resend is alkavidaja.com.**
+
+**Office**
+
+8. **Rescheduled stop** ("Another day"): the customer is emailed the new date
+   and the reason (`sendRescheduledEmail`, from the stop route). Orders,
+   the customer's Orders tab and the portal's My orders show "Rescheduled
+   from Mon 5 Oct to Wed 7 Oct (reason)" (`orders.ORDER_EVENTS`, returned as
+   `events` by listOrders / getOrder / customerHistory).
+9. **Partially delivered.** Driver's stop: "Partially delivered: the rest
+   another day" - set what was handed over, pick the day, Record part
+   delivery (`markStop` with `remainderTo`). What was handed over is invoiced
+   now (the invoice is built from THIS stop's lines, `delivery_stop_lines`,
+   never the order's running total); the rest goes on that day's round at
+   once, its stop and the driver's screen show only what is left, and it is
+   invoiced when delivered. A fixed-amount discount comes off the first
+   invoice only. The order's delivered figures are recounted from its stops
+   (`orders.recomputeDelivered`), also after a stop correction. Customers
+   see "Part delivered ...; the rest on ..." and "Still to come".
+10. **Payment at a stop with no delivery.** My route › "+ Took a payment,
+    nothing to deliver" (pick the customer, method, amount) adds a
+    "Payment Only" stop (`addPaymentStop`, `POST /api/delivery-sheets/:id/payment-stop`).
+    On an order's stop, "Payment only" records the money and leaves the order
+    undelivered. Either way it is only a record until the office settles the
+    round - `settleStop` / `planPayments` remain the only way it becomes a
+    Payment (invariant 2 untouched).
+11. **Statements filter** Open / Paid / Partially paid / Overdue
+    (`ledger.getStatement` `status`, on screen, PDF, CSV and email). The
+    statement then lists those invoices and the payments against them, and
+    opening, running and closing balances are worked out over just those.
+12. **Counter sale.** A walk-in pays in full; part payment only with a
+    customer account. Customer left blank = the shared Cash Walk-In record
+    (`counter.walkInCustomer`). `customers.is_walk_in` marks walk-ins (set on
+    Cash Walk-In and on anyone added with "Add them quickly"; untick it on
+    their Details tab to give them an account). Paid left blank = in full.
+13. **5-gallon empties.** A product "5-gallon bottle" (`products.is_bottle_charge`,
+    $1,200 to start, created at start-up, priced on Products like any other).
+    Orders ask how many empties they will hand over (`customer_orders.empties_expected`;
+    portal, New order, counter); the shortfall is added as bottles
+    (`orders.withBottleShortfall`). Bought bottles are the customer's: they
+    come off what the customer holds of ours (`customer_bottle_moves.sold`,
+    `five_gal_bottle_pool.sold`) and count as their empties next time; no
+    refund. The driver's stop shows "Expect N back" and, when fewer come
+    back, an "Add the bottle charge" box (`markStop` `bottlesCharged`).
+    Standing orders do not copy the bottle line. The portal hides the bottle
+    from its product list (it is only ever added for a shortfall).
+    **Test changed on purpose:** feedback.test "5-gallon bottles sold at the
+    counter" now expects the 2 short to be bought (holding unchanged), per
+    this ruling.
+
+**Purchasing**
+
+14. **Why closing a PO showed Cancelled:** "Close it (nothing more coming)"
+    called `cancelPurchaseOrder`, which set every PO to Cancelled, goods
+    received or not. Now: Received / Partially received / **Partially
+    received - closed** (closed with goods received) / Cancelled (deleted or
+    closed with nothing received - the PO is kept, not removed). 018 put
+    right any PO already wrongly marked Cancelled. A closed PO cannot receive
+    more. **Test changed on purpose:** revisions.test expected a deleted PO
+    to vanish; it is now kept as Cancelled.
+
+Not done / to know:
+
+- Google Fonts and the logo do not load in Claude's sandbox; nothing to fix.
+- The bottle charge at the door uses the bottle's Products price shown to the
+  driver; the invoice uses the customer's own price for it (special or price
+  list) if one was set - normally the same.
+- "Delivered" with less than ordered and no date for the rest still means
+  "they took less, nothing more to come" (the button says so).

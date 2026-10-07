@@ -176,23 +176,37 @@ export default function PurchaseOrders() {
 
   const deleteIt = async () => {
     if (!open) return;
-    if (!await ask(`Delete ${open.po_number}? Nothing has been received against it.`,
+    if (!await ask(`Delete ${open.po_number}? Nothing has been received against it. It stays on the list as Cancelled.`,
       { confirmLabel: 'Delete it', cancelLabel: 'Keep it', danger: true })) return;
     const n = open.po_number;
-    await act(async () => { await api.del(`/api/purchase-orders/${open.id}`); setOpen(null); return `${n} deleted.`; },
+    await act(async () => { await api.del(`/api/purchase-orders/${open.id}`); setOpen(null); return `${n} cancelled.`; },
       'Could not delete it', false);
   };
   const cancelRest = async () => {
     if (!open) return;
     if (!await ask(`Close ${open.po_number}? Nothing more will be expected against it. What was received stays.`,
       { confirmLabel: 'Close it', cancelLabel: 'Keep it open', danger: true })) return;
-    await act(async () => { await api.post(`/api/purchase-orders/${open.id}/cancel`, {}); return `${open.po_number} closed.`; },
-      'Could not close it');
+    await act(async () => {
+      await api.post(`/api/purchase-orders/${open.id}/cancel`, {});
+      return `${open.po_number} closed: partially received, nothing more coming.`;
+    }, 'Could not close it');
   };
 
+  /*
+   * The statuses as Everton named them (7 Oct 2026, point 14). Closing a PO
+   * used to show "Cancelled" even with goods received against it - the close
+   * button called the cancel routine. Now: Received / Partially received /
+   * Partially received - closed / Cancelled (deleted with nothing received).
+   */
   const nothingReceived = open ? open.lines.every((l) => Number(l.quantity_received) === 0) : false;
+  const ENDED = ['Received', 'Cancelled', 'Partially Received - Closed'];
+  const statusLabel = (s: string) => ({
+    Draft: 'Draft', Sent: 'Sent', Received: 'Received', 'Partially Received': 'Partially received',
+    'Partially Received - Closed': 'Partially received - closed', Cancelled: 'Cancelled',
+  } as Record<string, string>)[s] ?? s;
   const statusChip = (s: string) => (s === 'Received' ? 'ok' : s === 'Partially Received' ? 'warn'
-    : s === 'Cancelled' ? 'muted' : s === 'Sent' ? 'info' : 'neutral');
+    : s === 'Partially Received - Closed' ? 'neutral'
+      : s === 'Cancelled' ? 'muted' : s === 'Sent' ? 'info' : 'neutral');
 
   return (
     <>
@@ -327,7 +341,7 @@ export default function PurchaseOrders() {
                     <td>{p.supplier_name}</td>
                     <td>{when(p.order_date)}</td>
                     <td>{p.line_count}</td>
-                    <td><span className={`chip ${statusChip(p.status)}`}>{p.status}</span></td>
+                    <td><span className={`chip ${statusChip(p.status)}`}>{statusLabel(p.status)}</span></td>
                     <td className="num">{money(Number(p.grand_total_cents))}</td>
                     <td className="num">
                       <button className="secondary" onClick={() => openPO(p.id)}>{open?.id === p.id ? 'Close' : 'Open'}</button>
@@ -349,12 +363,13 @@ export default function PurchaseOrders() {
               <button className="secondary" disabled={busy}
                       onClick={() => download(`/api/purchase-orders/${open.id}/pdf`, `${open.po_number}.pdf`).catch((e) => setError(e.message))}>
                 Download PDF</button>
+              <span className={`chip ${statusChip(open.status)}`}>{statusLabel(open.status)}</span>
               {nothingReceived && open.status !== 'Cancelled' && (
                 <button className="secondary" disabled={busy} onClick={() => startEdit(open)}>Change it</button>
               )}
               {nothingReceived
-                ? <button className="danger-soft" disabled={busy} onClick={deleteIt}>Delete</button>
-                : !['Received', 'Cancelled'].includes(open.status) && (
+                ? open.status !== 'Cancelled' && <button className="danger-soft" disabled={busy} onClick={deleteIt}>Delete</button>
+                : !ENDED.includes(open.status) && (
                   <button className="danger-soft" disabled={busy} onClick={cancelRest}>Close it (nothing more coming)</button>
                 )}
             </span>
@@ -367,7 +382,7 @@ export default function PurchaseOrders() {
                      onChange={(e) => setMailTo(e.target.value)} />
             </div>
             <div className="field">
-              <button disabled={busy || !mailTo.trim() || open.status === 'Cancelled'} onClick={emailIt}>Send it</button>
+              <button disabled={busy || !mailTo.trim() || ENDED.includes(open.status)} onClick={emailIt}>Send it</button>
             </div>
             {open.sent_to && <div className="field muted small">Last sent to {open.sent_to}</div>}
           </div>
@@ -387,7 +402,7 @@ export default function PurchaseOrders() {
                   <td className="small">{[l.gct_exempt ? null : 'GCT', l.env_exempt ? null : 'Env'].filter(Boolean).join(', ') || 'none'}</td>
                   <td>
                     <input type="number" min="0" style={{ width: 100 }} value={receipts[l.id] ?? ''}
-                           disabled={['Received', 'Cancelled'].includes(open.status)}
+                           disabled={ENDED.includes(open.status)}
                            onChange={(e) => setReceipts({ ...receipts, [l.id]: e.target.value })} />
                     {Number(receipts[l.id] ?? 0) > Number(l.quantity_ordered) - Number(l.quantity_received) && (
                       <div className="chip warn" style={{ marginTop: 4 }}>more than ordered</div>
@@ -402,7 +417,7 @@ export default function PurchaseOrders() {
               Subtotal {money(Number(open.subtotal_cents))} · GCT {money(Number(open.gct_cents))} ·
               Env levy {money(Number(open.env_tax_cents))} · <strong>Total {money(Number(open.grand_total_cents))}</strong>
             </div>
-            {!['Received', 'Cancelled'].includes(open.status) && (
+            {!ENDED.includes(open.status) && (
               <span className="row" style={{ gap: 8, alignItems: 'flex-end' }}>
                 <span className="field" style={{ marginBottom: 0 }}>
                   <label htmlFor="arr">Arrived on</label>

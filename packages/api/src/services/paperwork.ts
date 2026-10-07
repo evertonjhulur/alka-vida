@@ -12,12 +12,13 @@
 
 import type { Db } from '../db/index.ts';
 import type { Actor } from './core.ts';
-import { audit, businessToday, nextNumber, num, requireRole } from './core.ts';
+import { audit, businessToday, contactEmail, nextNumber, num, requireRole, siteUrl } from './core.ts';
 import { RuleViolation, addDays } from '@alka/shared';
 import {
-  BRAND, billTo, emailInvoice, emailStatement, fmtDate, formatCash as cash, letterhead,
+  BRAND, COLOR_BLUE, COLOR_INDIGO, billTo, emailInvoice, emailStatement, fmtDate, formatCash as cash, letterhead,
   mailConfigured, newDoc, recipient, sendMail, signOff,
 } from './documents.ts';
+import { customerEmail, renderEmail } from './emailkit.ts';
 import { getQuotation, issueAcceptToken, quoteAcceptLink } from './quotations.ts';
 import { getPurchaseOrder } from './inventory.ts';
 import { raiseCycleInvoices } from './cycles.ts';
@@ -36,7 +37,7 @@ export async function renderQuotePdf(db: Db, quoteId: string) {
   const { doc, finished } = newDoc();
   letterhead(doc, 50);
   doc.moveDown(1.2);
-  doc.fillColor('#000').fontSize(16).text('QUOTATION', 50, doc.y, { align: 'right', width: 510 });
+  doc.fillColor(COLOR_INDIGO).fontSize(16).text('QUOTATION', 50, doc.y, { align: 'right', width: 510 });
   doc.fontSize(10)
     .text(String(q.quote_number), { align: 'right', width: 510 })
     .text(`Date: ${fmtDate(q.quote_date)}`, { align: 'right', width: 510 });
@@ -59,7 +60,7 @@ export async function renderQuotePdf(db: Db, quoteId: string) {
     .text('DESCRIPTION', cols.desc, y0).text('QTY', cols.qty, y0)
     .text('UNIT PRICE', cols.unit, y0, { width: 70, align: 'right' })
     .text('AMOUNT', cols.total, y0, { width: 80, align: 'right' });
-  doc.moveTo(50, doc.y + 2).lineTo(560, doc.y + 2).strokeColor('#ccc').stroke();
+  doc.moveTo(50, doc.y + 2).lineTo(560, doc.y + 2).strokeColor(COLOR_BLUE).stroke();
   doc.moveDown(0.6);
   for (const l of q.lines) {
     const cases = num(l.cases);
@@ -90,7 +91,8 @@ export async function renderQuotePdf(db: Db, quoteId: string) {
     doc.moveDown(1).fontSize(9).fillColor('#333').text(String(q.notes), 50, doc.y, { width: 510 });
   }
   doc.moveDown(2).fontSize(8).fillColor('#777')
-    .text(`${BRAND.company}  ·  All amounts in Jamaican dollars. This is a quotation, not an invoice.`,
+    .text(`${BRAND.company}  ·  All amounts in Jamaican dollars. This is a quotation, not an invoice.`
+      + `\nContact ${await contactEmail(db)} for any orders or queries.`,
       50, doc.y, { align: 'center', width: 510 });
   doc.end();
   return {
@@ -123,13 +125,27 @@ export async function emailQuote(
   const token = await db.tx((t) => issueAcceptToken(t, quoteId));
   const link = quoteAcceptLink(token);
 
+  const qrow = await db.one<{ customer_id: string; valid_until: string | null; grand_total_cents: number }>(
+    `SELECT customer_id, valid_until::text AS valid_until, grand_total_cents FROM quotations WHERE id = $1`, [quoteId],
+  );
+  const mail = await customerEmail(db, qrow.customer_id, null, {
+    preheader: `Quotation ${doc.quoteNumber} from ${BRAND.name}`,
+    heading: `Quotation ${doc.quoteNumber}`,
+    subheading: doc.customerName,
+    greeting: 'Good day,',
+    intro: `Please find attached quotation ${doc.quoteNumber} from ${BRAND.name}.`
+      + (opts.note ? `\n\n${opts.note}` : ''),
+    facts: [
+      ['Total', cash(num(qrow.grand_total_cents))],
+      ['Valid until', qrow.valid_until ? fmtDate(qrow.valid_until) : 'Ask us'],
+    ],
+    button: { label: 'Accept this quotation', url: link },
+    outro: 'Or simply reply to this email and we will take it from there.',
+  });
   await sendMail({
     to,
     subject: `${BRAND.name} quotation ${doc.quoteNumber}`,
-    text: `Good day,\n\nPlease find attached quotation ${doc.quoteNumber} from ${BRAND.name}.`
-      + `\n\nTo accept it, open this link and press Accept:\n${link}`
-      + `\n\nOr simply reply to this email and we will take it from there.`
-      + (opts.note ? `\n\n${opts.note}` : '') + signOff,
+    text: mail.text, html: mail.html,
     attachments: [{ filename: doc.filename, content: doc.pdf }],
   });
   await db.tx((t) => audit(t, actor, 'update', 'Quotation', quoteId, doc.quoteNumber, { emailedTo: to }));
@@ -169,7 +185,7 @@ export async function renderPoPdf(db: Db, poId: string) {
   const { doc, finished } = newDoc();
   letterhead(doc, 50);
   doc.moveDown(1.2);
-  doc.fillColor('#000').fontSize(16).text('PURCHASE ORDER', 50, doc.y, { align: 'right', width: 510 });
+  doc.fillColor(COLOR_INDIGO).fontSize(16).text('PURCHASE ORDER', 50, doc.y, { align: 'right', width: 510 });
   doc.fontSize(10)
     .text(String(po.po_number), { align: 'right', width: 510 })
     .text(`Date: ${fmtDate(po.order_date)}`, { align: 'right', width: 510 });
@@ -193,7 +209,7 @@ export async function renderPoPdf(db: Db, poId: string) {
     .text('UNIT COST', cols.unit, y0, { width: 60, align: 'right' })
     .text('TAX', cols.tax, y0, { width: 36 })
     .text('AMOUNT', cols.total, y0, { width: 80, align: 'right' });
-  doc.moveTo(50, doc.y + 2).lineTo(560, doc.y + 2).strokeColor('#ccc').stroke();
+  doc.moveTo(50, doc.y + 2).lineTo(560, doc.y + 2).strokeColor(COLOR_BLUE).stroke();
   doc.moveDown(0.6);
   for (const l of po.lines) {
     const y = doc.y;
@@ -237,12 +253,21 @@ export async function emailPurchaseOrder(
   requireRole(actor, 'admin', 'user');
   const doc = await renderPoPdf(db, poId);
   const to = recipient(opts.to, doc.supplierEmail, doc.supplierName);
+  // To a supplier: the same look, no offer band, no unsubscribe.
+  const mail = renderEmail({
+    preheader: `Purchase order ${doc.poNumber} from ${BRAND.company}`,
+    heading: `Purchase order ${doc.poNumber}`,
+    subheading: BRAND.company,
+    greeting: 'Good day,',
+    intro: `Please find attached purchase order ${doc.poNumber} from ${BRAND.company}.`
+      + (opts.note ? `\n\n${opts.note}` : ''),
+    outro: 'Kindly confirm receipt and the delivery date.',
+    offer: null, contact: await contactEmail(db),
+  });
   await sendMail({
     to,
     subject: `${BRAND.name} purchase order ${doc.poNumber}`,
-    text: `Good day,\n\nPlease find attached purchase order ${doc.poNumber} from ${BRAND.company}.`
-      + (opts.note ? `\n\n${opts.note}` : '')
-      + `\n\nKindly confirm receipt and the delivery date.\n\n${BRAND.company}\n`,
+    text: mail.text, html: mail.html,
     attachments: [{ filename: doc.filename, content: doc.pdf }],
   });
   await db.tx(async (t) => {
@@ -303,7 +328,7 @@ export async function renderReceiptPdf(db: Db, paymentIds: readonly string[]) {
   const { doc, finished } = newDoc();
   letterhead(doc, 50);
   doc.moveDown(1.2);
-  doc.fillColor('#000').fontSize(16).text('RECEIPT', 50, doc.y, { align: 'right', width: 510 });
+  doc.fillColor(COLOR_INDIGO).fontSize(16).text('RECEIPT', 50, doc.y, { align: 'right', width: 510 });
   doc.fontSize(10).text(number, { align: 'right', width: 510 })
     .text(`Date: ${fmtDate(rows[0].payment_date)}`, { align: 'right', width: 510 });
   doc.moveDown(1);
@@ -332,7 +357,8 @@ export async function renderReceiptPdf(db: Db, paymentIds: readonly string[]) {
     .text(b > 0 ? `Balance still owed on the account: ${cash(b)}`
       : b < 0 ? `Account in credit: ${cash(-b)}` : 'The account is fully paid. Thank you.', 50);
   doc.moveDown(2).fontSize(8).fillColor('#777')
-    .text(`${BRAND.company}  ·  All amounts in Jamaican dollars.`, 50, doc.y, { align: 'center', width: 510 });
+    .text(`${BRAND.company}  ·  All amounts in Jamaican dollars.`
+      + `\nContact ${await contactEmail(db)} for any orders or queries.`, 50, doc.y, { align: 'center', width: 510 });
   doc.end();
   return {
     filename: `Receipt-${number}.pdf`, pdf: await finished, receiptNumber: number,
@@ -351,11 +377,31 @@ export async function emailReceipt(
   }
   const doc = await renderReceiptPdf(db, paymentIds);
   const to = recipient(opts.to, doc.customerEmail, doc.customerName);
+  const rcpt = await db.one<{ customer_id: string; method: string; day: string }>(
+    `SELECT customer_id, method, business_date(payment_date)::text AS day FROM payments WHERE id = $1`, [paymentIds[0]],
+  );
+  const bal = await db.one<{ b: number }>(
+    `SELECT COALESCE((SELECT balance_cents FROM customer_balances WHERE customer_id = $1), 0)::bigint AS b`,
+    [rcpt.customer_id],
+  );
+  const mail = await customerEmail(db, rcpt.customer_id, null, {
+    preheader: `Receipt ${doc.receiptNumber}: thank you for your payment`,
+    tick: true,
+    heading: 'Thank you for your payment',
+    subheading: `Receipt ${doc.receiptNumber}`,
+    greeting: 'Good day,',
+    intro: `We have received your payment of ${cash(doc.totalCents)}. Your receipt is attached.`,
+    facts: [
+      ['Paid', `${cash(doc.totalCents)}${rcpt.method ? ` by ${rcpt.method.toLowerCase()}` : ''}`],
+      ['Date', fmtDate(rcpt.day)],
+      [num(bal.b) < 0 ? 'In credit' : 'Balance on account', cash(Math.abs(num(bal.b)))],
+    ],
+    button: { label: 'See my account', url: `${siteUrl()}/#/portal/account` },
+  });
   await sendMail({
     to,
     subject: `${BRAND.name} receipt ${doc.receiptNumber}`,
-    text: `Good day,\n\nThank you for your payment of ${cash(doc.totalCents)}. `
-      + `Your receipt ${doc.receiptNumber} is attached.` + signOff,
+    text: mail.text, html: mail.html,
     attachments: [{ filename: doc.filename, content: doc.pdf }],
   });
   await db.tx((t) => audit(t, actor, 'update', 'Payment', paymentIds[0], doc.receiptNumber,
@@ -485,7 +531,7 @@ export async function runAutomation(db: Db, actor: Actor, opts: { today?: string
     );
     for (const c of due) {
       try {
-        const r = await emailStatement(db, actor, c.id, {});
+        const r = await emailStatement(db, actor, c.id, { category: 'statements' });
         await logAuto(db, 'Statement', c.id, r.sentTo, month, 'monthly statement', true);
         out.statements += 1;
       } catch (err) {
@@ -525,6 +571,7 @@ export async function runAutomation(db: Db, actor: Actor, opts: { today?: string
       try {
         const r = await emailStatement(db, actor, customerId, {
           subject: `${BRAND.name} payment reminder`,
+          category: 'reminders',
           note: `A friendly reminder that the following ${list.length === 1 ? 'invoice is' : 'invoices are'} `
             + `past due:\n\n${lines}\n\nTotal overdue: ${cash(total)}.\n\nIf you have already paid, thank you, `
             + 'and please disregard this note.',

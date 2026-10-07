@@ -224,7 +224,9 @@ async function scheduleLines(db: Queryable, scheduleId: string) {
     `SELECT oli.product_id, oli.cases, oli.loose_bottles
      FROM order_line_items oli
      JOIN products p ON p.id = oli.product_id
-     WHERE oli.order_id = $1 AND p.active`,
+     -- Bottles bought because the first order was short of empties are a
+     -- one-off: each occurrence is an exchange, full for empty.
+     WHERE oli.order_id = $1 AND p.active AND NOT p.is_bottle_charge`,
     [scheduleId],
   );
 }

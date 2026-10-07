@@ -7,7 +7,7 @@ import { ask, askText } from '../components/Dialog';
 interface Tier { id: string; name: string; customerCount: number }
 interface Product {
   id: string; name: string; size: string | null; bottlesPerCase: number;
-  active: boolean; isReturnable: boolean;
+  active: boolean; isReturnable: boolean; isBottleCharge?: boolean;
   unit: 'case' | 'bottle'; listPriceCents: number;
   tierPrices: Record<string, number>;
 }
@@ -199,6 +199,7 @@ export default function Pricing({ session }: { session: Session }) {
                       {p.size ?? ''}
                       {p.unit === 'case' ? ` · ${p.bottlesPerCase} per case` : ' · each'}
                       {p.isReturnable ? ' · returnable' : ''}
+                      {p.isBottleCharge ? ' · charged when a customer hands over fewer empties than the full 5-gallon bottles they take' : ''}
                       {!p.active ? ' · retired' : ''}
                     </div>
                   </td>

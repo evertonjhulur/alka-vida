@@ -178,6 +178,7 @@ export async function updatePurchaseOrder(
     const received = await t.one<{ n: number }>(
       `SELECT COALESCE(SUM(quantity_received),0)::float AS n FROM po_line_items WHERE po_id = $1`, [poId],
     );
+    if (po.status === 'Cancelled') throw new RuleViolation(`${po.po_number} was cancelled, so it can no longer be changed`);
     if (num(received.n) > 0 || !['Draft', 'Sent'].includes(po.status)) {
       throw new RuleViolation(`${po.po_number} has goods received against it, so it can no longer be changed`);
     }
@@ -196,37 +197,68 @@ export async function updatePurchaseOrder(
 }
 
 /**
- * Delete a PO (Everton, 30 Sep 2026). Only while nothing has been received:
- * a PO with goods against it made FIFO batches and must stay. Such a PO can
- * be cancelled for what is still outstanding instead.
+ * The four ways a PO ends (Everton, 7 Oct 2026, point 14):
+ *
+ *   Received                     everything ordered came in
+ *   Partially Received           some came in, more is still expected
+ *   Partially Received - Closed  some came in and nothing more is coming
+ *   Cancelled                    deleted (or closed) with nothing received
+ *
+ * THE BUG: "Close it (nothing more coming)" called the cancel routine, which
+ * set every PO it touched to Cancelled - including ones with goods received
+ * against them, so a PO that had delivered half its stock read as if it had
+ * never happened. Closing now records Partially Received - Closed, and
+ * Cancelled is kept for a PO that delivered nothing.
+ */
+export const PO_CLOSED = 'Partially Received - Closed';
+
+async function receivedOn(t: Queryable, poId: string): Promise<number> {
+  const r = await t.one<{ n: number }>(
+    `SELECT COALESCE(SUM(quantity_received),0)::float AS n FROM po_line_items WHERE po_id = $1`, [poId],
+  );
+  return num(r.n);
+}
+
+/**
+ * "Delete" a PO nothing has been received against. It is kept, marked
+ * Cancelled, so the number is never reused and the list shows what became
+ * of it. A PO with goods against it made FIFO batches and cannot be deleted;
+ * close it instead.
  */
 export async function deletePurchaseOrder(db: Db, actor: Actor, poId: string): Promise<void> {
   requireRole(actor, 'admin', 'user');
   await db.tx(async (t) => {
-    const po = await t.one<{ po_number: string }>(
-      `SELECT po_number FROM purchase_orders WHERE id = $1`, [poId],
+    const po = await t.one<{ po_number: string; status: string }>(
+      `SELECT po_number, status FROM purchase_orders WHERE id = $1 FOR UPDATE`, [poId],
     );
-    const received = await t.one<{ n: number }>(
-      `SELECT COALESCE(SUM(quantity_received),0)::float AS n FROM po_line_items WHERE po_id = $1`, [poId],
-    );
-    if (num(received.n) > 0) {
-      throw new RuleViolation(`goods have been received against ${po.po_number}, so it cannot be deleted. Cancel what is still outstanding instead.`);
+    if (await receivedOn(t, poId) > 0) {
+      throw new RuleViolation(`goods have been received against ${po.po_number}, so it cannot be deleted. Close it instead (nothing more coming).`);
     }
-    await t.query(`DELETE FROM purchase_orders WHERE id = $1`, [poId]);
-    await audit(t, actor, 'delete', 'PurchaseOrder', poId, po.po_number, {});
+    if (po.status === 'Cancelled') return;
+    await t.query(`UPDATE purchase_orders SET status = 'Cancelled', updated_at = now() WHERE id = $1`, [poId]);
+    await audit(t, actor, 'delete', 'PurchaseOrder', poId, po.po_number, { status: 'Cancelled', nothingReceived: true });
   });
 }
 
-/** Close a PO: nothing more is expected against it. What was received stays. */
-export async function cancelPurchaseOrder(db: Db, actor: Actor, poId: string): Promise<void> {
+/**
+ * Close a PO: nothing more is expected against it. What was received stays.
+ * With goods received it is Partially Received - Closed; with none, it is
+ * simply Cancelled.
+ */
+export async function cancelPurchaseOrder(db: Db, actor: Actor, poId: string): Promise<{ status: string }> {
   requireRole(actor, 'admin', 'user');
-  await db.tx(async (t) => {
+  return db.tx(async (t) => {
     const po = await t.one<{ po_number: string; status: string }>(
-      `SELECT po_number, status FROM purchase_orders WHERE id = $1`, [poId],
+      `SELECT po_number, status FROM purchase_orders WHERE id = $1 FOR UPDATE`, [poId],
     );
     if (po.status === 'Received') throw new RuleViolation(`${po.po_number} is fully received`);
-    await t.query(`UPDATE purchase_orders SET status = 'Cancelled', updated_at = now() WHERE id = $1`, [poId]);
-    await audit(t, actor, 'update', 'PurchaseOrder', poId, po.po_number, { status: 'Cancelled' });
+    if (po.status === 'Cancelled' || po.status === PO_CLOSED) {
+      throw new RuleViolation(`${po.po_number} is already ${po.status === 'Cancelled' ? 'cancelled' : 'closed'}`);
+    }
+    const status = await receivedOn(t, poId) > 0 ? PO_CLOSED : 'Cancelled';
+    await t.query(`UPDATE purchase_orders SET status = $2, updated_at = now() WHERE id = $1`, [poId, status]);
+    await audit(t, actor, 'update', 'PurchaseOrder', poId, po.po_number, { status, closed: true });
+    return { status };
   });
 }
 
@@ -255,6 +287,7 @@ export async function receivePurchaseOrder(
       `SELECT supplier_id, po_number, status FROM purchase_orders WHERE id = $1`, [poId],
     );
     if (po.status === 'Cancelled') throw new RuleViolation('this purchase order was cancelled');
+    if (po.status === PO_CLOSED) throw new RuleViolation(`${po.po_number} was closed: nothing more is expected against it`);
 
     const batchIds: string[] = [];
     for (const r of receipts) {

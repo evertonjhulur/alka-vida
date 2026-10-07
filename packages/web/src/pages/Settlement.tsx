@@ -369,8 +369,8 @@ export default function Settlement({ session }: { session: Session }) {
                   <div className="muted small">{s.orderRef ?? '—'}</div>
                 </td>
                 <td>
-                  <span className={`chip ${s.outcome === 'Delivered' ? 'ok' : 'neutral'}`}>
-                    {s.outcome}
+                  <span className={`chip ${s.outcome === 'Delivered' ? 'ok' : s.outcome === 'Payment Only' ? 'info' : 'neutral'}`}>
+                    {s.outcome === 'Payment Only' ? 'Payment only' : s.outcome}
                   </span>
                 </td>
                 <td className="small muted">{s.deliveredSummary || '—'}</td>

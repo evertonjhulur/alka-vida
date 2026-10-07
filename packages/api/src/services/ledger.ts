@@ -10,7 +10,7 @@
  * Nothing is "closed" or "batched" to produce one.
  */
 
-import type { Db } from '../db/index.ts';
+import type { Db, Queryable } from '../db/index.ts';
 import type { Cents } from '@alka/shared';
 import { BUSINESS_TIMEZONE, num } from './core.ts';
 
@@ -27,6 +27,44 @@ export type EntryType = 'Invoice' | 'Credit Note' | 'Payment' | 'Reversal' | 'Re
  *  a credit note is a line detail within Invoices, not its own category. */
 export type StatementFilter = 'All' | 'Invoices' | 'Payments';
 
+/**
+ * Narrow the statement to invoices in one state (Everton, 7 Oct 2026, point
+ * 11). With one chosen, the statement lists only those invoices and the
+ * payments made against them, and the opening, running and closing balances
+ * are worked out over just those - so "Overdue" reads as what is overdue,
+ * not the whole account. Unattached payments belong to no invoice and so to
+ * no filter; they show under "All".
+ *
+ *   Open            anything still owed (unpaid or part paid)
+ *   Paid            paid in full
+ *   Partially paid  something paid, something still owed
+ *   Overdue         still owed and past its due date
+ */
+export const STATEMENT_STATUSES = ['Open', 'Paid', 'Partially paid', 'Overdue'] as const;
+export type StatementStatus = (typeof STATEMENT_STATUSES)[number];
+
+export function asStatementStatus(v: unknown): StatementStatus | null {
+  return (STATEMENT_STATUSES as readonly string[]).includes(String(v)) ? (v as StatementStatus) : null;
+}
+
+/** The ids of this customer's invoices in a state; the SQL is the definition above. */
+export async function invoicesInStatus(
+  db: Queryable, customerId: string, status: StatementStatus,
+): Promise<string[]> {
+  const cond = {
+    Open: 'l.balance_cents > 0',
+    Paid: 'l.balance_cents <= 0',
+    'Partially paid': 'l.amount_paid_cents > 0 AND l.balance_cents > 0',
+    Overdue: 'l.balance_cents > 0 AND l.due_date IS NOT NULL AND l.due_date < business_today()',
+  }[status];
+  const rows = await db.query<{ invoice_id: string }>(
+    `SELECT l.invoice_id FROM invoice_ledger l
+     WHERE l.customer_id = $1 AND NOT l.is_credit_note AND l.status <> 'Cancelled' AND ${cond}`,
+    [customerId],
+  );
+  return rows.map((r) => r.invoice_id);
+}
+
 export interface StatementEntry {
   date: string;
   type: EntryType;
@@ -42,6 +80,8 @@ export interface Statement {
   customerName: string;
   from: string | null;
   to: string | null;
+  /** When narrowed to invoices in one state. */
+  status: StatementStatus | null;
   openingBalanceCents: Cents;
   closingBalanceCents: Cents;
   entries: StatementEntry[];
@@ -50,9 +90,12 @@ export interface Statement {
 export async function getStatement(
   db: Db,
   customerId: string,
-  opts: { from?: string | null; to?: string | null; filter?: StatementFilter } = {},
+  opts: { from?: string | null; to?: string | null; filter?: StatementFilter;
+          status?: StatementStatus | string | null } = {},
 ): Promise<Statement> {
   const filter = opts.filter ?? 'All';
+  const status = asStatementStatus(opts.status);
+  const only = status ? new Set(await invoicesInStatus(db, customerId, status)) : null;
   const from = opts.from ?? null;
   const to = opts.to ?? null;
 
@@ -70,7 +113,7 @@ export async function getStatement(
   // period.
   const rows = await db.query<{
     entry_date: string; type: EntryType; description: string;
-    reference: string; amount_cents: number; sort_key: string;
+    reference: string; amount_cents: number; sort_key: string; invoice_id: string | null;
   }>(
     `
     WITH entries AS (
@@ -85,7 +128,8 @@ export async function getStatement(
              -- sorts below a digit, so omitting it would order same-day
              -- payments ahead of the invoice they pay.
              to_char(i.invoice_date,'YYYY-MM-DD') || ' ' ||
-               to_char(i.created_at AT TIME ZONE $2,'HH24:MI:SS.US') AS sort_key
+               to_char(i.created_at AT TIME ZONE $2,'HH24:MI:SS.US') AS sort_key,
+             i.id AS invoice_id
       FROM invoices i
       WHERE i.customer_id = $1 AND i.lifecycle <> 'Cancelled'
         AND (NOT i.is_credit_note OR i.credit_status = 'Approved')
@@ -112,7 +156,8 @@ export async function getStatement(
              -- do these not match?
              COALESCE(inv.invoice_number, p.reference, '') AS reference,
              -p.amount_cents AS amount_cents,
-             to_char(p.payment_date AT TIME ZONE $2,'YYYY-MM-DD HH24:MI:SS.US') AS sort_key
+             to_char(p.payment_date AT TIME ZONE $2,'YYYY-MM-DD HH24:MI:SS.US') AS sort_key,
+             p.invoice_id
       FROM payments p
       LEFT JOIN invoices inv ON inv.id = p.invoice_id
       WHERE p.customer_id = $1 AND p.status = 'Confirmed'
@@ -126,7 +171,8 @@ export async function getStatement(
              'Payment reassigned' AS description,
              COALESCE(a.entity_label,'') AS reference,
              0 AS amount_cents,
-             to_char(a.ts AT TIME ZONE $2,'YYYY-MM-DD HH24:MI:SS.US') AS sort_key
+             to_char(a.ts AT TIME ZONE $2,'YYYY-MM-DD HH24:MI:SS.US') AS sort_key,
+             NULL::uuid AS invoice_id
       FROM audit_log a
       WHERE a.action = 'adjust' AND a.entity_type = 'Payment'
         AND (a.details -> 'after' ->> 'customerId' = $1::text
@@ -152,6 +198,9 @@ export async function getStatement(
   const entries: StatementEntry[] = [];
 
   for (const r of rows) {
+    // Narrowed to one state: only those invoices and the money against them
+    // count, for the balances as well as the lines.
+    if (only && !(r.invoice_id && only.has(r.invoice_id))) continue;
     const date = String(r.entry_date);
     const amount = num(r.amount_cents);
     if (!inRange(date)) {
@@ -176,7 +225,7 @@ export async function getStatement(
   return {
     customerId,
     customerName: customer.name,
-    from, to,
+    from, to, status,
     openingBalanceCents: opening,
     closingBalanceCents: running,
     entries,

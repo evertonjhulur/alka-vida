@@ -16,13 +16,18 @@ import { createTransport } from 'nodemailer';
 import { existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import type { Db } from '../db/index.ts';
+import type { Db, Queryable } from '../db/index.ts';
 import type { Actor } from './core.ts';
-import { audit, businessToday, requireRole, num } from './core.ts';
+import { audit, businessToday, contactEmail, requireRole, num, siteUrl } from './core.ts';
 import { RuleViolation } from '@alka/shared';
 import { getInvoiceDetail } from './invoices.ts';
-import { getStatement, type StatementFilter } from './ledger.ts';
+import { getStatement, invoicesInStatus, type StatementFilter, type StatementStatus } from './ledger.ts';
+import { customerEmail } from './emailkit.ts';
 import { bottleAccount } from './bottles.ts';
+
+/** The logo's colours (Everton chose them over the old teal, 28 Sep 2026). */
+const COLOR_BLUE = '#0E76BC';
+const COLOR_INDIGO = '#2D3590';
 
 const BRAND = {
   name: 'Alka Vida',
@@ -89,7 +94,7 @@ function letterhead(doc: PDFKit.PDFDocument, left: number): void {
       // A corrupt or unreadable image must never stop a document going out.
     }
   }
-  doc.fontSize(20).fillColor('#000').text(BRAND.name, left, 50);
+  doc.fontSize(20).fillColor(COLOR_INDIGO).text(BRAND.name, left, 50);
   doc.fontSize(9).fillColor('#555')
     .text(BRAND.company)
     .text(BRAND.line1);
@@ -190,7 +195,7 @@ async function drawInvoice(doc: PDFKit.PDFDocument, db: Db, invoiceId: string) {
   letterhead(doc, 50);
   doc.moveDown(1.2);
 
-  doc.fillColor('#000').fontSize(16)
+  doc.fillColor(COLOR_INDIGO).fontSize(16)
     .text(isCN ? 'CREDIT NOTE' : 'INVOICE', 50, doc.y, { align: 'right', width: 510 });
   doc.fontSize(10)
     .text(ledger.invoiceNumber, { align: 'right', width: 510 });
@@ -246,7 +251,7 @@ async function drawInvoice(doc: PDFKit.PDFDocument, db: Db, invoiceId: string) {
       .text('QTY', cols.qty, y)
       .text('UNIT PRICE', cols.unit, y, { width: 70, align: 'right' })
       .text('AMOUNT', cols.total, y, { width: 80, align: 'right' });
-    doc.moveTo(left, doc.y + 2).lineTo(560, doc.y + 2).strokeColor('#ccc').stroke();
+    doc.moveTo(left, doc.y + 2).lineTo(560, doc.y + 2).strokeColor(COLOR_BLUE).stroke();
     doc.moveDown(0.6);
   };
   header();
@@ -309,7 +314,8 @@ async function drawInvoice(doc: PDFKit.PDFDocument, db: Db, invoiceId: string) {
   }
 
   doc.moveDown(2).fontSize(8).fillColor('#777')
-    .text(`${BRAND.company}  ·  All amounts in Jamaican dollars${ledger.gct_exempt ? '' : ', GCT inclusive'}.`,
+    .text(`${BRAND.company}  ·  All amounts in Jamaican dollars${ledger.gct_exempt ? '' : ', GCT inclusive'}.`
+      + `\nContact ${await contactEmail(db)} for any orders or queries.`,
       left, doc.y, { align: 'center', width: 510 });
 
   return { invoiceNumber: ledger.invoiceNumber, customerName: customer.name, customerEmail: customer.email };
@@ -351,7 +357,7 @@ export async function renderInvoicesPdf(
   const { doc, finished } = newDoc();
   letterhead(doc, 50);
   doc.moveDown(1.2);
-  doc.fillColor('#000').fontSize(16).text('INVOICES ENCLOSED', 50, doc.y, { align: 'right', width: 510 });
+  doc.fillColor(COLOR_INDIGO).fontSize(16).text('INVOICES ENCLOSED', 50, doc.y, { align: 'right', width: 510 });
   doc.fontSize(10).text(fmtDate(businessToday()), { align: 'right', width: 510 });
   doc.moveDown(1);
   doc.fontSize(11).text(customer.name, 50);
@@ -363,7 +369,7 @@ export async function renderInvoicesPdf(
     .text('INVOICE', 50, y0).text('DATE', 160, y0).text('DUE', 260, y0)
     .text('TOTAL', 360, y0, { width: 90, align: 'right' })
     .text('STILL OWED', 460, y0, { width: 100, align: 'right' });
-  doc.moveTo(50, doc.y + 2).lineTo(560, doc.y + 2).strokeColor('#ccc').stroke();
+  doc.moveTo(50, doc.y + 2).lineTo(560, doc.y + 2).strokeColor(COLOR_BLUE).stroke();
   doc.moveDown(0.6);
   let due = 0;
   for (const r of rows) {
@@ -421,9 +427,12 @@ export interface StatementDocument {
 export async function renderStatementPdf(
   db: Db,
   customerId: string,
-  opts: { from?: string | null; to?: string | null; filter?: StatementFilter } = {},
+  opts: { from?: string | null; to?: string | null; filter?: StatementFilter;
+          status?: StatementStatus | string | null } = {},
 ): Promise<StatementDocument> {
   const statement = await getStatement(db, customerId, opts);
+  // Narrowed to invoices in one state: the age analysis follows it.
+  const onlyIds = statement.status ? await invoicesInStatus(db, customerId, statement.status) : null;
 
   // The billing address when one is marked, the main address otherwise.
   const bt = await billTo(db, customerId);
@@ -449,8 +458,9 @@ export async function renderStatementPdf(
          WHERE business_today() - due_date > 60), 0)::text AS d90,
        COALESCE(SUM(balance_cents), 0)::text AS total
      FROM invoice_ledger
-     WHERE customer_id = $1 AND balance_cents > 0`,
-    [customerId],
+     WHERE customer_id = $1 AND balance_cents > 0
+       AND ($2::uuid[] IS NULL OR invoice_id = ANY($2::uuid[]))`,
+    [customerId, onlyIds],
   );
 
   // Bottles they are holding, over the same window as the ledger.
@@ -469,7 +479,7 @@ export async function renderStatementPdf(
   letterhead(doc, left);
   doc.moveDown(1.2);
 
-  doc.fillColor('#000').fontSize(16).text('STATEMENT OF ACCOUNT', { align: 'right' });
+  doc.fillColor(COLOR_INDIGO).fontSize(16).text('STATEMENT OF ACCOUNT', { align: 'right' });
   doc.fontSize(10).fillColor('#333')
     .text(
       statement.from || statement.to
@@ -477,6 +487,10 @@ export async function renderStatementPdf(
         : 'All activity to date',
       { align: 'right' },
     );
+  if (statement.status) {
+    doc.fontSize(10).fillColor(COLOR_BLUE)
+      .text(`${statement.status} invoices only`, { align: 'right' });
+  }
   doc.moveDown(1);
 
   /* who it is for */
@@ -500,7 +514,7 @@ export async function renderStatementPdf(
       .text('REFERENCE', cols.ref, y)
       .text('AMOUNT', cols.amount, y, { width: 62, align: 'right' })
       .text('BALANCE', cols.balance, y, { width: 70, align: 'right' });
-    doc.moveTo(left, doc.y + 3).lineTo(right, doc.y + 3).strokeColor('#ccc').stroke();
+    doc.moveTo(left, doc.y + 3).lineTo(right, doc.y + 3).strokeColor(COLOR_BLUE).stroke();
     doc.moveDown(0.7);
   };
   headerRow();
@@ -625,6 +639,11 @@ export async function renderStatementPdf(
     cell('Held now', String(bottles.closingHolding), 3, true);
     doc.y = top + 34;
 
+    if (bottles.sold > 0) {
+      doc.fontSize(8).fillColor('#777')
+        .text(`${bottles.sold} bought outright in this period: those are yours, not counted above.`, left, doc.y);
+      doc.moveDown(0.4);
+    }
     if (bottles.lost > 0) {
       doc.fontSize(8).fillColor('#777')
         .text(`${bottles.lost} recorded lost or damaged and written off.`, left, doc.y);
@@ -658,7 +677,8 @@ export async function renderStatementPdf(
   doc.moveDown(1.5).fontSize(8).fillColor('#777')
     .text(
       `${BRAND.company}  ·  All amounts in Jamaican dollars, GCT inclusive.  ·  `
-      + 'Please quote the invoice number with any payment.',
+      + 'Please quote the invoice number with any payment.'
+      + `\nContact ${await contactEmail(db)} for any orders or queries.`,
       left, doc.y, { align: 'center', width: right - left },
     );
 
@@ -681,7 +701,12 @@ export async function renderStatementPdf(
 export interface MailMessage {
   to: string;
   subject: string;
+  /** Always present: the plain-text twin, for mail programs that show only text. */
   text: string;
+  /** The branded version (emailkit.ts). */
+  html?: string;
+  /** e.g. List-Unsubscribe on non-essential email. */
+  headers?: Record<string, string>;
   attachments?: Array<{ filename: string; content: Buffer }>;
 }
 
@@ -732,6 +757,8 @@ export async function sendMail(m: MailMessage): Promise<void> {
         to: [m.to],
         subject: m.subject,
         text: m.text,
+        ...(m.html ? { html: m.html } : {}),
+        ...(m.headers ? { headers: m.headers } : {}),
         ...(process.env.MAIL_REPLY_TO ? { reply_to: process.env.MAIL_REPLY_TO } : {}),
         attachments: (m.attachments ?? []).map((a) => ({
           filename: a.filename, content: a.content.toString('base64'),
@@ -755,7 +782,9 @@ export async function sendMail(m: MailMessage): Promise<void> {
   });
   await transport.sendMail({
     from: process.env.MAIL_FROM ?? process.env.SMTP_USER,
-    to: m.to, subject: m.subject, text: m.text, attachments: m.attachments,
+    to: m.to, subject: m.subject, text: m.text, html: m.html, headers: m.headers,
+    attachments: m.attachments,
+    ...(process.env.MAIL_REPLY_TO ? { replyTo: process.env.MAIL_REPLY_TO } : {}),
   });
 }
 
@@ -772,33 +801,107 @@ function recipient(override: string | null | undefined, onFile: string | null, w
 
 const signOff = `\n\nThank you for your business.\n\n${BRAND.company}\n`;
 
+/** "3 cases" / "4 bottles", the way every email counts a line. */
+export function qtyWords(bpc: number, cases: number, loose: number): string {
+  const c = Math.abs(cases); const l = Math.abs(loose);
+  if (bpc > 0 && c > 0 && l > 0) return `${c} cs + ${l}`;
+  if (bpc > 0 && c > 0) return `${c} case${c === 1 ? '' : 's'}`;
+  return `${l} bottle${l === 1 ? '' : 's'}`;
+}
+
+/** An invoice's lines and totals, as an email lays them out. */
+export async function invoiceEmailFigures(db: Queryable, invoiceId: string): Promise<{
+  items: Array<{ name: string; qty: string; amount: string }>;
+  totals: Array<[string, string, boolean?]>;
+  customerId: string; invoiceNumber: string; invoiceDate: string; dueDate: string | null;
+  balanceCents: number; isCreditNote: boolean;
+}> {
+  const h = await db.one<{
+    customer_id: string; invoice_number: string; invoice_date: string; due_date: string | null;
+    subtotal_cents: number; discount_amount_cents: number; gct_cents: number; grand_total_cents: number;
+    is_credit_note: boolean; gct_exempt: boolean;
+  }>(
+    `SELECT customer_id, invoice_number, invoice_date::text AS invoice_date, due_date::text AS due_date,
+            subtotal_cents, discount_amount_cents, gct_cents, grand_total_cents, is_credit_note, gct_exempt
+     FROM invoices WHERE id = $1`, [invoiceId],
+  );
+  const bal = await db.one<{ balance_cents: number; amount_paid_cents: number }>(
+    `SELECT balance_cents, amount_paid_cents FROM invoice_ledger WHERE invoice_id = $1`, [invoiceId],
+  );
+  const lines = await db.query<{ name: string; bpc: number; cases: number; loose: number; total: number }>(
+    `SELECT p.name, p.bottles_per_case AS bpc, l.cases, l.loose_bottles AS loose, l.line_total_cents AS total
+     FROM invoice_line_items l JOIN products p ON p.id = l.product_id
+     WHERE l.invoice_id = $1 ORDER BY p.name`, [invoiceId],
+  );
+  const totals: Array<[string, string, boolean?]> = [['Subtotal', cash(Math.abs(num(h.subtotal_cents)))]];
+  if (num(h.discount_amount_cents) > 0) totals.push(['Discount', `-${cash(num(h.discount_amount_cents))}`]);
+  totals.push([h.gct_exempt ? 'GCT (exempt)' : 'GCT 15%', cash(Math.abs(num(h.gct_cents)))]);
+  totals.push([h.is_credit_note ? 'Credit' : 'Total', cash(Math.abs(num(h.grand_total_cents))), true]);
+  if (!h.is_credit_note && num(bal.amount_paid_cents) > 0) {
+    totals.push(['Paid', cash(num(bal.amount_paid_cents))]);
+    totals.push(['Balance due', cash(num(bal.balance_cents)), true]);
+  }
+  return {
+    items: lines.map((l) => ({ name: l.name, qty: qtyWords(num(l.bpc), num(l.cases), num(l.loose)), amount: cash(Math.abs(num(l.total))) })),
+    totals, customerId: h.customer_id, invoiceNumber: h.invoice_number,
+    invoiceDate: h.invoice_date, dueDate: h.due_date, balanceCents: num(bal.balance_cents),
+    isCreditNote: h.is_credit_note,
+  };
+}
+
 /**
  * Send a customer their statement.
  *
  * Unlike an invoice, sending a statement changes nothing about the records -
  * it is a copy of what is already true - so there is no lifecycle to update,
  * only an audit line saying it went.
+ *
+ * `category` is set by the automatic sends (monthly statement, reminders):
+ * those carry an unsubscribe link. One the office sends by hand does not.
  */
 export async function emailStatement(
   db: Db,
   actor: Actor,
   customerId: string,
   opts: { from?: string | null; to?: string | null;
-          filter?: StatementFilter; sendTo?: string | null; note?: string | null;
-          subject?: string | null } = {},
+          filter?: StatementFilter; status?: StatementStatus | null;
+          sendTo?: string | null; note?: string | null;
+          subject?: string | null; heading?: string | null;
+          category?: 'statements' | 'reminders' | null } = {},
 ): Promise<{ sentTo: string; customerName: string }> {
   requireRole(actor, 'admin', 'user');
   if (!mailConfigured()) throw new RuleViolation(NOT_SET_UP);
 
   const doc = await renderStatementPdf(db, customerId,
-    { from: opts.from, to: opts.to, filter: opts.filter });
+    { from: opts.from, to: opts.to, filter: opts.filter, status: opts.status ?? null });
   const to = recipient(opts.sendTo, doc.customerEmail, doc.customerName);
+  const owed = await db.one<{ balance_cents: number; overdue_cents: number }>(
+    `SELECT COALESCE((SELECT balance_cents FROM customer_balances WHERE customer_id = $1), 0)::bigint AS balance_cents,
+            COALESCE((SELECT SUM(balance_cents) FROM invoice_ledger
+                      WHERE customer_id = $1 AND NOT is_credit_note AND status <> 'Cancelled'
+                        AND balance_cents > 0 AND due_date < business_today()), 0)::bigint AS overdue_cents`,
+    [customerId],
+  );
+  const reminder = opts.category === 'reminders';
+  const mail = await customerEmail(db, customerId, opts.category ?? null, {
+    preheader: reminder ? 'A friendly reminder about your account' : `Your statement from ${BRAND.name}`,
+    heading: opts.heading ?? (reminder ? 'A friendly payment reminder' : 'Your statement of account'),
+    subheading: doc.customerName,
+    greeting: 'Good day,',
+    intro: (reminder ? '' : `Please find attached your statement of account from ${BRAND.name}.`)
+      + (opts.note ? `${reminder ? '' : '\n\n'}${opts.note}` : ''),
+    facts: [
+      [num(owed.balance_cents) < 0 ? 'In credit' : 'Balance on account', cash(Math.abs(num(owed.balance_cents)))],
+      ['Past due', cash(num(owed.overdue_cents))],
+    ],
+    button: { label: 'See my account', url: `${siteUrl()}/#/portal/account` },
+    outro: 'Thank you for your business.',
+  });
 
   await sendMail({
     to,
     subject: opts.subject ?? `${BRAND.name} statement of account`,
-    text: `Good day,\n\nPlease find attached your statement of account from ${BRAND.name}.`
-      + (opts.note ? `\n\n${opts.note}` : '') + signOff,
+    text: mail.text, html: mail.html, headers: mail.headers,
     attachments: [{ filename: doc.filename, content: doc.pdf }],
   });
 
@@ -828,12 +931,28 @@ export async function emailInvoice(
   const doc = await renderInvoicePdf(db, invoiceId);
   const to = recipient(overrideTo, doc.customerEmail, doc.customerName);
   const isCN = doc.invoiceNumber.startsWith('CN');
+  const f = await invoiceEmailFigures(db, invoiceId);
+  const mail = await customerEmail(db, f.customerId, null, {
+    preheader: `${isCN ? 'Credit note' : 'Invoice'} ${doc.invoiceNumber} from ${BRAND.name}`,
+    heading: `${isCN ? 'Credit note' : 'Invoice'} ${doc.invoiceNumber}`,
+    subheading: doc.customerName,
+    greeting: 'Good day,',
+    intro: `Please find attached ${isCN ? 'credit note' : 'invoice'} ${doc.invoiceNumber} from ${BRAND.name}.`,
+    items: f.items,
+    totals: f.totals,
+    facts: isCN ? [['Dated', fmtDate(f.invoiceDate)]] : [
+      ['Dated', fmtDate(f.invoiceDate)],
+      ['Due', f.dueDate ? fmtDate(f.dueDate) : 'On receipt'],
+      ['To pay', f.balanceCents > 0 ? cash(f.balanceCents) : 'Paid, thank you'],
+    ],
+    button: { label: 'See it online', url: `${siteUrl()}/#/portal/invoices/${invoiceId}` },
+    outro: 'Thank you for your business.',
+  });
 
   await sendMail({
     to,
     subject: `${BRAND.name} ${isCN ? 'credit note' : 'invoice'} ${doc.invoiceNumber}`,
-    text: `Good day,\n\nPlease find attached ${isCN ? 'credit note' : 'invoice'} `
-      + `${doc.invoiceNumber} from ${BRAND.name}.` + signOff,
+    text: mail.text, html: mail.html,
     attachments: [{ filename: doc.filename, content: doc.pdf }],
   });
 
@@ -864,14 +983,28 @@ export async function emailInvoices(
   const doc = await renderInvoicesPdf(db, invoiceIds);
   const to = recipient(opts.to, doc.customerEmail, doc.customerName);
   const list = doc.numbers.join(', ');
+  const each = await db.query<{ invoice_number: string; invoice_date: string; balance_cents: number }>(
+    `SELECT invoice_number, invoice_date::text AS invoice_date, balance_cents FROM invoice_ledger
+     WHERE invoice_id = ANY($1::uuid[]) ORDER BY invoice_date, invoice_number`, [invoiceIds],
+  );
+  const mail = await customerEmail(db, doc.customerId, null, {
+    preheader: `${doc.numbers.length} invoices from ${BRAND.name}`,
+    heading: doc.numbers.length === 1 ? `Invoice ${list}` : `Your invoices (${doc.numbers.length})`,
+    subheading: doc.customerName,
+    greeting: 'Good day,',
+    intro: `Please find attached ${doc.numbers.length === 1 ? 'invoice' : 'invoices'} ${list} from ${BRAND.name}, in one PDF.`
+      + (opts.note ? `\n\n${opts.note}` : ''),
+    items: each.map((i) => ({ name: i.invoice_number, qty: fmtDate(i.invoice_date), amount: cash(num(i.balance_cents)) })),
+    totals: [['Total still owed on these', cash(doc.totalDueCents), true]],
+    button: { label: 'See my account', url: `${siteUrl()}/#/portal/account` },
+    outro: 'Thank you for your business.',
+  });
 
   await sendMail({
     to,
     subject: `${BRAND.name} invoices ${doc.numbers.length > 3
       ? `(${doc.numbers.length})` : list}`,
-    text: `Good day,\n\nPlease find attached ${doc.numbers.length === 1 ? 'invoice' : 'invoices'} `
-      + `${list} from ${BRAND.name}, in one PDF.\n\nTotal still owed on these: ${cash(doc.totalDueCents)}.`
-      + (opts.note ? `\n\n${opts.note}` : '') + signOff,
+    text: mail.text, html: mail.html,
     attachments: [{ filename: doc.filename, content: doc.pdf }],
   });
 
@@ -890,4 +1023,4 @@ export async function emailInvoices(
   return { sentTo: to, invoiceNumbers: doc.numbers, totalDueCents: doc.totalDueCents };
 }
 
-export { cash as formatCash, newDoc, fmtDate, billTo, letterhead, BRAND, recipient, signOff };
+export { cash as formatCash, newDoc, fmtDate, billTo, letterhead, BRAND, recipient, signOff, COLOR_BLUE, COLOR_INDIGO };

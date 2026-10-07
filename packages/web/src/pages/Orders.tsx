@@ -26,6 +26,9 @@ interface Order {
   sheet_zone: string | null; sheet_date: string | null; sheet_status: string | null;
   sheet_started: boolean | null;
   customer_po?: string | null; address_id?: string | null; needs_review?: boolean;
+  /** Moves and part deliveries (7 Oct 2026, points 8 and 9). */
+  events?: Array<{ kind: string; from: string; to: string; reason: string | null }>;
+  remaining_summary?: string | null;
 }
 interface Addr { id: string; label: string; address_line1: string | null; is_delivery: boolean }
 interface Product {
@@ -46,6 +49,7 @@ const GCT_RATE = 0.15;
 
 const OUTCOME: Record<string, string> = {
   'Customer Not Home': 'not home', Refused: 'refused', Rescheduled: 'rescheduled', Other: 'not delivered',
+  'Payment Only': 'paid, nothing delivered',
 };
 
 /** Where an order stands, in the words the office uses. */
@@ -58,7 +62,9 @@ function standing(o: Order, today: string): { label: string; tone: string } {
       tone: 'ok',
     };
   }
-  if (o.status === 'Partially Delivered') return { label: 'Part delivered', tone: 'warn' };
+  if (o.status === 'Partially Delivered') {
+    return { label: o.requested_delivery_date ? `Part delivered · rest ${day(o.requested_delivery_date)}` : 'Part delivered', tone: 'warn' };
+  }
   if (o.needs_review) return { label: 'Needs approval', tone: 'warn' };
 
   const forDay = o.requested_delivery_date ? date(o.requested_delivery_date) : null;
@@ -708,6 +714,20 @@ export default function Orders() {
                     <td data-label="Customer">
                       <Link to={`/customers/${o.customer_id}?tab=orders`}>{o.customer_name}</Link>
                       <div className="muted small">{short(o.lines_summary)}</div>
+                      {(o.events?.length ?? 0) > 0 && (
+                        <ul className="order-events">
+                          {o.events!.map((ev, k) => (
+                            <li key={k} className={ev.kind === 'Part delivered' ? 'part' : undefined}>
+                              {ev.kind === 'Rescheduled'
+                                ? `Rescheduled from ${day(ev.from)} to ${day(ev.to)}${ev.reason ? ` (${ev.reason})` : ''}`
+                                : `Part delivered ${day(ev.from)}; rest ${day(ev.to)}`}
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                      {o.status === 'Partially Delivered' && o.remaining_summary && (
+                        <div className="small" style={{ color: 'var(--warn)' }}>Still to go: {short(o.remaining_summary)}</div>
+                      )}
                     </td>
                     <td data-label="Delivery date">{o.delivery_mode === 'Counter' ? day(o.order_date) : day(o.requested_delivery_date)}</td>
                     <td data-label="How">{howLabel(o)}</td>

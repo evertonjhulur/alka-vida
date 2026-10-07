@@ -32,7 +32,7 @@ if not errorlevel 1 (
   goto :eof
 )
 
-"%GIT%" commit -q -m "Checkpoint: screens rebuilt from the Claude Design mockups (28-30 Sep 2026)" -m "Needs a decision, Orders, New order, Invoice, Payments, Reports (incl. Rounds and cash), Sign in, Open an account, delivery round, driver stop, portal order, top bar, customer hub, seven-section menu, logo colours, readable dates, in-app confirm boxes. Details in HANDOFF.md." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>" -m "Claude-Session: https://claude.ai/code/session_01Wsp85x62qLte8Y6KiaQifX"
+"%GIT%" commit -q -m "Checkpoint: Everton's round of 7 Oct 2026 (14 points)" -m "Approval email, portal home with picture news, email ticks and unsubscribe, branded emails, rescheduled and part deliveries, payment-only stops, statement filters, walk-in rule, 5-gallon bottle charge, PO statuses. Details in HANDOFF.md." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>" -m "Claude-Session: https://claude.ai/code/session_01VoXQGrGq6CUsFujNwTgV52"
 if errorlevel 1 (
   echo.
   echo   The checkpoint could not be saved. Please tell Claude what it says above.

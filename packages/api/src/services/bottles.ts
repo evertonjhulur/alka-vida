@@ -269,12 +269,43 @@ export async function adjustPool(
 const CUSTOMER_MOVES = `
   SELECT s.customer_id, sh.delivery_date AS day,
          s.bottles_delivered_full AS delivered, s.bottles_empties_picked_up AS returned,
-         s.bottles_lost_damaged AS lost
+         s.bottles_lost_damaged AS lost, 0 AS sold
   FROM delivery_stops s JOIN delivery_sheets sh ON sh.id = s.delivery_sheet_id
   WHERE s.stop_outcome = 'Delivered'
   UNION ALL
-  SELECT m.customer_id, m.moved_on, m.delivered, m.returned, m.lost
+  SELECT m.customer_id, m.moved_on, m.delivered, m.returned, m.lost, m.sold
   FROM customer_bottle_moves m`;
+
+/**
+ * Bottles a customer has BOUGHT (7 Oct 2026, point 13): they handed over
+ * fewer empties than the full bottles they took, and paid for the
+ * difference. Those bottles are theirs from then on - they count as their
+ * empties next time, and nothing is refunded - so they come off what the
+ * customer holds of ours, and leave the pool as sold.
+ */
+export async function recordBottlesSold(
+  t: Queryable, actor: Actor | null, args: {
+    customerId: string; quantity: number; reference: string; orderId?: string | null; day?: string | null;
+  },
+): Promise<void> {
+  const n = Math.max(0, Math.round(Number(args.quantity) || 0));
+  if (n === 0) return;
+  await t.query(
+    `INSERT INTO customer_bottle_moves (customer_id, moved_on, sold, order_id, reference)
+     VALUES ($1, COALESCE($2::date, business_today()), $3, $4, $5)`,
+    [args.customerId, args.day ?? null, n, args.orderId ?? null, args.reference],
+  );
+  const pool = await defaultPool(t);
+  if (!pool) return;
+  await t.query(
+    `UPDATE five_gal_bottle_pool
+     SET filled_with_customer = GREATEST(filled_with_customer - $2, 0), sold = sold + $2
+     WHERE id = $1`, [pool.id, n],
+  );
+  const c = await t.maybeOne<{ name: string }>(`SELECT name FROM customers WHERE id = $1`, [args.customerId]);
+  await logMovement(t, actor, pool, n, 'out', 'Adjustment', args.reference,
+    `${n} bottle${n === 1 ? '' : 's'} sold to ${c?.name ?? 'the customer'} - theirs now, no refund`);
+}
 
 /**
  * How many bottles each customer is holding, derived from what was delivered
@@ -287,9 +318,11 @@ export async function customerHoldings(db: Db) {
             COALESCE(SUM(s.delivered), 0)::int   AS delivered,
             COALESCE(SUM(s.returned), 0)::int    AS returned,
             COALESCE(SUM(s.lost), 0)::int        AS lost,
+            COALESCE(SUM(s.sold), 0)::int        AS sold,
             (COALESCE(SUM(s.delivered), 0)
              - COALESCE(SUM(s.returned), 0)
-             - COALESCE(SUM(s.lost), 0))::int    AS holding,
+             - COALESCE(SUM(s.lost), 0)
+             - COALESCE(SUM(s.sold), 0))::int    AS holding,
             MAX(s.day)::text AS last_moved
      FROM customers c
      JOIN (${CUSTOMER_MOVES}) s ON s.customer_id = c.id
@@ -341,26 +374,29 @@ export async function bottleAccount(
   delivered: number;
   returned: number;
   lost: number;
+  /** Bought outright: theirs, so not part of what they hold of ours. */
+  sold: number;
   closingHolding: number;
 }> {
   const from = opts.from ?? null;
   const to = opts.to ?? null;
 
   const row = await db.one<{
-    opening: string; delivered: string; returned: string; lost: string; closing: string;
+    opening: string; delivered: string; returned: string; lost: string; sold: string; closing: string;
   }>(
     `SELECT
        -- everything BEFORE the window, so the period reads as a movement
        COALESCE(SUM(
          CASE WHEN $2::date IS NOT NULL AND m.day < $2::date
-              THEN m.delivered - m.returned - m.lost ELSE 0 END), 0)::text AS opening,
+              THEN m.delivered - m.returned - m.lost - m.sold ELSE 0 END), 0)::text AS opening,
        COALESCE(SUM(CASE WHEN w.inWindow THEN m.delivered ELSE 0 END), 0)::text AS delivered,
        COALESCE(SUM(CASE WHEN w.inWindow THEN m.returned ELSE 0 END), 0)::text AS returned,
        COALESCE(SUM(CASE WHEN w.inWindow THEN m.lost ELSE 0 END), 0)::text AS lost,
+       COALESCE(SUM(CASE WHEN w.inWindow THEN m.sold ELSE 0 END), 0)::text AS sold,
        -- what they hold now, counting everything up to the end of the window
        COALESCE(SUM(
          CASE WHEN $3::date IS NULL OR m.day <= $3::date
-              THEN m.delivered - m.returned - m.lost ELSE 0 END), 0)::text AS closing
+              THEN m.delivered - m.returned - m.lost - m.sold ELSE 0 END), 0)::text AS closing
      FROM (${CUSTOMER_MOVES}) m
      CROSS JOIN LATERAL (
        SELECT ($2::date IS NULL OR m.day >= $2::date)
@@ -375,6 +411,7 @@ export async function bottleAccount(
     delivered: num(row.delivered),
     returned: num(row.returned),
     lost: num(row.lost),
+    sold: num(row.sold),
     closingHolding: num(row.closing),
   };
 }

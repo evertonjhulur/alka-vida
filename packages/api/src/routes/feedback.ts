@@ -201,6 +201,8 @@ export function registerFeedbackRoutes(
     broadcastDailyCap: 'broadcast_daily_cap',
     orderPlacedEmails: 'order_placed_emails',
     orderDeliveredEmails: 'order_delivered_emails',
+    // The address at the foot of every email and document (7 Oct 2026).
+    contactEmail: 'contact_email',
   };
   const readSettings = async () => {
     const out: Record<string, string | boolean | number> = {};
@@ -211,6 +213,7 @@ export function registerFeedbackRoutes(
       broadcastDailyCap: Number(out.broadcastDailyCap) || 80,
       orderPlacedEmails: out.orderPlacedEmails !== 'false',
       orderDeliveredEmails: out.orderDeliveredEmails !== 'false',
+      contactEmail: String(out.contactEmail || 'orders@alkavidaja.com'),
       mailConfigured: documents.mailConfigured(),
     };
   };
@@ -220,6 +223,12 @@ export function registerFeedbackRoutes(
     const b = (req.body ?? {}) as Record<string, unknown>;
     if (b.sameDayCutoff !== undefined && !/^([01]\d|2[0-3]):[0-5]\d$/.test(String(b.sameDayCutoff))) {
       throw new RuleViolation('the cut-off is a time like 10:00 or 14:30');
+    }
+    if (b.contactEmail !== undefined) {
+      b.contactEmail = String(b.contactEmail).trim();
+      if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(String(b.contactEmail))) {
+        throw new RuleViolation('the contact address should look like orders@alkavidaja.com');
+      }
     }
     await db.tx(async (t) => {
       for (const [k, key] of Object.entries(SETTINGS)) {

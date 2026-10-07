@@ -23,6 +23,7 @@ import type { Cents } from '@alka/shared';
 import { planPayments, validateAllocation, RuleViolation } from '@alka/shared';
 import { insertPayment } from './payments.ts';
 import { amountOwedForStop } from './delivery.ts';
+import { recomputeDelivered } from './orders.ts';
 import { openInvoicesForCustomer } from './invoices.ts';
 
 export interface SettlementStopRow {
@@ -205,15 +206,24 @@ export async function applyStopCorrection(
      changes.bottlesLostDamaged ?? null],
   );
 
+  // What THIS stop handed over is corrected, and the order's delivered
+  // figures recounted from all its stops (an order can go out in parts).
   for (const l of changes.deliveredLines ?? []) {
     await t.query(
-      `UPDATE order_line_items
-       SET delivered_cases = $2, delivered_loose = $3,
-           delivered_total = $2 * (SELECT bottles_per_case FROM products p
-                                   WHERE p.id = order_line_items.product_id) + $3
-       WHERE id = $1`,
-      [l.orderLineId, l.cases, l.looseBottles],
+      `INSERT INTO delivery_stop_lines (stop_id, order_line_id, product_id, cases, loose_bottles, total_bottles)
+       SELECT $1, oli.id, oli.product_id, $3, $4, $3 * p.bottles_per_case + $4
+       FROM order_line_items oli JOIN products p ON p.id = oli.product_id WHERE oli.id = $2
+       ON CONFLICT (stop_id, order_line_id) DO UPDATE
+         SET cases = EXCLUDED.cases, loose_bottles = EXCLUDED.loose_bottles,
+             total_bottles = EXCLUDED.total_bottles`,
+      [stopId, l.orderLineId, l.cases, l.looseBottles],
     );
+  }
+  if ((changes.deliveredLines ?? []).length > 0) {
+    const o = await t.maybeOne<{ order_id: string | null }>(
+      `SELECT order_id FROM delivery_stops WHERE id = $1`, [stopId],
+    );
+    if (o?.order_id) await recomputeDelivered(t, o.order_id);
   }
 
   await audit(t, actor, 'adjust', 'DeliveryStop', stopId, stopId, {

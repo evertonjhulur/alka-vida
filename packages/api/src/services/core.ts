@@ -134,6 +134,11 @@ export function businessTimeNow(at: Date = new Date()): string {
   }).format(at);
 }
 
+/** The address customers write to (orders@alkavidaja.com), on every email and document. */
+export async function contactEmail(t: Queryable): Promise<string> {
+  return (await getSetting(t, 'contact_email', 'orders@alkavidaja.com')).trim() || 'orders@alkavidaja.com';
+}
+
 /** One value from system_settings, or the fallback when it is not there. */
 export async function getSetting(t: Queryable, key: string, fallback = ''): Promise<string> {
   const row = await t.maybeOne<{ value: string }>(

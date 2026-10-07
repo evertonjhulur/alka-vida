@@ -22,6 +22,7 @@ interface Order {
   delivery_mode: string; source: string; grand_total_cents: string;
   requested_delivery_date?: string | null; fulfilled_on?: string | null;
   customer_po?: string | null; needs_review?: boolean; lines_summary?: string | null;
+  events?: Array<{ kind: string; from: string; to: string; reason: string | null }>;
 }
 interface Invoice {
   invoice_id: string; invoice_number: string; invoice_date: string;
@@ -388,6 +389,17 @@ export default function CustomerRecord({ session }: { session: Session }) {
                   {o.lines_summary && <div className="muted small">{o.lines_summary.replace(/Alka Vida\s+/gi, '')}</div>}
                   {o.source === 'Portal' && <div className="muted small">placed by the customer</div>}
                   {o.customer_po && <div className="muted small">PO {o.customer_po}</div>}
+                  {(o.events?.length ?? 0) > 0 && (
+                    <ul className="order-events">
+                      {o.events!.map((ev, k) => (
+                        <li key={k} className={ev.kind === 'Part delivered' ? 'part' : undefined}>
+                          {ev.kind === 'Rescheduled'
+                            ? `Rescheduled from ${when(ev.from)} to ${when(ev.to)}${ev.reason ? ` (${ev.reason})` : ''}`
+                            : `Part delivered ${when(ev.from)}; rest ${when(ev.to)}`}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
                 </span>
                 <span className={`chip ${statusTone(o.status)} phone-only`}>{o.needs_review ? 'Needs approval' : o.status}</span>
               </td>

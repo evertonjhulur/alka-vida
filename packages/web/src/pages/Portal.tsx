@@ -16,6 +16,7 @@ interface Priced {
   product_id: string; name: string; bottles_per_case: number;
   price_per_case_cents: number; price_per_bottle_cents: number;
   price_tier: string | null;
+  is_returnable?: boolean; is_bottle_charge?: boolean;
 }
 
 interface MyOrder {
@@ -24,6 +25,9 @@ interface MyOrder {
   delivery_mode: string; grand_total_cents: number; source: string;
   sheet_started?: boolean | null; needs_review?: boolean; customer_po?: string | null;
   lines_summary?: string | null;
+  /** Moves and part deliveries (7 Oct 2026, points 8 and 9). */
+  events?: Array<{ kind: string; from: string; to: string; reason: string | null }>;
+  remaining_summary?: string | null;
 }
 
 /** One of the customer's own standing orders. */
@@ -51,11 +55,13 @@ interface Profile {
   delivery_address: string | null; delivery_instructions: string | null; delivery_zone: string | null;
   delivery_days: string[] | null; payment_terms: string | null; invoice_cycle: string | null;
   marketing_opt_out: boolean; order_emails: boolean; auto_statements: boolean; gct_exempt: boolean;
+  cancel_emails?: boolean; service_emails?: boolean;
   addresses: Address[]; position: Position;
 }
 
 interface News {
   id: string; kind: string; title: string; body: string; starts_on: string; ends_on: string | null; pinned: boolean;
+  images?: Array<{ id: string; url: string }>;
 }
 
 interface Home {
@@ -109,6 +115,9 @@ export default function Portal({ session }: { session: Session }) {
   const [notes, setNotes] = useState('');
   const [po, setPo] = useState('');
   const [addressId, setAddressId] = useState('');
+  /** 5-gallon empties they will hand over; '' until they say. */
+  const [empties, setEmpties] = useState('');
+  const [bottle, setBottle] = useState<Priced | null>(null);
 
   const [pf, setPf] = useState<Record<string, string | boolean>>({});
   const [addrEdit, setAddrEdit] = useState<{ id: string | null; v: typeof BLANK_ADDR } | null>(null);
@@ -135,11 +144,16 @@ export default function Portal({ session }: { session: Session }) {
       parish: p.parish ?? '', deliveryInstructions: p.delivery_instructions ?? '',
       orderEmails: p.order_emails !== false, autoStatements: p.auto_statements !== false,
       offers: !p.marketing_opt_out,
+      cancelEmails: p.cancel_emails !== false, serviceEmails: p.service_emails !== false,
     });
     setRows(await api.get<Row[]>('/api/invoices'));
     setMyOrders(await api.get<MyOrder[]>('/api/orders'));
     setSchedules(await api.get<Schedule[]>('/api/portal/recurring'));
-    setPrices(await api.get<Priced[]>(`/api/customers/${customerId}/prices`));
+    // The 5-gallon bottle itself is not chosen here: it is added for any
+    // shortfall in empties (7 Oct 2026, point 13).
+    const all = await api.get<Priced[]>(`/api/customers/${customerId}/prices`);
+    setBottle(all.find((p) => p.is_bottle_charge) ?? null);
+    setPrices(all.filter((p) => !p.is_bottle_charge));
     setQuotes(await api.get<MyQuote[]>('/api/quotations').catch(() => []));
   }
 
@@ -220,6 +234,7 @@ export default function Portal({ session }: { session: Session }) {
         addressLine1: pf.addressLine1, addressLine2: pf.addressLine2, city: pf.city, parish: pf.parish,
         deliveryInstructions: pf.deliveryInstructions,
         orderEmails: pf.orderEmails, autoStatements: pf.autoStatements, marketingOptOut: !pf.offers,
+        cancelEmails: pf.cancelEmails, serviceEmails: pf.serviceEmails,
       });
       setPlaced('Your details are saved.');
       window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -259,15 +274,21 @@ export default function Portal({ session }: { session: Session }) {
    * Shown as subtotal, then GCT, then the total (team feedback, point 2).
    */
   const exempt = !!profile?.gct_exempt;
+  // Full 5-gallon bottles on the order, and how many of them are short of an
+  // empty in exchange: those are bought, at the bottle's price.
+  const fullFives = prices.filter((p) => p.is_returnable)
+    .reduce((n, p) => n + (qty[p.product_id] ?? 0) * (p.bottles_per_case > 0 ? p.bottles_per_case : 1), 0);
+  const shortfall = fullFives > 0 && empties !== '' ? Math.max(0, fullFives - (Math.round(Number(empties)) || 0)) : 0;
   const totals = useMemo(() => {
     let subtotal = 0;
     for (const p of prices) {
       const n = qty[p.product_id] ?? 0;
       if (n > 0) subtotal += n * rateOf(p);
     }
+    if (bottle && shortfall > 0) subtotal += shortfall * Number(bottle.price_per_bottle_cents);
     const gct = exempt ? 0 : Math.round(subtotal * GCT_RATE);
     return { subtotal, gct, grandTotal: subtotal + gct };
-  }, [qty, prices, exempt]);
+  }, [qty, prices, exempt, bottle, shortfall]);
 
   const bump = (id: string, by: number) =>
     setQty((q) => ({ ...q, [id]: Math.max(0, Math.min(9999, (q[id] ?? 0) + by)) }));
@@ -294,6 +315,11 @@ export default function Portal({ session }: { session: Session }) {
       setBusy(false);
       return;
     }
+    if (fullFives > 0 && empties === '') {
+      setError('Tell us how many empty 5-gallon bottles you will hand over.');
+      setBusy(false);
+      return;
+    }
 
     try {
       const order = await api.post<{
@@ -307,6 +333,7 @@ export default function Portal({ session }: { session: Session }) {
           notes: notes || null,
           customerPo: po || null,
           addressId: mode === 'Delivery' ? (addressId || null) : null,
+          emptiesExpected: fullFives > 0 ? Math.max(0, Math.round(Number(empties)) || 0) : null,
         },
       );
       setPlaced(
@@ -320,7 +347,7 @@ export default function Portal({ session }: { session: Session }) {
         + '',
       );
       setQty({});
-      setWanted(''); setNotes(''); setPo('');
+      setWanted(''); setNotes(''); setPo(''); setEmpties('');
       await load();
       setTab('orders');
     } catch (err) {
@@ -381,19 +408,66 @@ export default function Portal({ session }: { session: Session }) {
   return (
     <>
       <h1>{tab === 'home' && profile ? `Welcome, ${profile.contact_person || profile.name}` : 'My account'}</h1>
-      <p className="subtitle">{profile?.name ?? ''}{profile?.name ? ' · ' : ''}Order water, and see what you owe.</p>
 
       {error && <div className="notice error">{error}</div>}
       {placed && <div className="notice ok">{placed}</div>}
 
       {tab === 'home' && (
         <>
-          {positionFigures()}
+          {/*
+            * Home, redone (Everton, 7 Oct 2026, point 2): News & offers first
+            * and large, as picture cards; the account and the next delivery
+            * underneath.
+            */}
+          <section className="news-hero" aria-labelledby="news-h">
+            <h2 id="news-h">News &amp; offers</h2>
+            {(home?.news ?? []).length === 0 ? (
+              <div className="news-card news-empty">
+                <div className="news-card-body">
+                  <strong>Nothing new right now</strong>
+                  <p className="muted" style={{ margin: '4px 0 0' }}>Our offers and news show up here first. Check back soon.</p>
+                </div>
+              </div>
+            ) : (
+              <div className="news-grid">
+                {/* A post with a picture leads, large; the rest follow in order. */}
+                {[...(home?.news ?? [])].sort((a, b) => Number(!!b.images?.length) - Number(!!a.images?.length)).map((n, i) => (
+                  <article key={n.id} className={`news-card${i === 0 ? ' lead' : ''}${n.images?.length ? '' : ' no-pic'}`}>
+                    {n.images?.[0] && (
+                      <img className="news-pic" src={n.images[0].url} alt="" loading={i < 2 ? 'eager' : 'lazy'} />
+                    )}
+                    <div className="news-card-body">
+                      <span className={`chip ${KIND_TONE[n.kind] ?? 'neutral'}`}>{n.kind === 'Promotion' ? 'Offer' : n.kind}</span>
+                      <h3>{n.title}</h3>
+                      {n.body && <p className="news-body">{n.body}</p>}
+                      {(n.images?.length ?? 0) > 1 && (
+                        <div className="news-thumbs">
+                          {n.images!.slice(1).map((im) => <img key={im.id} src={im.url} alt="" loading="lazy" />)}
+                        </div>
+                      )}
+                      {n.ends_on && <div className="muted small">Until {when(n.ends_on)}</div>}
+                    </div>
+                  </article>
+                ))}
+              </div>
+            )}
+          </section>
+
+          <div className="home-actions">
+            <button type="button" className="big" onClick={() => setTab('order')}>Place an order</button>
+            {home?.whatsapp.link && (
+              <a className="button-link whatsapp big" href={home.whatsapp.link} target="_blank" rel="noreferrer">
+                Order on WhatsApp
+              </a>
+            )}
+            <button type="button" className="secondary big" onClick={() => setTab('account')}>Invoices &amp; statement</button>
+          </div>
+
           <div className="portal-home">
             <section className="panel">
               <h2 style={{ marginTop: 0 }}>Your next delivery</h2>
               {home?.nextOrder ? (
-                <p style={{ margin: '0 0 12px' }}>
+                <p style={{ margin: '0 0 8px' }}>
                   <strong>{home.nextOrder.order_number}</strong>{' '}
                   {home.nextOrder.needs_review ? 'is waiting for us to confirm the day.'
                     : home.nextOrder.delivery_mode === 'Pickup'
@@ -402,34 +476,14 @@ export default function Portal({ session }: { session: Session }) {
                         ? `is coming on ${when(home.nextOrder.requested_delivery_date)}.`
                         : 'is going out on the next round for your area.'}
                 </p>
-              ) : <p className="muted" style={{ margin: '0 0 12px' }}>Nothing on order at the moment.</p>}
-              <div className="row" style={{ gap: 8 }}>
-                <button type="button" onClick={() => setTab('order')}>Place an order</button>
-                {home?.whatsapp.link && (
-                  <a className="button-link whatsapp" href={home.whatsapp.link} target="_blank" rel="noreferrer">
-                    Order on WhatsApp
-                  </a>
-                )}
-                <button type="button" className="secondary" onClick={() => setTab('account')}>Invoices &amp; statement</button>
-              </div>
-              <p className="muted small" style={{ marginBottom: 0 }}>
+              ) : <p className="muted" style={{ margin: '0 0 8px' }}>Nothing on order at the moment.</p>}
+              <p className="muted small" style={{ margin: 0 }}>
                 Same-day delivery: order by {cutoff}. After that we check with you before it goes out.
               </p>
             </section>
-
             <section className="panel">
-              <h2 style={{ marginTop: 0 }}>News &amp; offers</h2>
-              {(home?.news ?? []).length === 0 && <p className="muted" style={{ margin: 0 }}>Nothing new right now.</p>}
-              {(home?.news ?? []).map((n) => (
-                <article key={n.id} className="news-item">
-                  <div className="news-head">
-                    <span className={`chip ${KIND_TONE[n.kind] ?? 'neutral'}`}>{n.kind}</span>
-                    <strong>{n.title}</strong>
-                  </div>
-                  {n.body && <p className="news-body">{n.body}</p>}
-                  {n.ends_on && <div className="muted small">Until {when(n.ends_on)}</div>}
-                </article>
-              ))}
+              <h2 style={{ marginTop: 0 }}>Your account</h2>
+              {positionFigures()}
             </section>
           </div>
         </>
@@ -471,6 +525,23 @@ export default function Portal({ session }: { session: Session }) {
               );
             })}
           </section>
+
+          {fullFives > 0 && (
+            <section className="panel bottle-box">
+              <div className="field" style={{ marginBottom: 4 }}>
+                <label htmlFor="empties">How many empty 5-gallon bottles will you hand over?</label>
+                <input id="empties" type="number" min="0" inputMode="numeric" style={{ maxWidth: 140 }}
+                       value={empties} placeholder={String(fullFives)}
+                       onChange={(e) => setEmpties(e.target.value)} />
+              </div>
+              <p className="small" style={{ margin: 0 }}>
+                Each full bottle is swapped for an empty one.{' '}
+                {shortfall > 0 && bottle
+                  ? <strong>{shortfall} short, so {shortfall === 1 ? 'that bottle is' : 'those bottles are'} added at {money(Number(bottle.price_per_bottle_cents))} each. They are yours to keep and swap next time.</strong>
+                  : `Fewer empties than full bottles and the extra bottles are charged${bottle ? ` at ${money(Number(bottle.price_per_bottle_cents))} each` : ''}; they are then yours to keep.`}
+              </p>
+            </section>
+          )}
 
           <section className="panel">
             <div className="seg seg-even" role="group" aria-label="Delivery or collection">
@@ -526,6 +597,9 @@ export default function Portal({ session }: { session: Session }) {
           </section>
 
           <section className="panel portal-sum">
+            {shortfall > 0 && bottle && (
+              <div className="total-line muted"><span>incl. {shortfall} × 5-gallon bottle</span><span>{money(shortfall * Number(bottle.price_per_bottle_cents))}</span></div>
+            )}
             <div className="total-line"><span>Subtotal</span><span>{money(totals.subtotal)}</span></div>
             <div className="total-line"><span>{exempt ? 'GCT (exempt)' : 'GCT 15%'}</span><span>{money(totals.gct)}</span></div>
             <div className="total-line grand"><span>Total</span><span>{money(totals.grandTotal)}</span></div>
@@ -549,8 +623,10 @@ export default function Portal({ session }: { session: Session }) {
             <tbody>
               {myOrders.map((o) => {
                 const onRoad = !!o.sheet_started && o.status === 'Pending';
+                const onRoadPart = !!o.sheet_started && o.status === 'Partially Delivered';
                 const statusWord = o.needs_review && o.status === 'Pending' ? 'Being confirmed'
-                  : onRoad ? 'Out for delivery' : o.status;
+                  : onRoad || onRoadPart ? 'Out for delivery'
+                    : o.status === 'Partially Delivered' ? 'Part delivered' : o.status;
                 return (
                   <Fragment key={o.id}>
                     <tr>
@@ -561,6 +637,23 @@ export default function Portal({ session }: { session: Session }) {
                           {o.order_number}
                           {o.customer_po && <div className="muted small">your PO {o.customer_po}</div>}
                           {o.lines_summary && <div className="muted small">{o.lines_summary.replace(/Alka Vida\s+/gi, '')}</div>}
+                          {(o.events?.length ?? 0) > 0 && (
+                            <ul className="order-events">
+                              {o.events!.map((ev, i) => (
+                                <li key={i} className={ev.kind === 'Part delivered' ? 'part' : undefined}>
+                                  {ev.kind === 'Rescheduled'
+                                    ? `Rescheduled from ${when(ev.from)} to ${when(ev.to)}${ev.reason ? ` (${ev.reason})` : ''}`
+                                    : `Part delivered ${when(ev.from)}; the rest on ${when(ev.to)}`}
+                                </li>
+                              ))}
+                            </ul>
+                          )}
+                          {o.status === 'Partially Delivered' && o.remaining_summary && (
+                            <div className="small" style={{ color: 'var(--warn)' }}>
+                              Still to come: {o.remaining_summary.replace(/Alka Vida\s+/gi, '')}
+                              {o.requested_delivery_date ? ` on ${when(o.requested_delivery_date)}` : ''}
+                            </div>
+                          )}
                         </span>
                         <span className={`chip ${statusTone(statusWord)} phone-only`}>{statusWord}</span>
                       </td>
@@ -828,11 +921,18 @@ export default function Portal({ session }: { session: Session }) {
             <fieldset className="form-block">
               <legend>Emails from us</legend>
               <label className="check"><input type="checkbox" checked={!!pf.orderEmails}
-                onChange={(e) => setPf({ ...pf, orderEmails: e.target.checked })} /> Order confirmations (placed and delivered)</label>
+                onChange={(e) => setPf({ ...pf, orderEmails: e.target.checked })} /> Order confirmations (placed, delivered, moved to another day)</label>
+              <label className="check"><input type="checkbox" checked={!!pf.cancelEmails}
+                onChange={(e) => setPf({ ...pf, cancelEmails: e.target.checked })} /> Order cancelled</label>
               <label className="check"><input type="checkbox" checked={!!pf.autoStatements}
                 onChange={(e) => setPf({ ...pf, autoStatements: e.target.checked })} /> A monthly statement</label>
+              <label className="check"><input type="checkbox" checked={!!pf.serviceEmails}
+                onChange={(e) => setPf({ ...pf, serviceEmails: e.target.checked })} /> Service announcements (closures, holidays, changes to delivery days)</label>
               <label className="check"><input type="checkbox" checked={!!pf.offers}
                 onChange={(e) => setPf({ ...pf, offers: e.target.checked })} /> News and special offers</label>
+              <p className="muted small" style={{ margin: '4px 0 0' }}>
+                Invoices, receipts and statements we send you always come. Every other email has an Unsubscribe link at the bottom.
+              </p>
             </fieldset>
             <button disabled={busy}>{busy ? 'Saving…' : 'Save my details'}</button>
           </form>

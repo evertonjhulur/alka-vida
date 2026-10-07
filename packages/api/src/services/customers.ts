@@ -2,6 +2,7 @@
  * Customer records and merging (Section 6).
  */
 
+import { ORDER_EVENTS } from './orders.ts';
 import type { Db, Queryable } from '../db/index.ts';
 import type { Actor } from './core.ts';
 import { audit, businessToday, num, requireRole } from './core.ts';
@@ -102,6 +103,10 @@ export interface CustomerInput {
   whatsapp?: string | null;
   marketingOptOut?: boolean;
   orderEmails?: boolean;
+  cancelEmails?: boolean;
+  serviceEmails?: boolean;
+  /** A walk-in pays in full at the counter (7 Oct 2026, point 12). */
+  isWalkIn?: boolean;
 }
 
 const WEEK = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
@@ -158,6 +163,9 @@ function customerColumns(input: CustomerInput): Record<string, unknown> {
   if (has('whatsapp')) cols.whatsapp = text(input.whatsapp);
   if (has('marketingOptOut')) cols.marketing_opt_out = !!input.marketingOptOut;
   if (has('orderEmails')) cols.order_emails = input.orderEmails !== false;
+  if (has('cancelEmails')) cols.cancel_emails = input.cancelEmails !== false;
+  if (has('serviceEmails')) cols.service_emails = input.serviceEmails !== false;
+  if (has('isWalkIn')) cols.is_walk_in = !!input.isWalkIn;
   if (has('invoiceCycle') && input.invoiceCycle) {
     if (!['PerDelivery', 'Weekly', 'Monthly'].includes(input.invoiceCycle)) {
       throw new RuleViolation('invoice cycle must be per delivery, weekly or monthly');
@@ -450,7 +458,7 @@ export async function setSpecialPrice(
  */
 export async function customerPrices(db: Db | Queryable, customerId: string) {
   return db.query(
-    `SELECT p.id AS product_id, p.name, p.bottles_per_case, p.is_returnable,
+    `SELECT p.id AS product_id, p.name, p.bottles_per_case, p.is_returnable, p.is_bottle_charge,
             COALESCE(cp.price_per_case_cents, pl.price_per_case_cents, p.price_per_case_cents)
               AS price_per_case_cents,
             COALESCE(cp.price_per_bottle_cents, pl.price_per_bottle_cents, p.price_per_bottle_cents)
@@ -518,8 +526,9 @@ export async function customerHistory(db: Db, customerId: string) {
             (SELECT string_agg(CASE WHEN oli.cases > 0 THEN oli.cases || ' cs ' ELSE oli.loose_bottles || ' x ' END
                                || p.name, ', ' ORDER BY p.name)
                FROM order_line_items oli JOIN products p ON p.id = oli.product_id
-              WHERE oli.order_id = customer_orders.id) AS lines_summary
-     FROM customer_orders WHERE customer_id = $1
+              WHERE oli.order_id = o.id) AS lines_summary,
+            ${ORDER_EVENTS} AS events
+     FROM customer_orders o WHERE customer_id = $1
      ORDER BY order_date DESC, order_number DESC LIMIT 60`,
     [customerId],
   );

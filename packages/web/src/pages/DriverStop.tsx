@@ -12,6 +12,11 @@ interface StopLine {
   /** A 5-gallon bottle goes out on loan and has to come back. */
   is_returnable: boolean;
   total_bottles: number;
+  /** The 5-gallon bottle sold on its own (bought for a shortfall in empties). */
+  is_bottle_charge?: boolean;
+  /** What was ordered; cases / loose_bottles above are what is still to come. */
+  ordered_cases?: number;
+  ordered_loose?: number;
 }
 
 interface OpenInvoice {
@@ -43,6 +48,15 @@ interface Stop {
   customer_po?: string | null;
   sheet_date?: string | null;
   bottlesHeld?: number;
+  order_id?: string | null;
+  payment_only?: boolean;
+  payment_amount_cents?: number;
+  payment_method?: string | null;
+  remainder_to?: string | null;
+  /** 5-gallon empties the customer said they would hand over (point 13). */
+  empties_expected?: number | null;
+  bottleCharge?: { productId: string; name: string; priceCents: number } | null;
+  accountBalanceCents?: number;
   /** Always tax-inclusive: the invoice total, or the order total before one exists. */
   amountOwedCents: number;
   lines: StopLine[];
@@ -55,7 +69,7 @@ const PAY_WAYS: Array<[string, string]> = [
 ];
 const OUTCOME_WORDS: Record<string, string> = {
   Delivered: 'Delivered', 'Customer Not Home': 'Not home', Refused: 'Refused',
-  Rescheduled: 'Another day', Other: 'Not delivered',
+  Rescheduled: 'Another day', Other: 'Not delivered', 'Payment Only': 'Payment only, nothing delivered',
 };
 
 /**
@@ -86,6 +100,12 @@ export default function DriverStop() {
   const [moveTo, setMoveTo] = useState('');
   const [moveWhy, setMoveWhy] = useState('');
   const [alloc, setAlloc] = useState<Record<string, string>>({});
+  /** Partially delivered (point 9): the day the rest goes. */
+  const [partial, setPartial] = useState(false);
+  const [restOn, setRestOn] = useState('');
+  /** The bottle charge for empties short at the door (point 13). */
+  const [charge, setCharge] = useState(false);
+  const [chargeQty, setChargeQty] = useState('');
 
   const [saved, setSaved] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -133,8 +153,15 @@ export default function DriverStop() {
   const fullsShown = fullsTouched ? fulls : String(bottlesFromLines);
   // A 5-gallon delivery is normally an exchange: full ones in, empties out,
   // up to what they are holding. Suggested, and the driver changes it.
+  // What they said they would hand over, when they were asked (point 13).
+  const expectedEmpties = stop.empties_expected ?? null;
   const emptiesShown = emptiesTouched ? empties
-    : (carriesReturnables ? String(Math.min(Number(fullsShown) || 0, Math.max(stop.bottlesHeld ?? 0, 0))) : '');
+    : (carriesReturnables
+      ? String(expectedEmpties ?? Math.min(Number(fullsShown) || 0, Math.max(stop.bottlesHeld ?? 0, 0))) : '');
+  // Fewer empties than they said: the driver can add the bottle charge.
+  const shortAtDoor = expectedEmpties !== null && emptiesShown !== ''
+    ? Math.max(0, expectedEmpties - (Number(emptiesShown) || 0)) : 0;
+  const chargeN = charge ? Math.max(0, Math.round(Number(chargeQty || shortAtDoor) || 0)) : 0;
 
   const collectedCents = method ? toCents(collected || '0') : 0;
   const allocatedCents = Object.values(alloc)
@@ -172,12 +199,15 @@ export default function DriverStop() {
         bottlesEmptiesPickedUp: Number(emptiesShown) || 0,
         bottlesLostDamaged: Number(lost) || 0,
         driverNotes: notes || null,
+        bottlesCharged: outcome === 'Delivered' && chargeN > 0 ? chargeN : undefined,
         ...extra,
       });
-      setSaved(`Recorded: ${OUTCOME_WORDS[outcome] ?? outcome}`
+      setSaved(`Recorded: ${extra.remainderTo ? 'Part delivered' : OUTCOME_WORDS[outcome] ?? outcome}`
+        + (extra.remainderTo ? ` (the rest goes ${new Date(`${extra.remainderTo}T12:00:00`).toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short' })})` : '')
+        + (chargeN > 0 && outcome === 'Delivered' ? `, ${chargeN} bottle${chargeN === 1 ? '' : 's'} charged` : '')
         + (extra.rescheduleTo ? ` (moved to ${new Date(`${extra.rescheduleTo}T12:00:00`).toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short' })})` : '')
         + `${paid > 0 ? `, ${money(paid)} ${method.toLowerCase()}` : ''}.`);
-      setMoving(false);
+      setMoving(false); setPartial(false); setCharge(false);
       window.scrollTo({ top: 0, behavior: 'smooth' });
       await load();
     } catch (err) {
@@ -248,6 +278,47 @@ export default function DriverStop() {
     ...d, [id]: String(Math.max((Math.round(Number(d[id]) || 0)) + by, 0)),
   }));
 
+  /*
+   * A payment-only stop (point 10): the driver added it to take money where
+   * there was nothing to deliver. Nothing to do here but say what was taken.
+   */
+  if (!stop.order_id) {
+    return (
+      <div className="stop-screen">
+        <div className="stop-bar">
+          <Link to={back}>‹ {office ? 'The round' : 'My route'}</Link>
+          <strong>Payment only</strong>
+          <span className="muted small">{stop.sheet_zone ?? ''}</span>
+        </div>
+        <section className="panel stop-who">
+          <div className="stop-name">{stop.customer_name}</div>
+          <div className="muted">{stop.delivery_address ?? ''}</div>
+        </section>
+        <section className="panel">
+          <div className="collect-head">
+            <h2 className="side-h" style={{ margin: 0 }}>Payment taken</h2>
+            <div className="owed">{money(Number(stop.payment_amount_cents ?? 0))}</div>
+          </div>
+          <div className="muted small">
+            {(stop.payment_method ?? 'Cash').toLowerCase()} · nothing delivered. It goes on their account when the office settles the round.
+          </div>
+        </section>
+      </div>
+    );
+  }
+
+  const remainderStop = stop.lines.some((l) => (l.ordered_cases ?? l.cases) !== l.cases
+    || (l.ordered_loose ?? l.loose_bottles) !== l.loose_bottles);
+  // Handing over less than is left on any line makes it a partial delivery.
+  const handingLess = stop.lines.some((l) => {
+    const left = l.bottles_per_case > 0 ? l.cases : l.loose_bottles;
+    return Math.max(Math.round(Number(delivered[l.order_line_id] ?? 0)), 0) < left;
+  });
+  const tomorrowOf = (base: string) => {
+    const d = new Date(`${base}T12:00:00Z`); d.setUTCDate(d.getUTCDate() + 1);
+    return d.toISOString().slice(0, 10);
+  };
+
   return (
     <div className="stop-screen">
       <div className="stop-bar">
@@ -303,14 +374,23 @@ export default function DriverStop() {
 
       <section className="panel">
         <h2 className="side-h">What you dropped</h2>
+        {remainderStop && (
+          <div className="notice warn" style={{ margin: '0 0 8px' }}>
+            The rest of an order that was part delivered. Only what is left is shown.
+          </div>
+        )}
         {stop.lines.map((l) => {
           const cased = l.bottles_per_case > 0;
           const ordered = cased ? l.cases : l.loose_bottles;
+          const unit = cased ? (ordered === 1 ? 'case' : 'cases') : (ordered === 1 ? 'bottle' : 'bottles');
           return (
             <div key={l.order_line_id} className="drop-row">
               <div>
                 <strong>{l.product_name.replace(/^Alka Vida\s+/i, '')}</strong>
-                <div className="muted small">ordered {ordered} {cased ? (ordered === 1 ? 'case' : 'cases') : (ordered === 1 ? 'bottle' : 'bottles')}</div>
+                <div className="muted small">
+                  {remainderStop ? `${ordered} ${unit} left to bring` : `ordered ${ordered} ${unit}`}
+                  {l.is_bottle_charge ? ' · bought (short of empties)' : ''}
+                </div>
               </div>
               <div className="stepper big">
                 <button type="button" className="secondary" aria-label={`One fewer ${l.product_name}`}
@@ -340,7 +420,9 @@ export default function DriverStop() {
             <label htmlFor="empties">Empties picked up</label>
             <input id="empties" type="number" min="0" inputMode="numeric" placeholder="0"
                    value={emptiesShown} onChange={(e) => { setEmptiesTouched(true); setEmpties(e.target.value); }} />
-            {carriesReturnables && (stop.bottlesHeld ?? 0) > 0 && (
+            {expectedEmpties !== null ? (
+              <div className="small"><strong>Expect {expectedEmpties} back</strong> (they said when ordering).</div>
+            ) : carriesReturnables && (stop.bottlesHeld ?? 0) > 0 && (
               <div className="muted small">They have {stop.bottlesHeld} of our bottles.</div>
             )}
           </div>
@@ -351,6 +433,21 @@ export default function DriverStop() {
           </div>
         </div>
         <p className="muted small" style={{ margin: 0 }}>Lost or damaged bottles are a business loss, never charged to the customer.</p>
+        {carriesReturnables && stop.bottleCharge && !delivered_ && (shortAtDoor > 0 || charge) && (
+          <div className="bottle-box">
+            <label className="check" style={{ margin: 0 }}>
+              <input type="checkbox" checked={charge} onChange={(e) => { setCharge(e.target.checked); setChargeQty(String(shortAtDoor || 1)); }} />
+              <strong>{shortAtDoor > 0 ? `${shortAtDoor} empt${shortAtDoor === 1 ? 'y' : 'ies'} short.` : ''} Add the bottle charge</strong>
+            </label>
+            {charge && (
+              <div className="row" style={{ alignItems: 'center', gap: 8, marginTop: 6 }}>
+                <input type="number" min="1" inputMode="numeric" style={{ width: 80 }} aria-label="Bottles to charge"
+                       value={chargeQty} onChange={(e) => setChargeQty(e.target.value)} />
+                <span className="small">× {money(stop.bottleCharge.priceCents)} = <strong>{money(chargeN * stop.bottleCharge.priceCents)}</strong> + GCT, on today's invoice. The bottles are theirs to keep.</span>
+              </div>
+            )}
+          </div>
+        )}
       </section>
 
       <section className="panel">
@@ -358,6 +455,9 @@ export default function DriverStop() {
           <h2 className="side-h" style={{ margin: 0 }}>To collect</h2>
           <div className="owed">{money(stop.amountOwedCents)}</div>
         </div>
+        {(stop.accountBalanceCents ?? 0) > 0 && (
+          <div className="small">On their account altogether: <strong>{money(stop.accountBalanceCents!)}</strong></div>
+        )}
         <div className="muted small">
           incl. GCT · {onCycle ? `billed ${stop.invoice_cycle!.toLowerCase()}, so paying now is optional`
             : onTerms ? `on ${stop.payment_terms} terms, so paying now is optional` : 'cash on delivery'}
@@ -387,9 +487,39 @@ export default function DriverStop() {
 
       {!delivered_ && (
         <>
-          <button type="button" className="big-go" disabled={busy} onClick={() => record('Delivered')}>
-            {busy ? 'Saving…' : 'Delivered'}
+          <button type="button" className="big-go" disabled={busy || partial} onClick={() => record('Delivered')}>
+            {busy ? 'Saving…' : handingLess ? 'Delivered (they took less, nothing more to come)' : 'Delivered'}
           </button>
+          <button type="button" className="secondary wide" style={{ marginTop: 8 }} disabled={busy} aria-expanded={partial}
+                  onClick={() => { setPartial(!partial); if (!restOn) setRestOn(tomorrowOf(stop.sheet_date ?? new Date().toISOString().slice(0, 10))); }}>
+            Partially delivered: the rest another day
+          </button>
+          {partial && (
+            <section className="part-box">
+              <h2 className="side-h" style={{ marginTop: 0 }}>Part delivered</h2>
+              <p className="small" style={{ marginTop: 0 }}>
+                Set <strong>What you dropped</strong> above to what you handed over. We invoice that now; the rest
+                goes on the round for the day you pick, and is invoiced when it is delivered.
+              </p>
+              <div className="field">
+                <label htmlFor="rest-day">When does the rest go?</label>
+                <input id="rest-day" type="date" value={restOn} min={tomorrowOf(stop.sheet_date ?? new Date().toISOString().slice(0, 10))}
+                       style={{ width: '100%', boxSizing: 'border-box' }} onChange={(e) => setRestOn(e.target.value)} />
+              </div>
+              {!handingLess && (
+                <div className="notice warn" style={{ margin: '0 0 8px' }}>
+                  Everything left is set to be handed over. Lower what you dropped above, or press Delivered.
+                </div>
+              )}
+              <div className="row" style={{ gap: 8 }}>
+                <button type="button" disabled={busy || !restOn || !handingLess}
+                        onClick={() => record('Delivered', { remainderTo: restOn })}>
+                  Record part delivery
+                </button>
+                <button type="button" className="secondary" onClick={() => setPartial(false)}>Cancel</button>
+              </div>
+            </section>
+          )}
           <div className="not-delivered">
             <button type="button" className="secondary" disabled={busy} onClick={() => record('Customer Not Home')}>Not home</button>
             <button type="button" className="secondary" disabled={busy} onClick={() => record('Refused')}>Refused</button>
@@ -397,12 +527,18 @@ export default function DriverStop() {
                     onClick={() => {
                       setMoving(!moving);
                       if (!moveTo) {
-                        const base = stop.sheet_date ?? new Date().toISOString().slice(0, 10);
-                        const d = new Date(`${base}T12:00:00Z`); d.setUTCDate(d.getUTCDate() + 1);
-                        setMoveTo(d.toISOString().slice(0, 10));
+                        setMoveTo(tomorrowOf(stop.sheet_date ?? new Date().toISOString().slice(0, 10)));
                       }
                     }}>Another day</button>
+            <button type="button" className="secondary" disabled={busy || !method || collectedCents <= 0}
+                    title={method ? '' : 'Choose how they paid first'}
+                    onClick={() => record('Payment Only')}>Payment only</button>
           </div>
+          {!method && (
+            <p className="muted small" style={{ textAlign: 'center', margin: '4px 0 0' }}>
+              Took money but delivered nothing? Choose how they paid above, then Payment only.
+            </p>
+          )}
           {moving && (
             <section className="panel" style={{ marginTop: 10 }}>
               <h2 className="side-h">Deliver it another day</h2>

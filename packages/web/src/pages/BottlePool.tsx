@@ -10,6 +10,8 @@ interface Pool {
 interface Holding {
   customer_id: string; name: string; phone: string | null; delivery_zone: string | null;
   delivered: number; returned: number; lost: number; holding: number;
+  /** Bought for empties short (7 Oct 2026): theirs, so not in Holding. */
+  sold?: number;
 }
 interface Movement {
   id: string; quantity: number; direction: string; reference: string | null;
@@ -180,7 +182,7 @@ export default function BottlePool({ session }: { session: Session }) {
             <tr>
               <th>Customer</th><th>Zone</th>
               <th className="num">Delivered</th><th className="num">Returned</th>
-              <th className="num">Lost</th><th className="num">Holding now</th>
+              <th className="num">Lost</th><th className="num">Bought (theirs)</th><th className="num">Holding now</th>
             </tr>
           </thead>
           <tbody>
@@ -194,6 +196,7 @@ export default function BottlePool({ session }: { session: Session }) {
                 <td className="num">{Number(h.delivered)}</td>
                 <td className="num">{Number(h.returned)}</td>
                 <td className="num">{Number(h.lost) || '—'}</td>
+                <td className="num">{Number(h.sold) || '—'}</td>
                 <td className="num">
                   <strong>{Number(h.holding)}</strong>
                 </td>

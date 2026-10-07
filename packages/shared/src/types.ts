@@ -20,6 +20,8 @@ export type DeliveryMode = (typeof DELIVERY_MODES)[number];
 
 export const STOP_OUTCOMES = [
   'Pending', 'Delivered', 'Customer Not Home', 'Refused', 'Rescheduled', 'Other',
+  // The driver took a payment and delivered nothing (7 Oct 2026, point 10).
+  'Payment Only',
 ] as const;
 export type StopOutcome = (typeof STOP_OUTCOMES)[number];
 

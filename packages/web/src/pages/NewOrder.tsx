@@ -22,6 +22,8 @@ interface Product {
   price_per_bottle_cents: number;
   is_returnable?: boolean;
   special_price?: boolean;
+  /** The 5-gallon bottle itself (7 Oct 2026, point 13). */
+  is_bottle_charge?: boolean;
 }
 
 interface Customer {
@@ -35,6 +37,8 @@ interface Customer {
   zone_run_days?: string[] | null;
   invoice_cycle?: string | null;
   gct_exempt?: boolean;
+  /** A walk-in pays in full at the counter (point 12). */
+  is_walk_in?: boolean;
 }
 
 interface Address {
@@ -212,6 +216,8 @@ export default function NewOrder() {
     try {
       const made = await api.post<{ id: string }>('/api/customers', {
         name: walkIn.name, phone: walkIn.phone, email: walkIn.email,
+        // A walk-in pays in full (point 12); untick on their record to give them an account.
+        isWalkIn: true,
       });
       setCustomers(await api.get<Customer[]>('/api/customers'));
       setCustomerId(made.id);
@@ -231,6 +237,23 @@ export default function NewOrder() {
    * Live totals, mirroring the server calculation exactly: GCT is charged on
    * the POST-discount subtotal, so the figure shown is the real amount.
    */
+  /*
+   * 5-gallon empties (point 13): full bottles on the order, against the
+   * empties they hand over. The shortfall is bought, as "5-gallon bottle" at
+   * its price on Products - unless the office has put the bottle on the
+   * order itself.
+   */
+  const bottleProduct = products.find((p) => p.is_bottle_charge) ?? null;
+  const fullFives = lines.reduce((n, l) => {
+    const p = productOf(l.productId);
+    return p?.is_returnable ? n + l.qty * (p.bottles_per_case > 0 ? p.bottles_per_case : 1) : n;
+  }, 0);
+  const bottleOnOrder = !!bottleProduct && lines.some((l) => l.productId === bottleProduct.id);
+  const emptiesN = emptiesBack === '' ? null : Math.max(0, Math.round(Number(emptiesBack)) || 0);
+  const shortfall = fullFives > 0 && emptiesN !== null && !bottleOnOrder && bottleProduct
+    ? Math.max(0, fullFives - emptiesN) : 0;
+  const isWalkIn = deliveryMode === 'Counter' && (!customerId || !!customer?.is_walk_in);
+
   const totals = useMemo(() => {
     let subtotal = 0;
     for (const l of lines) {
@@ -238,13 +261,14 @@ export default function NewOrder() {
       if (!p || l.qty <= 0) continue;
       subtotal += l.qty * priceOf(p, l);
     }
+    if (shortfall > 0 && bottleProduct) subtotal += shortfall * priceOf(bottleProduct);
     const fixed = discountAs === '$' ? Math.max(0, Math.round((Number(discount) || 0) * 100)) : 0;
     const pct = discountAs === '%' ? Math.min(Math.max(Number(discount) || 0, 0), 100) : 0;
     const discountAmount = fixed > 0 ? Math.min(fixed, subtotal) : Math.round(subtotal * (pct / 100));
     const net = subtotal - discountAmount;
     const gct = chargeGct ? Math.round(net * GCT_RATE) : 0;
     return { subtotal, discountAmount, gct, grandTotal: net + gct, fixed, pct };
-  }, [lines, discount, discountAs, chargeGct, products]);
+  }, [lines, discount, discountAs, chargeGct, products, shortfall]);
 
   const setQty = (id: string, qty: number) => setLines((cur) => cur.map((l) => (
     l.productId === id ? { ...l, qty: Math.max(0, Math.min(99999, Math.round(qty) || 0)) } : l)));
@@ -295,20 +319,34 @@ export default function NewOrder() {
       setBusy(false);
       return;
     }
+    if (fullFives > 0 && emptiesN === null && !bottleOnOrder) {
+      setError(deliveryMode === 'Counter' ? 'How many 5-gallon empties did they hand in? Put 0 if none.'
+        : 'How many 5-gallon empties will they hand over? Put 0 if none.');
+      setBusy(false);
+      return;
+    }
+    const paidTyped = paidNow.trim() === '' ? null : Math.round(Number(paidNow) * 100);
+    if (deliveryMode === 'Counter' && isWalkIn && paidTyped !== null && paidTyped < totals.grandTotal) {
+      setError(`A walk-in pays in full (${money(totals.grandTotal)}). To take part payment, choose their customer account first, or add them.`);
+      setBusy(false);
+      return;
+    }
 
-    const who = customer?.name ?? 'the customer';
+    const who = customer?.name ?? (deliveryMode === 'Counter' ? 'a walk-in' : 'the customer');
     try {
       if (deliveryMode === 'Counter') {
         // A counter sale creates the invoice and payment in one motion.
         const sale = await api.post<{
           invoiceNumber: string; grandTotalCents: number; balanceCents: number;
         }>('/api/counter-sale', {
-          customerId,
+          // Blank: a walk-in, on the shared Cash Walk-In record.
+          customerId: customerId || null,
           lines: payloadLines,
           ...money_,
-          amountPaidCents: paidNow ? Math.round(Number(paidNow) * 100) : 0,
+          // Blank means paid in full (a walk-in always is).
+          amountPaidCents: paidTyped ?? (isWalkIn ? null : totals.grandTotal),
           method,
-          emptiesReturned: Number(emptiesBack) || 0,
+          emptiesReturned: fullFives > 0 ? (emptiesN ?? 0) : null,
           idempotencyKey: idempotencyKey('counter'),
         });
         setResult({
@@ -328,6 +366,7 @@ export default function NewOrder() {
           customerPo: customerPo || null,
           ...money_,
           lines: payloadLines,
+          emptiesExpected: fullFives > 0 && !bottleOnOrder ? emptiesN : null,
         });
         const warn = [...(order.warnings ?? [])];
         let repeatText = '';
@@ -374,6 +413,7 @@ export default function NewOrder() {
       }
       setLines([]);
       setPaidNow('');
+      setEmptiesBack('');
       setDiscount('0');
       setDiscountAs('%');
       setRepeat(false);
@@ -435,6 +475,9 @@ export default function NewOrder() {
               <label htmlFor="cust">Customer</label>
               <CustomerPicker id="cust" customers={customers} value={customerId}
                               onChange={setCustomerId} />
+              {deliveryMode === 'Counter' && !customerId && (
+                <div className="muted small">Leave it blank for a walk-in: they pay in full. Part payment needs their customer account.</div>
+              )}
               {customer && (
                 <div className="muted small cust-summary">
                   {summary}
@@ -625,6 +668,21 @@ export default function NewOrder() {
             {lines.length === 0 && (
               <p className="muted" style={{ marginTop: 0 }}>Nothing yet. Tap a product to add it.</p>
             )}
+            {fullFives > 0 && deliveryMode !== 'Counter' && !bottleOnOrder && (
+              <div className="bottle-box">
+                <div className="field" style={{ marginBottom: 4 }}>
+                  <label htmlFor="emp-exp">5-gallon empties they will hand over</label>
+                  <input id="emp-exp" type="number" min="0" style={{ width: 110 }} value={emptiesBack}
+                         placeholder={String(fullFives)} onChange={(e) => setEmptiesBack(e.target.value)} />
+                </div>
+                <div className="small">
+                  {fullFives} full going out.{' '}
+                  {shortfall > 0 && bottleProduct
+                    ? <strong>{shortfall} short: {shortfall} × {shortName(bottleProduct.name)} added at {money(priceOf(bottleProduct))} each. They keep them.</strong>
+                    : 'Fewer empties than full bottles and the difference is charged as bottles, which they then own.'}
+                </div>
+              </div>
+            )}
             {notYet.length > 0 && (
               <div className="add-row">
                 <span className="muted small">Add:</span>
@@ -693,6 +751,9 @@ export default function NewOrder() {
           )}
 
           <section className="panel totals-card">
+            {shortfall > 0 && bottleProduct && (
+              <div className="total-line muted"><span>incl. {shortfall} × {shortName(bottleProduct.name)}</span><span>{money(shortfall * priceOf(bottleProduct))}</span></div>
+            )}
             <div className="total-line"><span>Subtotal</span><span>{money(totals.subtotal)}</span></div>
             <div className="total-line">
               <label htmlFor="disc" style={{ margin: 0, color: 'inherit', fontSize: 'inherit' }}>Discount</label>
@@ -726,6 +787,7 @@ export default function NewOrder() {
             <div className="total-line grand"><span>Total</span><span>{money(totals.grandTotal)}</span></div>
 
             {deliveryMode === 'Counter' ? (
+              <>
               <div className="row" style={{ marginTop: 12 }}>
                 <div className="field" style={{ flex: 1 }}>
                   <label htmlFor="meth">Paid by</label>
@@ -739,15 +801,27 @@ export default function NewOrder() {
                   <input id="paid" type="number" step="0.01" min="0" value={paidNow}
                          placeholder={(totals.grandTotal / 100).toFixed(2)} style={{ width: '100%' }}
                          onChange={(e) => setPaidNow(e.target.value)} />
+                  <div className="muted small">Blank = paid in full.</div>
                 </div>
-                {lines.some((l) => products.find((p) => p.id === l.productId)?.is_returnable) && (
+                {fullFives > 0 && !bottleOnOrder && (
                   <div className="field" style={{ flex: 1 }}>
                     <label htmlFor="empt">5-gal empties handed in</label>
-                    <input id="empt" type="number" min="0" value={emptiesBack} placeholder="0" style={{ width: '100%' }}
+                    <input id="empt" type="number" min="0" value={emptiesBack} placeholder={String(fullFives)} style={{ width: '100%' }}
                            onChange={(e) => setEmptiesBack(e.target.value)} />
                   </div>
                 )}
               </div>
+              {isWalkIn && (
+                <div className="notice info" style={{ margin: '8px 0 0' }}>
+                  A walk-in pays in full. To take part payment, choose their customer account above.
+                </div>
+              )}
+              {shortfall > 0 && bottleProduct && (
+                <div className="small" style={{ marginTop: 6 }}>
+                  {shortfall} empt{shortfall === 1 ? 'y' : 'ies'} short: {shortfall} × {shortName(bottleProduct.name)} at {money(priceOf(bottleProduct))} is in the total. They keep those bottles.
+                </div>
+              )}
+              </>
             ) : (
               <p className="muted small" style={{ margin: '8px 0 0' }}>
                 {customer?.invoice_cycle === 'Weekly' || customer?.invoice_cycle === 'Monthly'
@@ -757,12 +831,12 @@ export default function NewOrder() {
             )}
 
             <button className="wide" style={{ marginTop: 12 }}
-                    disabled={busy || !customerId || lines.every((l) => l.qty <= 0)}>
+                    disabled={busy || (!customerId && deliveryMode !== 'Counter') || lines.every((l) => l.qty <= 0)}>
               {busy ? 'Saving…'
                 : deliveryMode === 'Counter' ? 'Complete counter sale'
                   : repeat ? 'Create standing order' : 'Create order'}
             </button>
-            {!customerId && <p className="muted small" style={{ margin: '6px 0 0' }}>Choose the customer first.</p>}
+            {!customerId && deliveryMode !== 'Counter' && <p className="muted small" style={{ margin: '6px 0 0' }}>Choose the customer first.</p>}
           </section>
         </aside>
       </form>

@@ -87,6 +87,8 @@ export function statusTone(status: string): string {
   switch (status) {
     case 'Paid': return 'ok';
     case 'Partial': return 'warn';
+    case 'Part delivered': return 'warn';
+    case 'Out for delivery': return 'info';
     case 'Overdue': return 'bad';
     case 'Credit Note': return 'info';
     case 'Cancelled': return 'muted';

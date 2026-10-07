@@ -446,7 +446,9 @@ describe('Purchasing', () => {
     assert.equal(Number(edited.grand_total_cents), 500_000 + 75_000 + 1_875);
 
     await deletePurchaseOrder(f.db, f.office, po.id);
-    assert.equal(await getPurchaseOrder(f.db, po.id), null);
+    // 7 Oct 2026 (point 14): deleting with nothing received keeps the PO,
+    // marked Cancelled, rather than removing it.
+    assert.equal(((await getPurchaseOrder(f.db, po.id)) as { status: string }).status, 'Cancelled');
   });
 
   test('once goods are received, a PO can be neither changed nor deleted', async () => {

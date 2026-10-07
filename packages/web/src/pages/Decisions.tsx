@@ -98,6 +98,7 @@ export default function Decisions({ session }: { session: Session }) {
   const [error, setError] = useState<string | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
   const [link, setLink] = useState<string | null>(null);
+  const [emailed, setEmailed] = useState(false);
   const [busy, setBusy] = useState(false);
 
   const [openFor, setOpenFor] = useState<string | null>(null);
@@ -138,7 +139,7 @@ export default function Decisions({ session }: { session: Session }) {
 
   const approve = (a: Application) => act(async () => {
     setLink(null);
-    const r = await api.post<{ invitation: { link: string } | null }>(
+    const r = await api.post<{ invitation: { link: string } | null; emailed?: boolean; emailProblem?: string }>(
       `/api/applications/${a.id}/approve`,
       {
         priceTierId: terms.priceTierId || null,
@@ -147,8 +148,12 @@ export default function Decisions({ session }: { session: Session }) {
       },
     );
     setLink(r.invitation?.link ?? null);
+    setEmailed(!!r.emailed);
     setOpenFor(null);
-    return `${nameOf(a)} is now a customer.`;
+    // Approving emails them at once (7 Oct 2026, point 1).
+    return `${nameOf(a)} is now a customer. `
+      + (r.emailed ? `We emailed ${a.email} that the account is approved, with the link to set a password.`
+        : `The approval email did not go${r.emailProblem ? ` (${r.emailProblem})` : ''}: send them the link below.`);
   }, 'Could not approve');
 
   const decline = (a: Application) => act(async () => {
@@ -339,10 +344,9 @@ export default function Decisions({ session }: { session: Session }) {
       {msg && <div className="notice ok">{msg}</div>}
       {link && (
         <div className="notice info">
-          <strong>Send them this link so they can choose a password.</strong>
+          <strong>{emailed ? 'The link to choose a password (already emailed to them).' : 'Send them this link so they can choose a password.'}</strong>
           <p className="small" style={{ margin: '6px 0' }}>
-            It works once and expires in 7 days. If email is set up it has already
-            gone to them; otherwise pass it on yourself.
+            It works once and expires in 7 days. {emailed ? 'Keep it here in case they ask for it on WhatsApp.' : 'Pass it on by WhatsApp or email.'}
           </p>
           <input readOnly value={link} style={{ width: '100%' }}
                  onFocus={(e) => e.currentTarget.select()} />

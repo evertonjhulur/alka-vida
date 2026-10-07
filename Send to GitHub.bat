@@ -36,7 +36,7 @@ REM 1. A checkpoint of everything, so what goes up is exactly what is here.
 "%GIT%" add -A
 "%GIT%" diff --cached --quiet
 if errorlevel 1 (
-  "%GIT%" commit -q -m "Revision list: quotes, credit notes, customer setup, cycle invoicing, emails, purchasing (30 Sep 2026)" -m "Details in HANDOFF.md." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>" -m "Claude-Session: https://claude.ai/code/session_01J9gdougoZWY4HMJWNqidiq"
+  "%GIT%" commit -q -m "Everton's round of 7 Oct 2026: portal, emails, office, purchasing (14 points)" -m "Details in HANDOFF.md." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>" -m "Claude-Session: https://claude.ai/code/session_01VoXQGrGq6CUsFujNwTgV52"
 )
 
 REM 2. Point at GitHub and send. The first time, a window opens asking you

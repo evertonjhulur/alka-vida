@@ -15,6 +15,8 @@ interface Entry {
 interface BottleAccount {
   openingHolding: number; delivered: number; returned: number;
   lost: number; closingHolding: number;
+  /** Bought outright (fewer empties than full bottles): theirs now. */
+  sold?: number;
 }
 
 interface StatementData {
@@ -30,6 +32,12 @@ interface Customer { id: string; name: string }
 /** Filters deliberately omit any "credit" category: an unattached payment is
  *  simply a payment, and a credit note is a line within Invoices. */
 const FILTERS = ['All', 'Invoices', 'Payments'] as const;
+/**
+ * Invoices in one state (Everton, 7 Oct 2026, point 11): the statement then
+ * lists those invoices and the payments against them, and every balance on
+ * it - opening, running, closing - is worked out over just those.
+ */
+const STATES = ['', 'Open', 'Paid', 'Partially paid', 'Overdue'] as const;
 
 export function StatementView(
   { customerId, showPicker }: { customerId?: string; showPicker?: boolean },
@@ -39,6 +47,7 @@ export function StatementView(
   const [from, setFrom] = useState('');
   const [to, setTo] = useState('');
   const [filter, setFilter] = useState<(typeof FILTERS)[number]>('All');
+  const [state, setState] = useState<(typeof STATES)[number]>('');
   const [data, setData] = useState<StatementData | null>(null);
   const [bottles, setBottles] = useState<BottleAccount | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -53,6 +62,7 @@ export function StatementView(
     const q = new URLSearchParams({ filter });
     if (from) q.set('from', from);
     if (to) q.set('to', to);
+    if (state) q.set('status', state);
     api.get<StatementData>(`/api/customers/${selected}/statement?${q}`)
       .then((d) => { setData(d); setError(null); })
       .catch((e) => setError(e.message));
@@ -64,7 +74,7 @@ export function StatementView(
     if (to) bq.set('to', to);
     api.get<BottleAccount>(`/api/customers/${selected}/bottles?${bq}`)
       .then(setBottles).catch(() => setBottles(null));
-  }, [selected, from, to, filter]);
+  }, [selected, from, to, filter, state]);
 
   /**
    * The statement as a document, built on the server.
@@ -80,6 +90,7 @@ export function StatementView(
       if (from) params.set('from', from);
       if (to) params.set('to', to);
       if (filter !== 'All') params.set('filter', filter);
+      if (state) params.set('status', state);
       const blob = await api.getBlob(
         `/api/customers/${selected}/statement.pdf?${params.toString()}`,
       );
@@ -111,7 +122,7 @@ export function StatementView(
     const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv' }));
     const a = document.createElement('a');
     a.href = url;
-    a.download = `statement-${data.customerName.replace(/\W+/g, '-')}.csv`;
+    a.download = `statement-${data.customerName.replace(/\W+/g, '-')}${state ? `-${state.replace(/\W+/g, '-')}` : ''}.csv`;
     a.click();
     URL.revokeObjectURL(url);
   }
@@ -146,6 +157,13 @@ export function StatementView(
             </select>
           </div>
           <div className="field">
+            <label htmlFor="state">Invoices</label>
+            <select id="state" value={state}
+                    onChange={(e) => setState(e.target.value as typeof state)}>
+              {STATES.map((s) => <option key={s} value={s}>{s || 'Any state'}</option>)}
+            </select>
+          </div>
+          <div className="field">
             <button className="secondary" disabled={!data} onClick={exportCsv}>
               Export for accountant
             </button>
@@ -174,7 +192,10 @@ export function StatementView(
 
       {data && (
         <div className="panel">
-          <h2 style={{ marginTop: 0 }}>{data.customerName}</h2>
+          <h2 style={{ marginTop: 0 }}>
+            {data.customerName}
+            {state && <span className="chip info" style={{ marginLeft: 8, verticalAlign: 'middle' }}>{state} invoices only</span>}
+          </h2>
           {/*
             * A statement stays a TABLE on a phone, unlike the order and
             * invoice lists. It is a running ledger - the balance column only
@@ -232,6 +253,11 @@ export function StatementView(
               <div className="age">
                 <b>Collected</b><span>−{bottles.returned}</span>
               </div>
+              {(bottles.sold ?? 0) > 0 && (
+                <div className="age">
+                  <b>Bought (theirs)</b><span>−{bottles.sold}</span>
+                </div>
+              )}
               <div className="age">
                 <b>Held now</b><span>{bottles.closingHolding}</span>
               </div>
@@ -242,7 +268,7 @@ export function StatementView(
             {/* Paid more than invoiced is IN CREDIT. "Balance due -$275" is a
                 sentence nobody should have to decode, and the printed
                 statement says it the same way. */}
-            <span>{data.closingBalanceCents < 0 ? 'In credit' : 'Balance due'}</span>
+            <span>{data.closingBalanceCents < 0 ? 'In credit' : state ? `Balance on ${state.toLowerCase()} invoices` : 'Balance due'}</span>
             <span>{money(Math.abs(data.closingBalanceCents))}</span>
           </div>
         </div>

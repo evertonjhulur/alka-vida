@@ -50,6 +50,13 @@ export interface CreateOrderInput {
   isRecurring?: boolean;
   recurrencePattern?: RecurrencePattern | null;
   parentRecurringId?: string | null;
+  /**
+   * 5-gallon empties the customer will hand over (7 Oct 2026, point 13).
+   * Fewer than the full 5-gallon bottles ordered and the difference is added
+   * as "5-gallon bottle" at its price on the Products screen. Left out (null),
+   * nothing is added - older screens and standing orders.
+   */
+  emptiesExpected?: number | null;
 }
 
 export interface CreateOrderResult {
@@ -175,7 +182,10 @@ export async function createOrder(
 ): Promise<CreateOrderResult> {
   return db.tx(async (t) => {
     const warnings: string[] = [];
-    const lines = await resolveLines(t, input.customerId, input.lines);
+    const empties = input.emptiesExpected == null || (input.emptiesExpected as unknown) === ''
+      ? null : Math.max(0, Math.round(Number(input.emptiesExpected) || 0));
+    const lines = await resolveLines(t, input.customerId,
+      await withBottleShortfall(t, input.lines, empties));
 
     const cust = await t.one<{ gct_exempt: boolean }>(
       `SELECT gct_exempt FROM customers WHERE id = $1`, [input.customerId],
@@ -208,9 +218,9 @@ export async function createOrder(
           source, delivery_mode, discount_percent,
           subtotal_cents, discount_amount_cents, gct_cents, grand_total_cents,
           discount_fixed_cents, gct_exempt, address_id, quotation_id,
-          customer_po, needs_review)
+          customer_po, needs_review, empties_expected)
        VALUES ($1,$2,COALESCE($3::date, business_today()),$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,
-               $17,$18,$19,$20,$21,$22)
+               $17,$18,$19,$20,$21,$22,$23)
        RETURNING id`,
       [
         orderNumber, input.customerId, input.orderDate ?? null,
@@ -220,7 +230,7 @@ export async function createOrder(
         input.source ?? 'Admin', input.deliveryMode, pct,
         totals.subtotal, totals.discountAmount, totals.gct, totals.grandTotal,
         fixed, gctExempt, input.addressId ?? null, input.quotationId ?? null,
-        input.customerPo?.trim() || null, input.needsReview === true,
+        input.customerPo?.trim() || null, input.needsReview === true, empties,
       ],
     );
 
@@ -296,6 +306,8 @@ export interface PortalOrderInput {
   addressId?: string | null;
   /** Their own purchase order number, if their accounts department needs one. */
   customerPo?: string | null;
+  /** How many 5-gallon empties they will hand over (7 Oct 2026, point 13). */
+  emptiesExpected?: number | null;
 }
 
 /**
@@ -386,6 +398,7 @@ export async function createPortalOrder(
     customerPo: input.customerPo?.trim() || null,
     addressId,
     source: 'Portal',
+    emptiesExpected: input.emptiesExpected ?? null,
     // Not the customer's to decide. A discount is the office's to give, a
     // standing order is an arrangement rather than an order, how it will be
     // paid is settled at delivery, and the order date is today.
@@ -781,6 +794,24 @@ export async function cancelOrder(
   });
 }
 
+/**
+ * What happened to an order on the way (7 Oct 2026, points 8 and 9), oldest
+ * first: each move to another day ("Rescheduled from Mon 5 Oct to Wed 7
+ * Oct", and why) and each part delivery ("Part delivered on ..., the rest on
+ * ..."). Shown on the office's Orders screen and on the customer's portal.
+ */
+export const ORDER_EVENTS = `(
+  SELECT COALESCE(json_agg(json_build_object(
+           'kind', CASE WHEN ev.rescheduled_to IS NOT NULL THEN 'Rescheduled' ELSE 'Part delivered' END,
+           'from', ev.day, 'to', COALESCE(ev.rescheduled_to, ev.remainder_to)::text,
+           'reason', ev.reschedule_reason) ORDER BY ev.day, ev.created), '[]'::json)
+    FROM (SELECT s9.rescheduled_to, s9.remainder_to, s9.reschedule_reason,
+                 d9.delivery_date::text AS day, d9.created_at AS created
+            FROM delivery_stops s9 JOIN delivery_sheets d9 ON d9.id = s9.delivery_sheet_id
+           WHERE s9.order_id = o.id
+             AND ((s9.stop_outcome = 'Rescheduled' AND s9.rescheduled_to IS NOT NULL)
+                  OR (s9.stop_outcome = 'Delivered' AND s9.remainder_to IS NOT NULL))) ev)`;
+
 /** Orders for the office list, newest first. */
 export async function listOrders(
   db: Db,
@@ -810,7 +841,16 @@ export async function listOrders(
               WHERE oli.order_id = o.id) AS lines_summary,
             st.id AS stop_id, st.stop_outcome, ds.id AS sheet_id, ds.zone AS sheet_zone,
             ds.delivery_date AS sheet_date, ds.status AS sheet_status,
-            (ds.started_at IS NOT NULL) AS sheet_started
+            (ds.started_at IS NOT NULL) AS sheet_started,
+            ${ORDER_EVENTS} AS events,
+            CASE WHEN o.status = 'Partially Delivered' THEN (
+              SELECT string_agg(
+                       CASE WHEN p.bottles_per_case > 0
+                            THEN GREATEST(oli.cases - oli.delivered_cases, 0) || ' cs '
+                            ELSE GREATEST(oli.loose_bottles - oli.delivered_loose, 0) || ' x ' END || p.name,
+                       ', ' ORDER BY p.name)
+                FROM order_line_items oli JOIN products p ON p.id = oli.product_id
+               WHERE oli.order_id = o.id AND oli.delivered_total < oli.total_bottles) END AS remaining_summary
      FROM customer_orders o
      JOIN customers c ON c.id = o.customer_id
      LEFT JOIN LATERAL (
@@ -832,7 +872,7 @@ export async function listOrders(
 }
 
 export async function getOrder(db: Db, orderId: string) {
-  const order = await db.maybeOne(`SELECT * FROM customer_orders WHERE id = $1`, [orderId]);
+  const order = await db.maybeOne(`SELECT o.*, ${ORDER_EVENTS} AS events FROM customer_orders o WHERE o.id = $1`, [orderId]);
   if (!order) return null;
   const lines = await db.query(
     `SELECT oli.*, p.name AS product_name, p.bottles_per_case
@@ -867,4 +907,161 @@ export async function refreshOrderStatus(t: Queryable, orderId: string): Promise
 
   await t.query(`UPDATE customer_orders SET status = $2 WHERE id = $1`, [orderId, status]);
   return status;
+}
+
+/* ------------------------------------------------------------------ */
+/* 5-gallon bottles bought (Everton, 7 Oct 2026, point 13)             */
+/* ------------------------------------------------------------------ */
+
+/**
+ * The product that IS the 5-gallon bottle, sold on its own when a customer
+ * hands over fewer empties than the full bottles they take. Its price is set
+ * on the Products screen like any other ($1,200 to start); nothing here
+ * knows the figure.
+ */
+export async function bottleChargeProduct(t: Queryable): Promise<{
+  id: string; name: string; price_per_bottle_cents: number; active: boolean;
+}> {
+  const found = await t.maybeOne<{ id: string; name: string; price_per_bottle_cents: number; active: boolean }>(
+    `SELECT id, name, price_per_bottle_cents, active FROM products
+     WHERE is_bottle_charge ORDER BY active DESC, created_at LIMIT 1`,
+  );
+  if (found) return found;
+  // First use (or first start): put it on the Products screen at $1,200,
+  // where the office changes it like any other price.
+  return t.one(
+    `INSERT INTO products (name, size, bottles_per_case, price_per_case_cents,
+                           price_per_bottle_cents, is_returnable, is_bottle_charge)
+     VALUES ('5-gallon bottle', '5gal', 0, 0, 120000, false, true)
+     RETURNING id, name, price_per_bottle_cents, active`,
+  );
+}
+
+/** Full 5-gallon (returnable) bottles on a set of lines. */
+async function returnableBottles(t: Queryable, lines: readonly OrderLineInput[]): Promise<number> {
+  let n = 0;
+  for (const l of lines) {
+    const p = await t.maybeOne<{ is_returnable: boolean; bottles_per_case: number }>(
+      `SELECT is_returnable, bottles_per_case FROM products WHERE id = $1`, [l.productId],
+    );
+    if (p?.is_returnable) n += totalBottles(num(p.bottles_per_case), l.cases ?? 0, l.looseBottles ?? 0);
+  }
+  return n;
+}
+
+/**
+ * The lines as ordered, plus bottles for any shortfall in empties. A line
+ * for the bottle the office typed in themselves is left as it is.
+ */
+export async function withBottleShortfall(
+  t: Queryable, lines: readonly OrderLineInput[], emptiesExpected: number | null,
+): Promise<OrderLineInput[]> {
+  if (emptiesExpected === null) return [...lines];
+  const short = (await returnableBottles(t, lines)) - emptiesExpected;
+  if (short <= 0) return [...lines];
+  const bottle = await bottleChargeProduct(t);
+  if (!bottle.active) return [...lines];
+  if (lines.some((l) => l.productId === bottle.id)) return [...lines];
+  return short > 0 ? [...lines, { productId: bottle.id, looseBottles: short }] : [...lines];
+}
+
+/** Recalculate an order's stored totals from its lines (same sum as invoicing). */
+export async function recomputeOrderTotals(t: Queryable, orderId: string): Promise<void> {
+  const o = await t.one<{ discount_percent: number; discount_fixed_cents: number; gct_exempt: boolean }>(
+    `SELECT discount_percent, discount_fixed_cents, gct_exempt FROM customer_orders WHERE id = $1`, [orderId],
+  );
+  const current = await t.query<{ line_total: number }>(
+    `SELECT CASE WHEN p.bottles_per_case > 0
+                 THEN oli.cases * oli.price_per_case_cents
+                 ELSE oli.loose_bottles * oli.price_per_bottle_cents END AS line_total
+     FROM order_line_items oli JOIN products p ON p.id = oli.product_id
+     WHERE oli.order_id = $1`, [orderId],
+  );
+  const fixed = num(o.discount_fixed_cents);
+  const totals = computeTotals(current.map((l) => ({ lineTotal: num(l.line_total) })),
+    fixed > 0 ? 0 : num(o.discount_percent), !o.gct_exempt, fixed);
+  await t.query(
+    `UPDATE customer_orders SET subtotal_cents = $2, discount_amount_cents = $3,
+       gct_cents = $4, grand_total_cents = $5 WHERE id = $1`,
+    [orderId, totals.subtotal, totals.discountAmount, totals.gct, totals.grandTotal],
+  );
+}
+
+/**
+ * The driver adds the bottle charge at the door (fewer empties than
+ * expected): n more "5-gallon bottle" on the order, at the customer's price
+ * for it. Returns the order line it went on.
+ */
+export async function addBottleChargeLine(
+  t: Queryable, orderId: string, quantity: number,
+): Promise<{ orderLineId: string; productId: string } | null> {
+  const n = Math.max(0, Math.round(Number(quantity) || 0));
+  if (n === 0) return null;
+  const bottle = await bottleChargeProduct(t);
+  const order = await t.one<{ customer_id: string }>(`SELECT customer_id FROM customer_orders WHERE id = $1`, [orderId]);
+  const existing = await t.maybeOne<{ id: string }>(
+    `SELECT id FROM order_line_items WHERE order_id = $1 AND product_id = $2 LIMIT 1`, [orderId, bottle.id],
+  );
+  let lineId: string;
+  if (existing) {
+    await t.query(
+      `UPDATE order_line_items SET loose_bottles = loose_bottles + $2, total_bottles = total_bottles + $2
+       WHERE id = $1`, [existing.id, n],
+    );
+    lineId = existing.id;
+  } else {
+    const [r] = await resolveLines(t, order.customer_id, [{ productId: bottle.id, looseBottles: n }]);
+    const row = await t.one<{ id: string }>(
+      `INSERT INTO order_line_items
+         (order_id, product_id, cases, loose_bottles, total_bottles,
+          price_per_case_cents, price_per_bottle_cents, price_tier)
+       VALUES ($1,$2,0,$3,$3,$4,$5,$6) RETURNING id`,
+      [orderId, bottle.id, n, r.pricePerCaseCents, r.pricePerBottleCents, r.priceTier],
+    );
+    lineId = row.id;
+  }
+  await recomputeOrderTotals(t, orderId);
+  return { orderLineId: lineId, productId: bottle.id };
+}
+
+/* ------------------------------------------------------------------ */
+/* Deliveries over more than one stop (7 Oct 2026, point 9)            */
+/* ------------------------------------------------------------------ */
+
+/**
+ * What the order's lines have had delivered, from every stop recorded
+ * Delivered. Always recounted from the stops rather than added to, so a
+ * correction to one stop cannot leave the order's figure out of step.
+ * Orders that never go on a round (counter, collection) set their own.
+ */
+export async function recomputeDelivered(t: Queryable, orderId: string): Promise<void> {
+  await t.query(
+    `UPDATE order_line_items oli
+     SET delivered_cases = COALESCE(d.cases, 0), delivered_loose = COALESCE(d.loose, 0),
+         delivered_total = COALESCE(d.total, 0)
+     FROM order_line_items x
+     LEFT JOIN (
+       SELECT sl.order_line_id, SUM(sl.cases)::int AS cases, SUM(sl.loose_bottles)::int AS loose,
+              SUM(sl.total_bottles)::int AS total
+       FROM delivery_stop_lines sl JOIN delivery_stops st ON st.id = sl.stop_id
+       WHERE st.order_id = $1 AND st.stop_outcome = 'Delivered'
+       GROUP BY sl.order_line_id
+     ) d ON d.order_line_id = x.id
+     WHERE oli.id = x.id AND x.order_id = $1`,
+    [orderId],
+  );
+}
+
+/** "2 cs 500ml, 1 x 5 Gallon" for what is still to come. */
+export async function summariseRemaining(t: Queryable, orderId: string): Promise<string> {
+  const rows = await t.query<{ name: string; cases: number; loose: number; bpc: number }>(
+    `SELECT p.name, GREATEST(oli.cases - oli.delivered_cases, 0) AS cases,
+            GREATEST(oli.loose_bottles - oli.delivered_loose, 0) AS loose, p.bottles_per_case AS bpc
+     FROM order_line_items oli JOIN products p ON p.id = oli.product_id
+     WHERE oli.order_id = $1 AND oli.delivered_total < oli.total_bottles`, [orderId],
+  );
+  return rows
+    .filter((r) => num(r.cases) > 0 || num(r.loose) > 0)
+    .map((r) => (num(r.bpc) > 0 ? `${num(r.cases)} cs ${r.name}` : `${num(r.loose)} x ${r.name}`))
+    .join(', ');
 }

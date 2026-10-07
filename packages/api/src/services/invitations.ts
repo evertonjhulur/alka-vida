@@ -20,6 +20,7 @@
 
 import { createHash, randomBytes } from 'node:crypto';
 import { mailConfigured, sendMail } from './documents.ts';
+import { renderEmail } from './emailkit.ts';
 import type { Db } from '../db/index.ts';
 import type { Actor } from './core.ts';
 import { audit, requireRole, siteUrl } from './core.ts';
@@ -188,18 +189,18 @@ export async function emailInvitation(
     return { sent: false, reason: 'no mail account is set up on this machine' };
   }
   try {
-    await sendMail({
-      to,
-      subject: 'Your Alka Vida account',
-      text:
-        `Good day ${name},\n\n`
-        + 'Your Alka Vida account is ready. Use the link below to choose your '
-        + 'password and sign in:\n\n'
-        + `${link}\n\n`
-        + `The link works once and expires in ${VALID_FOR_DAYS} days.\n\n`
-        + 'If you were not expecting this, you can ignore it.\n\n'
-        + '1506 Investments Limited\n',
+    const mail = renderEmail({
+      preheader: 'Choose your password to start ordering online',
+      heading: 'Your Alka Vida account is ready',
+      greeting: `Good day ${name},`,
+      intro: 'Your Alka Vida account is ready. Choose your password with the button below, '
+        + 'then sign in to order water, see your invoices and keep track of your account.',
+      button: { label: 'Choose my password', url: link },
+      outro: `The link works once and expires in ${VALID_FOR_DAYS} days. If the button does not work, `
+        + `copy this into your browser:\n${link}\n\nIf you were not expecting this, you can ignore it.`,
+      offer: null,
     });
+    await sendMail({ to, subject: 'Your Alka Vida account', text: mail.text, html: mail.html });
     return { sent: true };
   } catch (err) {
     return { sent: false, reason: err instanceof Error ? err.message : 'sending failed' };
@@ -255,18 +256,19 @@ export async function requestPasswordReset(
   });
 
   try {
-    await sendMail({
-      to: user.email,
-      subject: 'Reset your Alka Vida password',
-      text:
-        `Good day ${user.name},\n\n`
-        + 'Somebody (hopefully you) asked to reset the password for your Alka Vida '
-        + 'account. Use the link below to choose a new one:\n\n'
-        + `${invitationLink(token)}\n\n`
-        + 'The link works once and expires in 24 hours. If you did not ask for this, '
-        + 'ignore this email: your password has not changed.\n\n'
-        + '1506 Investments Limited\n',
+    const link = invitationLink(token);
+    const mail = renderEmail({
+      preheader: 'Choose a new password',
+      heading: 'Reset your password',
+      greeting: `Good day ${user.name},`,
+      intro: 'Somebody (hopefully you) asked to reset the password for your Alka Vida account. '
+        + 'Use the button below to choose a new one.',
+      button: { label: 'Choose a new password', url: link },
+      outro: 'The link works once and expires in 24 hours. If you did not ask for this, ignore this '
+        + `email: your password has not changed.\n\nIf the button does not work, copy this into your browser:\n${link}`,
+      offer: null,
     });
+    await sendMail({ to: user.email, subject: 'Reset your Alka Vida password', text: mail.text, html: mail.html });
     return { sent: true };
   } catch (err) {
     return { sent: false, reason: err instanceof Error ? err.message : 'sending failed' };

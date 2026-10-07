@@ -177,9 +177,10 @@ export function registerRevisionRoutes(
     await inventory.deletePurchaseOrder(db, actorOf(req as Req), id(req as Req));
     return { ok: true };
   });
+  // "Close it (nothing more coming)". Says which status it ended up in.
   app.post('/api/purchase-orders/:id/cancel', office, async (req) => {
-    await inventory.cancelPurchaseOrder(db, actorOf(req as Req), id(req as Req));
-    return { ok: true };
+    const r = await inventory.cancelPurchaseOrder(db, actorOf(req as Req), id(req as Req));
+    return { ok: true, status: r.status };
   });
   app.get('/api/purchase-orders/:id/pdf', office, async (req, reply) =>
     pdf(reply as never, await paperwork.renderPoPdf(db, id(req as Req))));

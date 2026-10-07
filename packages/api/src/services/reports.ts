@@ -251,28 +251,35 @@ export async function dashboard(db: Db) {
  * Read-only. It reports the gap; it does not close it.
  */
 export async function bottlesNotRecorded(db: Db) {
+  // What THIS stop handed over (an order can now go out over two stops),
+  // falling back to the order for a stop recorded before stops kept lines.
   return db.query(
-    `SELECT s.id AS stop_id,
-            sh.delivery_date::text AS delivery_date,
-            sh.zone, sh.driver_name,
-            c.id AS customer_id, c.name AS customer_name,
-            o.order_number,
-            SUM(oli.total_bottles)::int AS bottles_on_the_order,
-            s.bottles_delivered_full::int AS bottles_recorded,
-            s.bottles_empties_picked_up::int AS empties_recorded
-     FROM delivery_stops s
-     JOIN delivery_sheets sh ON sh.id = s.delivery_sheet_id
-     JOIN customers c ON c.id = s.customer_id
-     JOIN customer_orders o ON o.id = s.order_id
-     JOIN order_line_items oli ON oli.order_id = o.id
-     JOIN products p ON p.id = oli.product_id AND p.is_returnable
-     WHERE s.stop_outcome = 'Delivered'
-     GROUP BY s.id, sh.delivery_date, sh.zone, sh.driver_name,
-              c.id, c.name, o.order_number,
-              s.bottles_delivered_full, s.bottles_empties_picked_up
-     HAVING SUM(oli.total_bottles) > 0
-        AND COALESCE(s.bottles_delivered_full, 0) < SUM(oli.total_bottles)
-     ORDER BY sh.delivery_date DESC, c.name`,
+    `SELECT * FROM (
+       SELECT s.id AS stop_id,
+              sh.delivery_date::text AS delivery_date,
+              sh.zone, sh.driver_name,
+              c.id AS customer_id, c.name AS customer_name,
+              o.order_number,
+              COALESCE(
+                (SELECT SUM(sl.total_bottles) FROM delivery_stop_lines sl
+                   JOIN products p ON p.id = sl.product_id AND p.is_returnable
+                  WHERE sl.stop_id = s.id),
+                CASE WHEN NOT EXISTS (SELECT 1 FROM delivery_stop_lines x WHERE x.stop_id = s.id)
+                     THEN (SELECT SUM(oli.total_bottles) FROM order_line_items oli
+                             JOIN products p ON p.id = oli.product_id AND p.is_returnable
+                            WHERE oli.order_id = o.id) END,
+                0)::int AS bottles_on_the_order,
+              s.bottles_delivered_full::int AS bottles_recorded,
+              s.bottles_empties_picked_up::int AS empties_recorded
+       FROM delivery_stops s
+       JOIN delivery_sheets sh ON sh.id = s.delivery_sheet_id
+       JOIN customers c ON c.id = s.customer_id
+       JOIN customer_orders o ON o.id = s.order_id
+       WHERE s.stop_outcome = 'Delivered'
+     ) g
+     WHERE g.bottles_on_the_order > 0
+       AND COALESCE(g.bottles_recorded, 0) < g.bottles_on_the_order
+     ORDER BY g.delivery_date DESC, g.customer_name`,
   );
 }
 

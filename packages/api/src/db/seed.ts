@@ -315,6 +315,8 @@ export async function seed(db: Db, opts: { quiet?: boolean } = {}): Promise<void
     // A cash walk-in still needs a real customer record so a receipt can issue.
     await customer('Cash Walk-In', '000', 'walkin@alkavida.jm',
       retail, null, null, 0, null, 'Cash on delivery');
+    // A walk-in pays in full at the counter (7 Oct 2026, point 12).
+    await t.query(`UPDATE customers SET is_walk_in = true WHERE name = 'Cash Walk-In'`);
 
     /* opening bottle pool */
     await t.query(

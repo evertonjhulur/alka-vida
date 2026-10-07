@@ -22,6 +22,7 @@ export async function getMyProfile(db: Db, customerId: string) {
             c.address_line1, c.address_line2, c.city, c.parish, c.delivery_address,
             c.delivery_instructions, c.delivery_zone, c.delivery_days, c.payment_terms,
             c.invoice_cycle, c.marketing_opt_out, c.order_emails, c.auto_statements, c.gct_exempt,
+            c.cancel_emails, c.service_emails, c.auto_reminders,
             pt.name AS price_tier
      FROM customers c LEFT JOIN price_tiers pt ON pt.id = c.price_tier_id
      WHERE c.id = $1`, [customerId],
@@ -45,6 +46,9 @@ export interface MyProfileInput {
   marketingOptOut?: boolean;
   orderEmails?: boolean;
   autoStatements?: boolean;
+  /** "Order cancelled" and "Service announcements" (7 Oct 2026, point 4). */
+  cancelEmails?: boolean;
+  serviceEmails?: boolean;
 }
 
 export async function updateMyProfile(
@@ -64,6 +68,8 @@ export async function updateMyProfile(
   if (has('marketingOptOut')) cols.marketing_opt_out = !!input.marketingOptOut;
   if (has('orderEmails')) cols.order_emails = input.orderEmails !== false;
   if (has('autoStatements')) cols.auto_statements = input.autoStatements !== false;
+  if (has('cancelEmails')) cols.cancel_emails = input.cancelEmails !== false;
+  if (has('serviceEmails')) cols.service_emails = input.serviceEmails !== false;
   if (['addressLine1', 'addressLine2', 'city', 'parish'].some((k) => has(k as keyof MyProfileInput))) {
     if (!text(input.addressLine1)) throw new RuleViolation('the address needs at least its first line');
     cols.address_line1 = text(input.addressLine1);

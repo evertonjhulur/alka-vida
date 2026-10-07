@@ -14,14 +14,16 @@ import type { Db, Queryable } from '../db/index.ts';
 import type { Actor } from './core.ts';
 import { requireRole, withIdempotency, num } from './core.ts';
 import type { Cents, PaymentMethod } from '@alka/shared';
-import { RuleViolation } from '@alka/shared';
-import { createOrder, type OrderLineInput } from './orders.ts';
+import { RuleViolation, computeTotals } from '@alka/shared';
+import { createOrder, resolveLines, withBottleShortfall, type OrderLineInput } from './orders.ts';
 import { createInvoice, getInvoiceLedger } from './invoices.ts';
 import { insertPayment } from './payments.ts';
 import { refreshOrderStatus } from './orders.ts';
 import { billedOnCycle } from './delivery.ts';
 import { takeFinishedGoods, deliveredBottles } from './stockmoves.ts';
-import { applyDeliveryMovement } from './bottles.ts';
+import { applyDeliveryMovement, recordBottlesSold } from './bottles.ts';
+
+const cashText = (cents: number) => `$${(cents / 100).toLocaleString('en-JM', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
 /**
  * Goods going out of the door at the counter or on a collection: take them
@@ -51,16 +53,45 @@ async function goodsLeave(
       [customerId, out, back, orderId, o.order_number],
     );
   }
+  // Any "5-gallon bottle" on the order was bought: theirs from now on.
+  const sold = await t.one<{ n: number }>(
+    `SELECT COALESCE(SUM(oli.total_bottles), 0)::int AS n FROM order_line_items oli
+     JOIN products p ON p.id = oli.product_id WHERE oli.order_id = $1 AND p.is_bottle_charge`, [orderId],
+  );
+  await recordBottlesSold(t, actor, { customerId, quantity: num(sold.n), reference: o.order_number, orderId });
+}
+
+/**
+ * The shared walk-in record ("Cash Walk-In"), for a counter sale with no
+ * customer chosen. Made the first time it is needed.
+ */
+export async function walkInCustomer(t: Queryable): Promise<string> {
+  const found = await t.maybeOne<{ id: string }>(
+    `SELECT id FROM customers WHERE is_walk_in AND active
+     ORDER BY (lower(name) = 'cash walk-in') DESC, created_at LIMIT 1`,
+  );
+  if (found) return found.id;
+  const made = await t.one<{ id: string }>(
+    `INSERT INTO customers (name, phone, email, is_walk_in, payment_terms, notes)
+     VALUES ('Cash Walk-In', '000', '', true, 'Cash on delivery', 'Shared record for counter sales to walk-ins')
+     RETURNING id`,
+  );
+  return made.id;
 }
 
 export interface CounterSaleInput {
-  customerId: string;
+  /** Blank for a walk-in: the shared Cash Walk-In record is used. */
+  customerId?: string | null;
   lines: OrderLineInput[];
   discountPercent?: number;
   discountFixedCents?: Cents;
   gctExempt?: boolean | null;
-  /** Omit or pass 0 for an unpaid pickup (e.g. stated bank transfer). */
-  amountPaidCents?: Cents;
+  /**
+   * What is paid now. A walk-in must pay in full (left out, it is taken as
+   * paid in full); only a customer with an account may pay part, or nothing
+   * (Everton, 7 Oct 2026, point 12).
+   */
+  amountPaidCents?: Cents | null;
   method?: PaymentMethod;
   notes?: string | null;
   idempotencyKey?: string | null;
@@ -79,11 +110,36 @@ export async function counterSale(
 }> {
   requireRole(actor, 'admin', 'user');
 
+  const customerId = input.customerId || await db.tx((t) => walkInCustomer(t));
+  const who = await db.one<{ is_walk_in: boolean; name: string }>(
+    `SELECT is_walk_in, name FROM customers WHERE id = $1`, [customerId],
+  );
+  // Bottles short of the empties handed in are bought (point 13), so the
+  // total - and so what "in full" means - includes them. Not said (older
+  // callers), nothing is added.
+  const empties = input.emptiesReturned == null ? null
+    : Math.max(0, Math.round(Number(input.emptiesReturned) || 0));
+  const lines = await withBottleShortfall(db, input.lines ?? [], empties);
+  const fixed = Math.max(0, Math.round(Number(input.discountFixedCents) || 0));
+  const priced = await resolveLines(db, customerId, lines);
+  const cust = await db.one<{ gct_exempt: boolean }>(`SELECT gct_exempt FROM customers WHERE id = $1`, [customerId]);
+  const total = computeTotals(priced, fixed > 0 ? 0 : (input.discountPercent ?? 0),
+    !(input.gctExempt ?? cust.gct_exempt), fixed).grandTotal;
+  // Left out: a walk-in pays in full; an account customer pays nothing now
+  // (as the API always meant). The screen sends the figure either way.
+  const paying = input.amountPaidCents == null || (input.amountPaidCents as unknown) === ''
+    ? (who.is_walk_in ? total : 0) : Math.max(0, Math.round(Number(input.amountPaidCents) || 0));
+  if (who.is_walk_in && paying < total) {
+    throw new RuleViolation(
+      `a walk-in pays in full: ${cashText(total)}. To let them pay part, choose (or add) their customer account first.`,
+    );
+  }
+
   // The order records what was sold; delivery_mode Counter keeps it off every
   // delivery sheet (createOrder only auto-routes Delivery orders).
   const order = await createOrder(db, actor, {
-    customerId: input.customerId,
-    lines: input.lines,
+    customerId,
+    lines,
     deliveryMode: 'Counter',
     discountPercent: input.discountPercent ?? 0,
     discountFixedCents: input.discountFixedCents ?? 0,
@@ -96,9 +152,9 @@ export async function counterSale(
   return db.tx(async (t) => {
     const run = () => invoiceAndTakePayment(t, actor, {
       orderId: order.id,
-      customerId: input.customerId,
+      customerId,
       notes: input.notes ?? 'Counter sale',
-      amountPaidCents: input.amountPaidCents ?? 0,
+      amountPaidCents: paying,
       method: input.method ?? 'Cash',
       emptiesBack: input.emptiesReturned ?? 0,
     });

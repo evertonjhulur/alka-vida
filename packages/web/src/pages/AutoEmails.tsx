@@ -22,7 +22,7 @@ interface LogRow {
 }
 
 interface Ordering {
-  sameDayCutoff: string; whatsappNumber: string; broadcastDailyCap: number;
+  sameDayCutoff: string; whatsappNumber: string; broadcastDailyCap: number; contactEmail?: string;
   orderPlacedEmails: boolean; orderDeliveredEmails: boolean; mailConfigured: boolean;
 }
 
@@ -46,7 +46,7 @@ function OrderingSettings({ isAdmin }: { isAdmin: boolean }) {
       setO(await api.put<Ordering>('/api/settings/ordering', {
         sameDayCutoff: o!.sameDayCutoff, whatsappNumber: o!.whatsappNumber,
         broadcastDailyCap: o!.broadcastDailyCap, orderPlacedEmails: o!.orderPlacedEmails,
-        orderDeliveredEmails: o!.orderDeliveredEmails,
+        orderDeliveredEmails: o!.orderDeliveredEmails, contactEmail: o!.contactEmail,
       }));
       setNote('Saved.');
     } catch (e2) { setErr(e2 instanceof Error ? e2.message : 'Could not save'); } finally { setBusy(false); }
@@ -74,6 +74,12 @@ function OrderingSettings({ isAdmin }: { isAdmin: boolean }) {
         <label className="check"><input type="checkbox" checked={o.orderDeliveredEmails} onChange={(e) => set('orderDeliveredEmails', e.target.checked)} />
           When it is delivered, with the invoice attached</label>
         <div className="muted small">A customer can turn these off for themselves in their portal profile, or the office on their Details tab.</div>
+        <div className="field" style={{ marginTop: 10 }}>
+          <label htmlFor="ce">Contact address on every email and document</label>
+          <input id="ce" type="email" style={{ maxWidth: 320 }} value={o.contactEmail ?? ''} placeholder="orders@alkavidaja.com"
+                 onChange={(e) => set('contactEmail', e.target.value)} />
+          <div className="muted small">Shown as "Contact … for any orders or queries".</div>
+        </div>
       </fieldset>
       <fieldset className="form-block" disabled={!isAdmin}>
         <legend>WhatsApp and messages</legend>

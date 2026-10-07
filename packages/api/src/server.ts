@@ -44,6 +44,7 @@ import * as labour from './services/labour.ts';
 import { collectOrder, counterSale } from './services/counter.ts';
 import { registerRevisionRoutes } from './routes/revisions.ts';
 import { registerFeedbackRoutes } from './routes/feedback.ts';
+import { registerOctoberRoutes } from './routes/october.ts';
 import * as messaging from './services/messaging.ts';
 import * as paperwork from './services/paperwork.ts';
 
@@ -61,6 +62,10 @@ export async function buildServer(db: Db) {
   // token minted against a previous one stops verifying. Must happen before
   // any route can sign or check a token.
   await loadSigningKey(db);
+
+  // The "5-gallon bottle" product (7 Oct 2026, point 13) exists from the
+  // start, so it is on the Products screen for its price to be set.
+  await orders.bottleChargeProduct(db);
 
   // business_today() resolves dates against this. Keeping it in the database
   // means SQL defaults and application code cannot disagree about what day
@@ -310,6 +315,7 @@ export async function buildServer(db: Db) {
       const body = (req.body ?? {}) as { reason?: string };
       await orders.cancelOwnOrder(db, actorOf(req), portalCustomer(req),
         (req.params as { id: string }).id, body.reason);
+      void messaging.sendOrderCancelledEmail(db, (req.params as { id: string }).id, body.reason ?? null).catch(() => {});
       return { ok: true };
     });
 
@@ -576,8 +582,8 @@ export async function buildServer(db: Db) {
   app.get('/api/customers/:id/statement', async (req) => {
     const { id } = req.params as { id: string };
     assertOwnCustomer(req, id);
-    const q = req.query as { from?: string; to?: string; filter?: ledger.StatementFilter };
-    return ledger.getStatement(db, id, { from: q.from, to: q.to, filter: q.filter });
+    const q = req.query as { from?: string; to?: string; filter?: ledger.StatementFilter; status?: string };
+    return ledger.getStatement(db, id, { from: q.from, to: q.to, filter: q.filter, status: q.status });
   });
 
   // The whole customer record on one screen: who they are, what they owe,
@@ -597,10 +603,11 @@ export async function buildServer(db: Db) {
   app.post('/api/customers/:id/statement/email', { preHandler: allow('admin', 'user') },
     async (req) => {
       const body = (req.body ?? {}) as {
-        from?: string; to?: string; filter?: ledger.StatementFilter; sendTo?: string;
+        from?: string; to?: string; filter?: ledger.StatementFilter; sendTo?: string; status?: string;
       };
       return documents.emailStatement(db, actorOf(req), (req.params as { id: string }).id,
-        { from: body.from, to: body.to, filter: body.filter, sendTo: body.sendTo });
+        { from: body.from, to: body.to, filter: body.filter, sendTo: body.sendTo,
+          status: ledger.asStatementStatus(body.status) });
     });
 
   // The statement as a document. A customer may download their own, the same
@@ -608,9 +615,9 @@ export async function buildServer(db: Db) {
   app.get('/api/customers/:id/statement.pdf', async (req, reply) => {
     const { id } = req.params as { id: string };
     assertOwnCustomer(req, id);
-    const q = req.query as { from?: string; to?: string; filter?: ledger.StatementFilter };
+    const q = req.query as { from?: string; to?: string; filter?: ledger.StatementFilter; status?: string };
     const doc = await documents.renderStatementPdf(db, id,
-      { from: q.from, to: q.to, filter: q.filter });
+      { from: q.from, to: q.to, filter: q.filter, status: q.status });
     return reply
       .header('content-type', 'application/pdf')
       .header('content-disposition', `attachment; filename="${doc.filename}"`)
@@ -727,6 +734,9 @@ export async function buildServer(db: Db) {
     async (req) => {
       await orders.cancelOrder(db, actorOf(req), (req.params as { id: string }).id,
         (req.body as { reason?: string })?.reason);
+      // "Order cancelled" email (7 Oct 2026, point 4), if they want it.
+      void messaging.sendOrderCancelledEmail(db, (req.params as { id: string }).id,
+        (req.body as { reason?: string })?.reason ?? null).catch(() => {});
       return { ok: true };
     });
 
@@ -807,6 +817,10 @@ export async function buildServer(db: Db) {
         stopId: (req.params as { id: string }).id,
       });
       if (r.outcome === 'Delivered') void messaging.sendDeliveredEmail(db, r.stopId).catch(() => {});
+      // The new date and why (7 Oct 2026, point 8).
+      if (r.outcome === 'Rescheduled' && r.rescheduledTo) {
+        void messaging.sendRescheduledEmail(db, r.stopId).catch(() => {});
+      }
       return r;
     });
 
@@ -1333,6 +1347,7 @@ export async function buildServer(db: Db) {
 
   registerRevisionRoutes(app as never, db, { allow: allow as never, actorOf, assertOwnCustomer });
   registerFeedbackRoutes(app as never, db, { allow: allow as never, actorOf });
+  registerOctoberRoutes(app as never, db, { allow: allow as never, actorOf });
 
   return app;
 }

@@ -48,8 +48,29 @@ export async function deliveredBottles(
   const rows = await t.query<{ product_id: string; bottles: number; is_returnable: boolean }>(
     `SELECT oli.product_id, SUM(oli.delivered_total)::int AS bottles, bool_or(p.is_returnable) AS is_returnable
      FROM order_line_items oli JOIN products p ON p.id = oli.product_id
-     WHERE oli.order_id = $1 GROUP BY oli.product_id`,
+     -- The 5-gallon bottle sold on its own is not water off the shelf.
+     WHERE oli.order_id = $1 AND NOT p.is_bottle_charge GROUP BY oli.product_id`,
     [orderId],
+  );
+  return rows.map((r) => ({
+    productId: r.product_id, bottles: num(r.bottles),
+    returnable: r.is_returnable ? num(r.bottles) : 0,
+  }));
+}
+
+/**
+ * Bottles from what ONE stop handed over, per product. A partial delivery
+ * (7 Oct 2026, point 9) means an order can go out over two stops, so stock
+ * comes off stop by stop, never as the order's running total.
+ */
+export async function stopBottles(
+  t: Queryable, stopId: string,
+): Promise<Array<{ productId: string; bottles: number; returnable: number }>> {
+  const rows = await t.query<{ product_id: string; bottles: number; is_returnable: boolean }>(
+    `SELECT sl.product_id, SUM(sl.total_bottles)::int AS bottles, bool_or(p.is_returnable) AS is_returnable
+     FROM delivery_stop_lines sl JOIN products p ON p.id = sl.product_id
+     WHERE sl.stop_id = $1 AND NOT p.is_bottle_charge GROUP BY sl.product_id`,
+    [stopId],
   );
   return rows.map((r) => ({
     productId: r.product_id, bottles: num(r.bottles),

@@ -243,6 +243,8 @@ export interface PriceMatrix {
   products: Array<{
     id: string; name: string; size: string | null;
     bottlesPerCase: number; active: boolean; isReturnable: boolean;
+    /** The 5-gallon bottle itself, charged for empties short (7 Oct 2026). */
+    isBottleCharge: boolean;
     /** The unit this product is sold and priced in. */
     unit: 'case' | 'bottle';
     listPriceCents: Cents;
@@ -262,10 +264,10 @@ export async function priceMatrix(db: Db): Promise<PriceMatrix> {
 
   const products = await db.query<{
     id: string; name: string; size: string | null; bottles_per_case: number;
-    active: boolean; is_returnable: boolean;
+    active: boolean; is_returnable: boolean; is_bottle_charge: boolean;
     price_per_case_cents: number; price_per_bottle_cents: number;
   }>(
-    `SELECT id, name, size, bottles_per_case, active, is_returnable,
+    `SELECT id, name, size, bottles_per_case, active, is_returnable, is_bottle_charge,
             price_per_case_cents, price_per_bottle_cents
      FROM products ORDER BY active DESC, bottles_per_case DESC, name`,
   );
@@ -297,6 +299,7 @@ export async function priceMatrix(db: Db): Promise<PriceMatrix> {
         bottlesPerCase: num(p.bottles_per_case),
         active: p.active,
         isReturnable: p.is_returnable,
+        isBottleCharge: !!p.is_bottle_charge,
         unit: cased ? ('case' as const) : ('bottle' as const),
         listPriceCents: cased ? num(p.price_per_case_cents) : num(p.price_per_bottle_cents),
         tierPrices,

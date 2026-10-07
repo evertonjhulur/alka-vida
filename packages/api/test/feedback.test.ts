@@ -173,11 +173,16 @@ describe('Stock and bottles (points 12, 18, 19, 20)', () => {
       emptiesReturned: 1,
     });
     const after_ = await bottleAccount(f.db, f.otherCustomerId);
-    assert.equal(after_.closingHolding - before_.closingHolding, 2);
+    // Rewritten for Everton's ruling of 7 Oct 2026 (point 13): 3 full out and
+    // 1 empty back means 2 bottles short, which they BUY. Those are theirs,
+    // so what they hold of ours does not move. (Before the ruling they held
+    // 2 more of ours on loan.)
+    assert.equal(after_.closingHolding - before_.closingHolding, 0);
+    assert.equal(after_.sold - before_.sold, 2);
     const pool1 = await f.db.one<{ clean: number }>(`SELECT clean_ready AS clean FROM five_gal_bottle_pool LIMIT 1`);
     assert.equal(Number(pool0.clean) - Number(pool1.clean), 3);
-    const holdings = await customerHoldings(f.db) as Array<{ customer_id: string; holding: number }>;
-    assert.ok(holdings.some((h) => h.customer_id === f.otherCustomerId && h.holding >= 2));
+    const holdings = await customerHoldings(f.db) as Array<{ customer_id: string; sold: number }>;
+    assert.ok(holdings.some((h) => h.customer_id === f.otherCustomerId && h.sold >= 2));
   });
 
   test('a pickup collected takes stock off too', async () => {

@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
+import { shrinkPicture } from '../lib/pictures';
 import { api, type Session } from '../lib/api';
 import { money, when } from '../lib/format';
 import { ask } from '../components/Dialog';
@@ -25,11 +26,12 @@ interface SavedList {
 }
 interface Member {
   id: string; name: string; email: string | null; phone: string | null; delivery_zone: string | null;
-  marketing_opt_out: boolean; balance_cents: number; whatsappLink: string | null;
+  marketing_opt_out: boolean; service_emails?: boolean; balance_cents: number; whatsappLink: string | null;
 }
+interface Pic { id: string; url: string }
 interface News {
   id: string; kind: string; title: string; body: string; starts_on: string; ends_on: string | null;
-  published: boolean; pinned: boolean; live: boolean;
+  published: boolean; pinned: boolean; live: boolean; images?: Pic[];
 }
 interface Broadcast {
   id: string; subject: string; purpose: string; list_name: string | null; created_at: string;
@@ -46,7 +48,9 @@ interface Cust { id: string; name: string }
 const TABS = [['send', 'Send a message'], ['lists', 'Customer lists'], ['news', 'News & offers'], ['sent', 'Sent']] as const;
 type Tab = (typeof TABS)[number][0];
 const KINDS = ['News', 'Promotion', 'Closure', 'Update'];
-const BLANK_NEWS = { id: '', kind: 'News', title: '', body: '', startsOn: '', endsOn: '', published: true, pinned: false };
+const BLANK_NEWS = {
+  id: '', kind: 'News', title: '', body: '', startsOn: '', endsOn: '', published: true, pinned: false, images: [] as Pic[],
+};
 
 export default function Messages({ session }: { session: Session }) {
   void session;
@@ -72,6 +76,9 @@ export default function Messages({ session }: { session: Session }) {
   const [alsoNews, setAlsoNews] = useState(true);
   const [newsEnds, setNewsEnds] = useState('');
   const [preview, setPreview] = useState<Member[] | null>(null);
+  /** Pictures for the message (point 3), and the post it came from, if any. */
+  const [msgPics, setMsgPics] = useState<Pic[]>([]);
+  const [fromPost, setFromPost] = useState<string | null>(null);
   const [detail, setDetail] = useState<BroadcastDetail | null>(null);
 
   // Lists
@@ -114,7 +121,38 @@ export default function Messages({ session }: { session: Session }) {
   }
   useEffect(() => { if (tab === 'send') loadPreview().catch(() => setPreview(null)); }, [to, tab, lists.length]);
 
-  const willEmail = (preview ?? []).filter((m) => m.email?.trim() && !(purpose === 'Marketing' && m.marketing_opt_out)).length;
+  // Each kind respects its own tick (7 Oct 2026, point 4).
+  const willEmail = (preview ?? []).filter((m) => m.email?.trim()
+    && !(purpose === 'Marketing' && m.marketing_opt_out)
+    && !(purpose === 'Service' && m.service_emails === false)).length;
+
+  /** Upload chosen pictures, shrunk first; returns them as stored. */
+  async function uploadPics(files: FileList | null): Promise<Pic[]> {
+    const out: Pic[] = [];
+    for (const file of Array.from(files ?? [])) {
+      const dataUrl = await shrinkPicture(file);
+      out.push(await api.post<Pic>('/api/news/images', { dataUrl }));
+    }
+    return out;
+  }
+  const addPics = (files: FileList | null, onto: (p: Pic[]) => void) => {
+    setBusy(true); setError(null);
+    uploadPics(files).then(onto).catch((e) => setError(e instanceof Error ? e.message : 'Could not add the picture'))
+      .finally(() => setBusy(false));
+  };
+  /** Plain function returning JSX (never a component declared in here). */
+  const picRow = (pics: Pic[], remove: (id: string) => void) => (
+    pics.length > 0 && (
+      <div className="pic-row">
+        {pics.map((p) => (
+          <figure key={p.id}>
+            <img src={p.url} alt="" />
+            <button type="button" className="danger-soft" aria-label="Remove this picture" onClick={() => remove(p.id)}>×</button>
+          </figure>
+        ))}
+      </div>
+    )
+  );
 
   const send = () => run(async () => {
     if (!await ask(`Send "${subject}" to ${willEmail} customer${willEmail === 1 ? '' : 's'} by email?`,
@@ -122,14 +160,16 @@ export default function Messages({ session }: { session: Session }) {
     const r = await api.post<{ id: string; recipients: number; sentNow: number; stillQueued: number; problem?: string }>(
       '/api/broadcasts', {
         subject, body, purpose, ...audience(),
-        postAsNews: alsoNews ? { kind: purpose === 'Service' ? 'Update' : 'Promotion', endsOn: newsEnds || null } : null,
+        postAsNews: alsoNews && !fromPost ? { kind: purpose === 'Service' ? 'Update' : 'Promotion', endsOn: newsEnds || null } : null,
+        imageIds: msgPics.map((p) => p.id),
+        newsPostId: fromPost,
       });
     setMsg(`Sent to ${r.sentNow} by email.`
       + (r.stillQueued ? ` ${r.stillQueued} more will go over the next hours (the daily email allowance).` : '')
       + (r.problem ? ` ${r.problem}.` : '')
       + ' WhatsApp links for each customer are below.');
     setDetail(await api.get<BroadcastDetail>(`/api/broadcasts/${r.id}`));
-    setSubject(''); setBody('');
+    setSubject(''); setBody(''); setMsgPics([]); setFromPost(null);
   }, 'Could not send the message');
 
   /* -------- lists -------- */
@@ -177,6 +217,7 @@ export default function Messages({ session }: { session: Session }) {
       kind: editNews.kind, title: editNews.title, body: editNews.body,
       startsOn: editNews.startsOn || null, endsOn: editNews.endsOn || null,
       published: editNews.published, pinned: editNews.pinned,
+      imageIds: editNews.images.map((p) => p.id),
     };
     if (editNews.id) await api.patch(`/api/news/${editNews.id}`, payload);
     else await api.post('/api/news', payload);
@@ -242,7 +283,7 @@ export default function Messages({ session }: { session: Session }) {
             <p className="muted small" style={{ marginTop: 0 }}>
               {purpose === 'Marketing'
                 ? 'Offers skip customers who said no to offers.'
-                : 'For closures, blackout days or a change to deliveries: goes to everyone on the list.'}
+                : 'For closures, blackout days or a change to deliveries: skips customers who turned off service announcements.'}
               {' '}<button type="button" className="as-link small" onClick={() => { setTab('lists'); setEditList({ id: null, name: '', criteria: {}, include: [], exclude: [] }); }}>Make a new list</button>
             </p>
             <div className="field">
@@ -256,9 +297,16 @@ export default function Messages({ session }: { session: Session }) {
                         onChange={(e) => setBody(e.target.value)} />
               <div className="muted small">"Good day (their name)," goes at the top and a link to order online at the bottom.</div>
             </div>
-            <label className="check"><input type="checkbox" checked={alsoNews} onChange={(e) => setAlsoNews(e.target.checked)} />
-              Also show it under News &amp; offers on the customer portal</label>
-            {alsoNews && (
+            <div className="field">
+              <label htmlFor="msg-pics">Pictures (optional)</label>
+              <input id="msg-pics" type="file" accept="image/*" multiple disabled={busy}
+                     onChange={(e) => { addPics(e.target.files, (p) => setMsgPics((c) => [...c, ...p])); e.target.value = ''; }} />
+              {picRow(msgPics, (id) => setMsgPics((c) => c.filter((x) => x.id !== id)))}
+              {fromPost && <div className="muted small">Sending the post's pictures with it.</div>}
+            </div>
+            {!fromPost && <label className="check"><input type="checkbox" checked={alsoNews} onChange={(e) => setAlsoNews(e.target.checked)} />
+              Also show it under News &amp; offers on the customer portal</label>}
+            {alsoNews && !fromPost && (
               <div className="field">
                 <label htmlFor="ne">Show it until (optional)</label>
                 <input id="ne" type="date" value={newsEnds} onChange={(e) => setNewsEnds(e.target.value)} />
@@ -431,7 +479,10 @@ export default function Messages({ session }: { session: Session }) {
               <tbody>
                 {news.map((n) => (
                   <tr key={n.id}>
-                    <td><span className="chip neutral">{n.kind}</span> <strong>{n.title}</strong>{n.pinned && <span className="muted small"> · pinned</span>}</td>
+                    <td>
+                      <span className="chip neutral">{n.kind}</span> <strong>{n.title}</strong>{n.pinned && <span className="muted small"> · pinned</span>}
+                      {(n.images?.length ?? 0) > 0 && <div className="muted small">{n.images!.length} picture{n.images!.length === 1 ? '' : 's'}</div>}
+                    </td>
                     <td className="small">
                       {n.live ? <span className="chip ok">On the portal</span> : <span className="chip neutral">{n.published ? 'Not showing' : 'Hidden'}</span>}
                       <div className="muted">{when(n.starts_on)}{n.ends_on ? ` to ${when(n.ends_on)}` : ' onwards'}</div>
@@ -439,8 +490,13 @@ export default function Messages({ session }: { session: Session }) {
                     <td className="num">
                       <button type="button" className="secondary" onClick={() => setEditNews({
                         id: n.id, kind: n.kind, title: n.title, body: n.body, startsOn: n.starts_on, endsOn: n.ends_on ?? '',
-                        published: n.published, pinned: n.pinned,
+                        published: n.published, pinned: n.pinned, images: n.images ?? [],
                       })}>Change</button>{' '}
+                      <button type="button" className="secondary" onClick={() => {
+                        setSubject(n.title); setBody(n.body); setFromPost(n.id); setMsgPics([]);
+                        setPurpose(n.kind === 'Closure' || n.kind === 'Update' ? 'Service' : 'Marketing');
+                        setDetail(null); setTab('send');
+                      }}>Email it</button>{' '}
                       <button type="button" className="danger-soft" disabled={busy} onClick={async () => {
                         if (!await ask(`Delete "${n.title}"?`, { confirmLabel: 'Delete', danger: true })) return;
                         await run(async () => { await api.del(`/api/news/${n.id}`); setMsg('Post deleted.'); }, 'Could not delete');
@@ -481,6 +537,17 @@ export default function Messages({ session }: { session: Session }) {
                   <label htmlFor="ne2">Until (optional)</label>
                   <input id="ne2" type="date" value={editNews.endsOn} onChange={(e) => setEditNews({ ...editNews, endsOn: e.target.value })} />
                 </div>
+              </div>
+              <div className="field">
+                <label htmlFor="news-pics">Pictures</label>
+                <input id="news-pics" type="file" accept="image/*" multiple disabled={busy}
+                       onChange={(e) => {
+                         const cur = editNews;
+                         addPics(e.target.files, (p) => setEditNews((x) => (x ? { ...x, images: [...x.images, ...p] } : cur)));
+                         e.target.value = '';
+                       }} />
+                {picRow(editNews.images, (id) => setEditNews({ ...editNews, images: editNews.images.filter((x) => x.id !== id) }))}
+                <div className="muted small">The first picture is the big one on the portal and in emails. Photos are made smaller before they are sent.</div>
               </div>
               <label className="check"><input type="checkbox" checked={editNews.published} onChange={(e) => setEditNews({ ...editNews, published: e.target.checked })} /> Show it on the portal</label>
               <label className="check"><input type="checkbox" checked={editNews.pinned} onChange={(e) => setEditNews({ ...editNews, pinned: e.target.checked })} /> Keep it at the top</label>

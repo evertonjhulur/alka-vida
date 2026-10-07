@@ -17,6 +17,8 @@ import type { Actor } from './core.ts';
 import { audit, requireRole } from './core.ts';
 import { createInvitation, UNUSABLE_PASSWORD } from './invitations.ts';
 import { assertZoneUsable } from './zones.ts';
+import { mailConfigured, sendMail } from './documents.ts';
+import { customerEmail } from './emailkit.ts';
 import { composeAddress, RuleViolation } from '@alka/shared';
 
 export type AccountType = 'Corporate' | 'Individual';
@@ -160,7 +162,11 @@ export interface ApprovalTerms {
  */
 export async function approveApplication(
   db: Db, actor: Actor, applicationId: string, terms: ApprovalTerms = {},
-): Promise<{ customerId: string; userId: string | null; invitation: { link: string } | null }> {
+): Promise<{
+  customerId: string; userId: string | null; invitation: { link: string } | null;
+  /** Whether the "your account is approved" email went (7 Oct 2026, point 1). */
+  emailed: boolean; emailProblem?: string;
+}> {
   requireRole(actor, 'admin');
 
   const app = await db.one<{
@@ -234,11 +240,59 @@ export async function approveApplication(
     ? await createInvitation(db, actor, created.userId)
     : null;
 
+  // Approving tells them at once: approved, and here is where to set a
+  // password. Best effort - the link is on screen either way.
+  const mail = await emailAccountApproved(db, created.customerId, app.email, name,
+    invitation?.link ?? null);
+
   return {
     customerId: created.customerId,
     userId: created.userId,
     invitation: invitation ? { link: invitation.link } : null,
+    emailed: mail.sent,
+    ...(mail.reason ? { emailProblem: mail.reason } : {}),
   };
+}
+
+/**
+ * "Your account is approved" with the link to choose a password (Everton,
+ * 7 Oct 2026, point 1). Essential, so no tick and no unsubscribe link.
+ * Never throws: the approval stands whatever the mail server says.
+ */
+export async function emailAccountApproved(
+  db: Db, customerId: string, to: string, name: string, link: string | null,
+): Promise<{ sent: boolean; reason?: string }> {
+  if (!mailConfigured()) return { sent: false, reason: 'email is not set up' };
+  try {
+    const mail = await customerEmail(db, customerId, null, {
+      preheader: 'Your Alka Vida account is approved',
+      tick: true,
+      heading: 'Your account is approved',
+      subheading: name,
+      greeting: `Good day ${name},`,
+      intro: link
+        ? 'Welcome to Alka Vida. Your account has been approved. Choose your password with the button '
+          + 'below, then sign in to order water, see your invoices and keep track of your account.'
+        : 'Welcome to Alka Vida. Your account has been approved, and we will be in touch about your first order.',
+      ...(link ? { button: { label: 'Set my password', url: link } } : {}),
+      outro: link
+        ? `The link works once and expires in 7 days. If the button does not work, copy this into your browser:\n${link}`
+        : undefined,
+    });
+    await sendMail({ to, subject: 'Your Alka Vida account is approved', text: mail.text, html: mail.html });
+    await db.query(
+      `INSERT INTO auto_emails (kind, customer_id, sent_to, period_key, detail, ok)
+       VALUES ('AccountApproved',$1,$2,NULL,'account approved',true)`, [customerId, to],
+    );
+    return { sent: true };
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : 'sending failed';
+    await db.query(
+      `INSERT INTO auto_emails (kind, customer_id, sent_to, period_key, detail, ok)
+       VALUES ('AccountApproved',$1,$2,NULL,$3,false)`, [customerId, to, reason],
+    ).catch(() => {});
+    return { sent: false, reason };
+  }
 }
 
 export async function declineApplication(

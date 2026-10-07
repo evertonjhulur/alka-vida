@@ -12,6 +12,7 @@ interface Stop {
   line_items_summary: string | null;
   sequence_no: number;
   stop_outcome: string;
+  remainder_to?: string | null;
   payment_amount_cents: number;
   payment_method?: string | null;
   bottles_delivered_full?: number;
@@ -51,9 +52,10 @@ interface Candidate {
 }
 
 const outcomeTone = (outcome: string) =>
-  outcome === 'Delivered' ? 'ok' : outcome === 'Pending' ? 'neutral' : 'warn';
+  outcome === 'Delivered' ? 'ok' : outcome === 'Pending' ? 'neutral' : outcome === 'Payment Only' ? 'info' : 'warn';
 const OUTCOME_WORDS: Record<string, string> = {
   'Customer Not Home': 'Not home', Refused: 'Refused', Rescheduled: 'Rescheduled', Other: 'Not delivered',
+  'Payment Only': 'Payment only',
 };
 
 export default function RouteDetail({ session }: { session: Session }) {
@@ -249,6 +251,12 @@ export default function RouteDetail({ session }: { session: Session }) {
                       : <span className={`chip ${outcomeTone(s.stop_outcome)}`}>{OUTCOME_WORDS[s.stop_outcome] ?? (s.stop_outcome === 'Pending' ? 'To do' : s.stop_outcome)}</span>}
                     {s.rescheduled_to && (
                       <div className="small">to {day(s.rescheduled_to)}{s.reschedule_reason ? `: ${s.reschedule_reason}` : ''}</div>
+                    )}
+                    {s.remainder_to && (
+                      <div className="small" style={{ color: 'var(--warn)' }}>part delivered; the rest {day(s.remainder_to)}</div>
+                    )}
+                    {s.stop_outcome === 'Payment Only' && (
+                      <div className="muted small">nothing delivered; settles with the round</div>
                     )}
                     {s.invoice_number && s.invoice_id && (
                       <div className="small"><Link to={`/invoices/${s.invoice_id}`}>{s.invoice_number}</Link></div>

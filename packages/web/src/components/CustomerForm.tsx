@@ -43,6 +43,9 @@ export interface CustomerFormValues {
   notes: string;
   deliveryInstructions: string; whatsapp: string;
   orderEmails: boolean; offers: boolean;
+  cancelEmails: boolean; serviceEmails: boolean;
+  /** Pays in full at the counter, no part payment (7 Oct 2026, point 12). */
+  isWalkIn: boolean;
 }
 
 export const BLANK_CUSTOMER: CustomerFormValues = {
@@ -52,6 +55,7 @@ export const BLANK_CUSTOMER: CustomerFormValues = {
   priceTierId: '', paymentTerms: '', invoiceCycle: 'PerDelivery',
   gctExempt: false, gctExemptRef: '', autoStatements: true, autoReminders: true, notes: '',
   deliveryInstructions: '', whatsapp: '', orderEmails: true, offers: true,
+  cancelEmails: true, serviceEmails: true, isWalkIn: false,
 };
 
 /** A customer row from the API, as the form's values. */
@@ -77,6 +81,8 @@ export function customerToForm(c: Record<string, unknown>): CustomerFormValues {
     notes: s('notes'),
     deliveryInstructions: s('delivery_instructions'), whatsapp: s('whatsapp'),
     orderEmails: c.order_emails !== false, offers: !c.marketing_opt_out,
+    cancelEmails: c.cancel_emails !== false, serviceEmails: c.service_emails !== false,
+    isWalkIn: !!c.is_walk_in,
   };
 }
 
@@ -101,6 +107,8 @@ export function formToPayload(f: CustomerFormValues) {
     deliveryInstructions: f.deliveryInstructions || null,
     whatsapp: f.whatsapp || null,
     orderEmails: f.orderEmails, marketingOptOut: !f.offers,
+    cancelEmails: f.cancelEmails, serviceEmails: f.serviceEmails,
+    isWalkIn: f.isWalkIn,
   };
 }
 
@@ -342,7 +350,17 @@ export default function CustomerForm({
             <label className="check">
               <input type="checkbox" checked={f.orderEmails}
                      onChange={(e) => set('orderEmails', e.target.checked)} />
-              Order confirmations (placed and delivered)
+              Order confirmations (placed, delivered, moved to another day)
+            </label>
+            <label className="check">
+              <input type="checkbox" checked={f.cancelEmails}
+                     onChange={(e) => set('cancelEmails', e.target.checked)} />
+              Order cancelled
+            </label>
+            <label className="check">
+              <input type="checkbox" checked={f.serviceEmails}
+                     onChange={(e) => set('serviceEmails', e.target.checked)} />
+              Service announcements (closures, holidays, delivery-day changes)
             </label>
             <label className="check">
               <input type="checkbox" checked={f.offers}
@@ -363,6 +381,11 @@ export default function CustomerForm({
               Statements and reminders only go when switched on under Settings › Emails &amp; ordering.
             </p>
           </fieldset>
+
+          <label className="check">
+            <input type="checkbox" checked={f.isWalkIn} onChange={(e) => set('isWalkIn', e.target.checked)} />
+            Walk-in: pays in full at the counter (no part payment, no account)
+          </label>
 
           <div className="field">
             <label htmlFor="cf-notes">Notes</label>
