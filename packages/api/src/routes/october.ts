@@ -15,6 +15,7 @@ import type { Session } from '../lib/auth.ts';
 import * as emailkit from '../services/emailkit.ts';
 import * as messaging from '../services/messaging.ts';
 import * as delivery from '../services/delivery.ts';
+import * as reminders from '../services/reminders.ts';
 
 type Req = { session?: Session; params: unknown; body: unknown; query: unknown };
 type Guard = (...roles: Session['role'][]) => (req: never, reply: never) => Promise<void>;
@@ -107,4 +108,26 @@ export function registerOctoberRoutes(
 
   app.post('/api/delivery-sheets/:id/payment-stop', only('admin', 'user', 'driver'), async (req) =>
     delivery.addPaymentStop(db, actorOf(req as Req), (req.params as { id: string }).id, req.body as never));
+
+  /* ---------------- tomorrow's round: remind customers to order ---------------- */
+
+  app.get('/api/reminders', office, async (req) =>
+    reminders.remindersFor(db, { date: ((req.query ?? {}) as { date?: string }).date ?? null }));
+  app.post('/api/reminders/:customerId/sent', office, async (req) => {
+    const b = (req.body ?? {}) as { date?: string };
+    await reminders.markReminded(db, actorOf(req as Req), (req.params as { customerId: string }).customerId, b.date ?? '');
+    return { ok: true };
+  });
+  app.delete('/api/reminders/:customerId/sent', office, async (req) => {
+    const q = (req.query ?? {}) as { date?: string };
+    await reminders.unmarkReminded(db, actorOf(req as Req), (req.params as { customerId: string }).customerId, q.date ?? '');
+    return { ok: true };
+  });
+  app.post('/api/reminders/email', office, async (req) => {
+    const b = (req.body ?? {}) as { date?: string; customerIds?: string[] };
+    return reminders.emailReminders(db, actorOf(req as Req), b.date ?? '', b.customerIds ?? []);
+  });
+  app.put('/api/reminders/template', office, async (req) => ({
+    template: await reminders.setReminderTemplate(db, actorOf(req as Req), ((req.body ?? {}) as { template?: string }).template ?? ''),
+  }));
 }

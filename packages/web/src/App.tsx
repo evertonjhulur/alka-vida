@@ -49,6 +49,7 @@ import QuoteAccept from './pages/QuoteAccept';
 import CreditNotes from './pages/CreditNotes';
 import AutoEmails from './pages/AutoEmails';
 import Messages from './pages/Messages';
+import Reminders from './pages/Reminders';
 
 interface NavItem {
   to: string;
@@ -94,6 +95,7 @@ const NAV: NavItem[] = [
   { to: '/messages', label: 'Messages & news', roles: ['admin', 'user'], section: 'Sales' },
 
   { to: '/delivery', label: 'Delivery rounds', roles: ['admin', 'user'], section: 'Deliveries' },
+  { to: '/reminders', label: "Tomorrow's reminders", roles: ['admin', 'user'], section: 'Deliveries' },
   { to: '/bottle-pool', label: 'Bottle pool', roles: ['admin', 'user'], section: 'Deliveries' },
 
   { to: '/invoices', label: 'Invoices', roles: ['admin', 'user'], section: 'Money' },
@@ -310,6 +312,7 @@ function Shell({ session }: { session: Session }) {
           <Route path="/credit-notes" element={<Keyed><CreditNotes session={session} /></Keyed>} />
           <Route path="/auto-emails" element={<AutoEmails session={session} />} />
           <Route path="/messages" element={<Messages session={session} />} />
+          <Route path="/reminders" element={<Reminders />} />
           <Route path="/payments" element={<Payments />} />
           <Route path="/invoices/:invoiceId" element={<InvoiceDetail session={session} />} />
           <Route path="/statement" element={<Statement />} />

@@ -46,7 +46,7 @@ Working and verified end to end, in the browser as well as in tests:
 | Addresses | Line 1, line 2, town, parish. Composed into `delivery_address`, which stays what the stop and the invoice PDF read (migration 014). |
 | Employees & labour cost | Who works here, paid by the hour or by the trip, and the hours/trips recorded against them. Payroll totals for any date range. **Add from logins** creates a record per existing login — title from the role (`admin`→Manager, `user`→Employee, `driver`→Driver), rate left blank — and is safe to press twice. **Deliberately not wired into costing** (migration 015). A person is managed on their own record at `/employees/:id` — details, rate, and their own work history. |
 
-**Tests: 488 passing** (7 Oct 2026) — 68 pure domain (`packages/shared`), 420 API
+**Tests: 489 passing** (7 Oct 2026) — 68 pure domain (`packages/shared`), 421 API
 (`packages/api`, against real PostgreSQL via PGlite).
 
 ```bash
@@ -93,6 +93,7 @@ decision behind them:
 | 015 | employees and labour |
 | 016 | Everton's revision list (30 Sep) |
 | 017 | the Florida team's round (1 Oct) |
+| 019 | order reminders: who was reminded to order for which delivery day, and the message wording |
 | 018 | Everton's round of 7 Oct: email ticks + unsubscribe token, walk-in flag, news pictures, "Payment Only" stops and partial deliveries, empties expected, the 5-gallon bottle product flag and bottles sold, PO "Partially Received - Closed" |
 
 ---
@@ -818,3 +819,33 @@ Not done / to know:
   list) if one was set - normally the same.
 - "Delivered" with less than ordered and no date for the rest still means
   "they took less, nothing more to come" (the button says so).
+
+
+### Tomorrow's reminders (WhatsApp, one tap each), 7 Oct 2026
+
+Asked for after the round above: prompt customers to order the evening before
+their round. Menu: Deliveries › **Tomorrow's reminders** (`pages/Reminders.tsx`,
+`/reminders`). Migration **019_order_reminders**, service `services/reminders.ts`,
+routes in `routes/october.ts`, test at the end of `test/october.test.ts`.
+
+- **Who is listed** for a delivery day (default tomorrow): active, non-walk-in
+  customers whose own delivery days include that weekday - or, when they have
+  none, whose zone's `run_days` do - and who have NO order (other than a
+  counter sale or a cancelled one) for that date. A standing order's
+  occurrence is raised a week ahead, so those customers drop off on their own.
+- **The message** is one template (`system_settings.reminder_template`, edited
+  on the screen) filled per customer: {name} (contact person, else business),
+  {business}, {zone}, {when} ("tomorrow, Thu 8 Oct"), {ask} ("Would you like
+  your usual 3 cases of 500ml?" from their last non-counter order, bottles
+  bought left out; "Would you like us to bring you some water?" when they have
+  none), {link} (portal order page).
+- **Send on WhatsApp** is a wa.me link to the customer's WhatsApp number (else
+  their phone) with the message filled in; the office presses send in
+  WhatsApp. Pressing it ticks the customer off (`order_reminders`, channel
+  WhatsApp; "undo" removes the tick) and the next one is highlighted, with a
+  "Next: ..." button at the top. WhatsApp cannot be sent without a person
+  pressing send unless the business pays for Meta's template messages, which
+  Everton ruled out on 1 Oct.
+- **Email** to ticked customers (only those with an address who have not
+  turned off Service announcements): branded email, Order now button,
+  unsubscribe link (category `service`). Logged per customer, sent or failed.

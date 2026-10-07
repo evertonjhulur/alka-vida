@@ -382,3 +382,38 @@ describe('Point 14: purchase order statuses', () => {
     assert.equal(await statusOf(q.id), 'Received');
   });
 });
+
+describe('Tomorrow\'s round: remind customers to order', () => {
+  test('customers whose delivery day it is and who have not ordered, with their usual and a WhatsApp link', async () => {
+    const { remindersFor, markReminded, emailReminders } = await import('../src/services/reminders.ts');
+    const day = addDays(today, 30);
+    const wd = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][new Date(`${day}T12:00:00Z`).getUTCDay()];
+    await f.db.query(`UPDATE customers SET delivery_days = ARRAY[$2], whatsapp = '876-555-0199', service_emails = true WHERE id = $1`, [f.customerId, wd]);
+    await f.db.query(`UPDATE customers SET delivery_days = ARRAY[$2] WHERE id = $1`, [f.otherCustomerId, wd]);
+    await createOrder(f.db, f.office, {
+      customerId: f.customerId, deliveryMode: 'Delivery', requestedDeliveryDate: addDays(today, 29),
+      lines: [{ productId: f.casedProductId, cases: 3 }],
+    });
+    // The other customer has already ordered for that day: not on the list.
+    await createOrder(f.db, f.office, {
+      customerId: f.otherCustomerId, deliveryMode: 'Delivery', requestedDeliveryDate: day,
+      lines: [{ productId: f.casedProductId, cases: 1 }],
+    });
+    const list = await remindersFor(f.db, { date: day });
+    const me = list.rows.find((r) => r.customerId === f.customerId)!;
+    assert.ok(me, 'on the list');
+    assert.ok(!list.rows.some((r) => r.customerId === f.otherCustomerId), 'already ordered: left off');
+    assert.match(me.message, /your usual 3 cases of 500ml/);
+    assert.match(me.message, /Kingston/);
+    assert.match(me.whatsappLink!, /^https:\/\/wa\.me\/18765550199\?text=/);
+
+    await markReminded(f.db, f.office, f.customerId, day);
+    assert.deepEqual((await remindersFor(f.db, { date: day })).rows.find((r) => r.customerId === f.customerId)!.remindedBy, ['WhatsApp']);
+
+    const n = sent.length;
+    const r = await emailReminders(f.db, f.office, day, [f.customerId]);
+    assert.equal(r.sent, 1);
+    assert.equal(sent.length, n + 1);
+    assert.match(sent.at(-1)!.html!, /Unsubscribe/);
+  });
+});

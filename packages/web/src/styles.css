@@ -1187,3 +1187,11 @@ a.button-link.whatsapp:hover { background: #178a45; }
   .news-card.lead .news-pic { max-height: 260px; }
   .home-actions > * { flex: 1 1 100%; justify-content: center; }
 }
+/* Tomorrow's round: remind customers (7 Oct 2026). */
+.remind-row { padding: 12px 14px; }
+.remind-row.next { border: 2px solid #1fa855; }
+.remind-row.done { opacity: .7; }
+.remind-head { display: flex; gap: 10px; align-items: flex-start; flex-wrap: wrap; }
+.remind-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.remind-msg { margin-top: 8px; padding: 8px 10px; background: #f3f8f4; border-radius: 8px; font-size: 14px; white-space: pre-line; }
+@media (max-width: 760px) { .remind-actions { width: 100%; } .remind-actions a { flex: 1; text-align: center; } }
