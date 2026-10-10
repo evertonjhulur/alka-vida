@@ -13,7 +13,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createDb, type Db } from './db/index.ts';
 import { migrate } from './db/migrate.ts';
-import { loadSigningKey, login, userAccess, verifyToken, type Session } from './lib/auth.ts';
+import { loadSigningKey, login, userAccess, verifyToken, SESSION_COOKIE, SESSION_TTL_SECONDS, type Session } from './lib/auth.ts';
 import { loadSettings } from './lib/settings.ts';
 import { ForbiddenError, RuleViolation, type RecurrencePattern } from '@alka/shared';
 import { BUSINESS_TIMEZONE, type Actor } from './services/core.ts';
@@ -45,6 +45,8 @@ import { collectOrder, counterSale } from './services/counter.ts';
 import { registerRevisionRoutes } from './routes/revisions.ts';
 import { registerFeedbackRoutes } from './routes/feedback.ts';
 import { registerOctoberRoutes } from './routes/october.ts';
+import * as trucks from './services/trucks.ts';
+import { registerTruckRoutes } from './routes/trucks.ts';
 import * as messaging from './services/messaging.ts';
 import * as paperwork from './services/paperwork.ts';
 
@@ -79,7 +81,61 @@ export async function buildServer(db: Db) {
   // Quiet by default: the console window is user-facing, so only problems
   // should appear there. Set LOG_LEVEL=info to see every request.
   const app = Fastify({ logger: { level: process.env.LOG_LEVEL ?? 'warn' } });
-  await app.register(cors, { origin: process.env.CORS_ORIGIN ?? true });
+  // The app and its API are served from one address, so no other site needs
+  // to call it. CORS_ORIGIN can still name one (a separate dev frontend).
+  await app.register(cors, { origin: process.env.CORS_ORIGIN ?? false });
+
+  /*
+   * Security (tester's findings, 10 Oct 2026, points 17-18), before real data.
+   *
+   * Signing in sets an httpOnly cookie the page's JavaScript cannot read, so a
+   * script injected into a page cannot lift the session. SameSite=Strict and a
+   * header only the app sends (x-alka-request) on every change keep another
+   * website from acting in a signed-in person's name. Secure is added when the
+   * site is reached over https (Railway), and left off for http://localhost
+   * on Everton's PC, where a Secure cookie would never be sent back.
+   * A Bearer token in the Authorization header still works (tests, scripts);
+   * it is not sent by the browser on its own, so it needs no such check.
+   */
+  const isHttps = (req: { headers: Record<string, unknown>; protocol?: string }) =>
+    String(req.headers['x-forwarded-proto'] ?? '').split(',')[0].trim() === 'https' || req.protocol === 'https';
+  const readCookie = (req: { headers: Record<string, unknown> }, name: string): string | null => {
+    for (const part of String(req.headers.cookie ?? '').split(';')) {
+      const i = part.indexOf('=');
+      if (i > 0 && part.slice(0, i).trim() === name) return decodeURIComponent(part.slice(i + 1).trim());
+    }
+    return null;
+  };
+  const sessionCookie = (req: Parameters<typeof isHttps>[0], value: string, maxAge: number) =>
+    `${SESSION_COOKIE}=${value}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${maxAge}${isHttps(req) ? '; Secure' : ''}`;
+
+  // Security headers on every response (point 17).
+  const CSP = [
+    "default-src 'self'",
+    "script-src 'self'",
+    // React sets style attributes, and the few server-made pages (unsubscribe)
+    // carry a small <style>; no inline script is allowed anywhere.
+    "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
+    "font-src 'self' https://fonts.gstatic.com data:",
+    "img-src 'self' data: blob:",
+    "connect-src 'self'",
+    "object-src 'none'",
+    "base-uri 'self'",
+    "form-action 'self'",
+    "frame-ancestors 'none'",
+  ].join('; ');
+  app.addHook('onSend', async (req, reply) => {
+    // The policy governs pages. A PDF or picture carries none, so the
+    // browser's own PDF viewer is never blocked by object-src.
+    const type = String(reply.getHeader('content-type') ?? '');
+    if (!type || type.includes('text/html') || type.includes('application/json')) {
+      reply.header('content-security-policy', CSP);
+    }
+    reply.header('x-frame-options', 'DENY');
+    reply.header('x-content-type-options', 'nosniff');
+    reply.header('referrer-policy', 'strict-origin-when-cross-origin');
+    if (isHttps(req as never)) reply.header('strict-transport-security', 'max-age=31536000; includeSubDomains');
+  });
 
   /**
    * Accept an empty body on a JSON request.
@@ -137,6 +193,12 @@ export async function buildServer(db: Db) {
     // its JS and CSS) must be publicly reachable - it contains no data, and
     // requiring a token to fetch the login page itself is a deadlock.
     if (!req.url.startsWith('/api/')) return;
+    // An address that is not an API route is a 404 for everyone, signed in
+    // or not (point 19): the not-found handler answers it.
+    if ((req as { is404?: boolean }).is404 || !req.routeOptions?.url || req.routeOptions.url === '/*') return;
+    // For Railway and any monitoring: up or not, nothing more.
+    if (req.url === '/api/health' || req.url.startsWith('/api/health?')) return;
+    if (req.url.startsWith('/api/auth/logout')) return;
     if (req.url.startsWith('/api/auth/login')) return;
     if (req.url.startsWith('/api/auth/forgot-password')) return;
     // Answering this is how the browser learns the server is out of date;
@@ -153,9 +215,34 @@ export async function buildServer(db: Db) {
     // only to the unguessable token in the link.
     if (req.url.startsWith('/api/public/')) return;
     const header = req.headers.authorization;
-    const token = header?.startsWith('Bearer ') ? header.slice(7) : null;
+    const bearer = header?.startsWith('Bearer ') ? header.slice(7) : null;
+    const cookie = bearer ? null : readCookie(req as never, SESSION_COOKIE);
+    const token = bearer ?? cookie;
     const session = token ? verifyToken(token) : null;
-    if (!session) return reply.status(401).send({ error: 'authentication required' });
+    if (!session) {
+      // An expired cookie is cleared, so the browser stops sending it.
+      if (cookie) reply.header('set-cookie', sessionCookie(req as never, '', 0));
+      return reply.status(401).send({
+        error: cookie ? 'Your session has expired. Please sign in again.' : 'authentication required',
+      });
+    }
+
+    // Cross-site protection for the cookie (point 18): a change made with it
+    // must carry the app's own header, and come from this site.
+    if (cookie && !['GET', 'HEAD', 'OPTIONS'].includes(req.method)) {
+      const origin = String(req.headers.origin ?? '');
+      let sameSite = true;
+      if (origin) {
+        try {
+          const o = new URL(origin);
+          const host = String(req.headers['x-forwarded-host'] ?? req.headers.host ?? '').split(',')[0].trim();
+          sameSite = o.host === host || /^(localhost|127\.0\.0\.1|\[::1\])$/.test(o.hostname);
+        } catch { sameSite = false; }
+      }
+      if (req.headers['x-alka-request'] !== '1' || !sameSite) {
+        return reply.status(403).send({ error: 'This request was refused because it did not come from the Alka Vida app. Reload the page and try again.' });
+      }
+    }
 
     // A good signature proves the token came from this system - not that the
     // person it names is still here. Wiping the data reseeds the users with
@@ -200,6 +287,18 @@ export async function buildServer(db: Db) {
   };
 
   app.get('/health', async () => ({ ok: true }));
+  app.get('/api/health', async () => ({ ok: true }));
+
+  // Not for search engines, for now (point 19).
+  app.get('/robots.txt', async (_req, reply) =>
+    reply.header('content-type', 'text/plain; charset=utf-8').send('User-agent: *\nDisallow: /\n'));
+  // The logo as the browser-tab icon (point 16).
+  const faviconFile = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'web', 'public', 'favicon.png');
+  app.get('/favicon.ico', async (_req, reply) => {
+    if (!existsSync(faviconFile)) return reply.status(404).send({ error: 'not found' });
+    return reply.header('content-type', 'image/png').header('cache-control', 'public, max-age=86400')
+      .send(readFileSync(faviconFile));
+  });
 
   /**
    * Serve the built frontend from this same server when it exists, so the
@@ -253,20 +352,26 @@ export async function buildServer(db: Db) {
       }
     });
 
-    app.setNotFoundHandler((req, reply) => {
-      if (req.url.startsWith('/api/')) {
-        return reply.status(404).send({ error: 'not found' });
-      }
-      // A missing asset must fail as a missing asset. Serving index.html here
-      // hands the browser HTML where it expected JavaScript, which surfaces as
-      // a baffling syntax error instead of an obvious 404.
-      if (req.url.startsWith('/assets/')) {
-        return reply.status(404).send({ error: 'asset not found - reload the page' });
-      }
-      // Everything else is a client route: serve the shell.
-      return reply.sendFile('index.html');
-    });
   }
+  const hasShell = existsSync(join(webDist, 'index.html'));
+  app.setNotFoundHandler((req, reply) => {
+    if (req.url.startsWith('/api/')) {
+      return reply.status(404).send({ error: 'There is no such address in Alka Vida.' });
+    }
+    // A missing asset must fail as a missing asset. Serving index.html here
+    // hands the browser HTML where it expected JavaScript, which surfaces as
+    // a baffling syntax error instead of an obvious 404.
+    if (req.url.startsWith('/assets/')) {
+      return reply.status(404).send({ error: 'asset not found - reload the page' });
+    }
+    // Any other unknown FILE (it has an extension) is a 404 too (point 19).
+    const path = req.url.split('?')[0];
+    if (/\.[A-Za-z0-9]{1,8}$/.test(path) || !hasShell) {
+      return reply.status(404).send({ error: 'not found' });
+    }
+    // Everything else is a client route: serve the shell.
+    return reply.sendFile('index.html');
+  });
 
   /* ---------------- auth ---------------- */
 
@@ -282,11 +387,19 @@ export async function buildServer(db: Db) {
       .send(readFileSync(file));
   });
 
+  // Signing in sets the session cookie; the token never reaches the page's
+  // JavaScript (point 18).
   app.post('/api/auth/login', async (req, reply) => {
-    const { email, password } = req.body as { email: string; password: string };
+    const { email, password } = (req.body ?? {}) as { email: string; password: string };
     const result = await login(db, email, password);
     if (!result) return reply.status(401).send({ error: 'invalid email or password' });
-    return result;
+    reply.header('set-cookie', sessionCookie(req as never, result.token, SESSION_TTL_SECONDS));
+    return { session: result.session };
+  });
+
+  app.post('/api/auth/logout', async (req, reply) => {
+    reply.header('set-cookie', sessionCookie(req as never, '', 0));
+    return { ok: true };
   });
 
   app.get('/api/auth/me', async (req) => req.session);
@@ -469,9 +582,12 @@ export async function buildServer(db: Db) {
   // null for anything that is not a live invitation - never why, because the
   // difference between "expired", "used" and "invented" only helps somebody
   // working through tokens.
-  app.get('/api/invitations/:token', async (req) => {
+  app.get('/api/invitations/:token', async (req, reply) => {
     const { token } = req.params as { token: string };
-    return { invitee: await invitations.inviteeFor(db, token) };
+    const invitee = await invitations.inviteeFor(db, token);
+    // Unknown, used or expired: one 404, never which (point 19).
+    if (!invitee) return reply.status(404).send({ error: 'This link is not valid any more.', invitee: null });
+    return { invitee };
   });
 
   // PUBLIC. Setting a password from an invitation - the one way into an
@@ -794,8 +910,12 @@ export async function buildServer(db: Db) {
     async (req) => routing.assignDriver(db, actorOf(req), (req.params as { id: string }).id,
       (req.body as { driverId?: string | null }).driverId ?? null));
 
+  // A driver starts a round only by confirming the load the office logged
+  // (dual accountability, 10 Oct 2026). The office can still start one.
   app.post('/api/delivery-sheets/:id/start', { preHandler: allow('admin', 'user', 'driver') },
-    async (req) => routing.startRoute(db, actorOf(req), (req.params as { id: string }).id));
+    async (req) => (actorOf(req).role === 'driver'
+      ? trucks.confirmLoad(db, actorOf(req), (req.params as { id: string }).id)
+      : routing.startRoute(db, actorOf(req), (req.params as { id: string }).id)));
 
   app.get('/api/delivery-sheets/:id/candidates', { preHandler: allow('admin', 'user') },
     async (req) => routing.deliveryCandidates(db, (req.params as { id: string }).id));
@@ -1348,6 +1468,7 @@ export async function buildServer(db: Db) {
   registerRevisionRoutes(app as never, db, { allow: allow as never, actorOf, assertOwnCustomer });
   registerFeedbackRoutes(app as never, db, { allow: allow as never, actorOf });
   registerOctoberRoutes(app as never, db, { allow: allow as never, actorOf });
+  registerTruckRoutes(app as never, db, { allow: allow as never, actorOf });
 
   return app;
 }

@@ -68,11 +68,10 @@ describe('Static frontend', { skip: built ? false : 'frontend not built' }, () =
 
   test('an unknown API route returns JSON, never the HTML shell', async () => {
     const res = await app.inject({ method: 'GET', url: '/api/nope' });
-    // Unauthenticated, so the auth check answers first with 401; an
-    // authenticated caller would get the 404. Either way the point holds:
-    // an /api/ path must never be answered with the app shell, or the
-    // client would try to parse HTML as JSON.
-    assert.ok(res.statusCode === 401 || res.statusCode === 404, `got ${res.statusCode}`);
+    // A 404 for everyone, signed in or not (10 Oct 2026, point 19). An /api/
+    // path must never be answered with the app shell, or the client would
+    // try to parse HTML as JSON.
+    assert.equal(res.statusCode, 404);
     assert.doesNotMatch(res.body, /<div id="root">/);
     assert.ok(res.json().error, 'answers with a JSON error');
   });

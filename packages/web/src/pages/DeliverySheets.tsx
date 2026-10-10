@@ -9,6 +9,22 @@ interface Sheet {
   started_at: string | null;
 }
 
+/*
+ * Everton, 10 Oct 2026: a round is in one of three states, said the same way
+ * on the filter and in the Status column. Open with no started_at = Not
+ * started; Open and started = Out on the road; Completed = Settled.
+ */
+type Phase = 'not-started' | 'on-road' | 'settled';
+const PHASES: Array<{ key: Phase; label: string; chip: string }> = [
+  { key: 'not-started', label: 'Not started', chip: 'neutral' },
+  { key: 'on-road', label: 'Out on the road', chip: 'info' },
+  { key: 'settled', label: 'Settled', chip: 'ok' },
+];
+function phaseOf(s: { status: string; started_at: string | null }): Phase {
+  if (s.status === 'Completed') return 'settled';
+  return s.started_at ? 'on-road' : 'not-started';
+}
+
 interface Expected {
   scheduleId: string; customerName: string; zone: string | null; lineSummary: string;
   fromOrder: string; pattern: string; deliveryMode: string;
@@ -21,6 +37,7 @@ export default function DeliverySheets() {
   const [busy, setBusy] = useState(false);
   /** Blank means every date. A day is picked from the calendar. */
   const [day, setDay] = useState('');
+  const [phase, setPhase] = useState<Phase | 'all'>('all');
   /** Standing orders due on the chosen day but not raised yet (point 16). */
   const [expected, setExpected] = useState<Expected[]>([]);
 
@@ -56,7 +73,17 @@ export default function DeliverySheets() {
    */
   const dayOf = (s: Sheet) => String(s.delivery_date).slice(0, 10);
   const daysWithSheets = [...new Set(sheets.map(dayOf))].sort().reverse();
-  const shown = day ? sheets.filter((s) => dayOf(s) === day) : sheets;
+  const onDay = day ? sheets.filter((s) => dayOf(s) === day) : sheets;
+  const shown = phase === 'all' ? onDay : onDay.filter((s) => phaseOf(s) === phase);
+  const pill = (key: Phase | 'all', label: string) => {
+    const n = key === 'all' ? onDay.length : onDay.filter((s) => phaseOf(s) === key).length;
+    return (
+      <button key={key} type="button" className={`pill${phase === key ? ' active' : ''}`}
+              aria-pressed={phase === key} onClick={() => setPhase(key)}>
+        {label} · {n}
+      </button>
+    );
+  };
 
   return (
     <>
@@ -130,6 +157,10 @@ export default function DeliverySheets() {
       )}
 
       <div className="panel">
+        <div className="pills" role="group" aria-label="Status">
+          {pill('all', 'All')}
+          {PHASES.map((p) => pill(p.key, p.label))}
+        </div>
         <table>
           <thead>
             <tr>
@@ -144,11 +175,13 @@ export default function DeliverySheets() {
                 <td>{s.zone}</td>
                 <td>
                   {s.driver_name ?? <span className="muted">Not assigned</span>}
-                  {s.started_at && <div className="muted small">started</div>}
                 </td>
                 <td>{s.stop_count}</td>
                 <td>
-                  <span className={`chip ${s.status === 'Open' ? 'info' : 'ok'}`}>{s.status}</span>
+                  {(() => {
+                    const p = PHASES.find((x) => x.key === phaseOf(s))!;
+                    return <span className={`chip ${p.chip}`}>{p.label}</span>;
+                  })()}
                 </td>
                 <td className="num">
                   {s.cash_variance_cents === null || Number(s.cash_variance_cents) === 0
@@ -173,9 +206,11 @@ export default function DeliverySheets() {
         </table>
         {shown.length === 0 && (
           <p className="muted">
-            {day
-              ? 'No round on that day. Pick another date, or show every day.'
-              : 'No delivery rounds yet.'}
+            {phase !== 'all' && onDay.length > 0
+              ? 'No round in that state. Choose All to see the rest.'
+              : day
+                ? 'No round on that day. Pick another date, or show every day.'
+                : 'No delivery rounds yet.'}
           </p>
         )}
       </div>

@@ -30,7 +30,9 @@ before(async () => {
       method: 'POST', url: '/api/auth/login', payload: { email, password },
     });
     assert.equal(res.statusCode, 200, `${role} login failed: ${res.body}`);
-    tokens[role] = res.json().token;
+    // Signing in sets an httpOnly cookie (10 Oct 2026); the body carries no token.
+    assert.equal(res.json().token, undefined, 'the token never reaches page scripts');
+    tokens[role] = res.cookies.find((c) => c.name === 'av_session')!.value;
   }
 });
 

@@ -15,6 +15,9 @@ const PARISHES = [
   'Manchester', 'Clarendon', 'St Catherine',
 ];
 
+/** The same maximums the server checks (registration.MAX). */
+const MAX = { name: 120, email: 254, phone: 30, line: 160, town: 80, notes: 500 };
+
 const BLANK = {
   accountType: 'Corporate' as AccountType,
   businessName: '', contactPerson: '',
@@ -41,9 +44,9 @@ export default function Register() {
 
   const isCorporate = f.accountType === 'Corporate';
 
-  const ready = f.email.trim() && f.phone.trim() && (isCorporate
-    ? f.businessName.trim() && f.contactPerson.trim()
-    : f.firstName.trim() && f.lastName.trim());
+  // Where to deliver is required too (10 Oct 2026): street, town and parish.
+  const ready = f.email.trim() && f.phone.trim() && f.addressLine1.trim() && f.city.trim() && f.parish
+    && (isCorporate ? f.businessName.trim() && f.contactPerson.trim() : f.firstName.trim() && f.lastName.trim());
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
@@ -121,12 +124,12 @@ export default function Register() {
               <>
                 <div className="field">
                   <label htmlFor="bn">Business name</label>
-                  <input id="bn" required value={f.businessName}
+                  <input id="bn" required maxLength={MAX.name} autoComplete="organization" value={f.businessName}
                          onChange={(e) => setF({ ...f, businessName: e.target.value })} />
                 </div>
                 <div className="field">
                   <label htmlFor="cp">Who we speak to</label>
-                  <input id="cp" required value={f.contactPerson}
+                  <input id="cp" required maxLength={MAX.name} autoComplete="name" value={f.contactPerson}
                          onChange={(e) => setF({ ...f, contactPerson: e.target.value })} />
                 </div>
               </>
@@ -134,12 +137,12 @@ export default function Register() {
               <div className="two">
                 <div className="field">
                   <label htmlFor="fn">First name</label>
-                  <input id="fn" required value={f.firstName}
+                  <input id="fn" required maxLength={MAX.name} autoComplete="given-name" value={f.firstName}
                          onChange={(e) => setF({ ...f, firstName: e.target.value })} />
                 </div>
                 <div className="field">
                   <label htmlFor="ln">Last name</label>
-                  <input id="ln" required value={f.lastName}
+                  <input id="ln" required maxLength={MAX.name} autoComplete="family-name" value={f.lastName}
                          onChange={(e) => setF({ ...f, lastName: e.target.value })} />
                 </div>
               </div>
@@ -147,12 +150,12 @@ export default function Register() {
             <div className="two">
               <div className="field">
                 <label htmlFor="ph">Phone</label>
-                <input id="ph" type="tel" required value={f.phone}
+                <input id="ph" type="tel" required maxLength={MAX.phone} autoComplete="tel" value={f.phone}
                        onChange={(e) => setF({ ...f, phone: e.target.value })} />
               </div>
               <div className="field">
                 <label htmlFor="em">Email</label>
-                <input id="em" type="email" required value={f.email}
+                <input id="em" type="email" required maxLength={MAX.email} autoComplete="email" value={f.email}
                        onChange={(e) => setF({ ...f, email: e.target.value })} />
               </div>
             </div>
@@ -162,22 +165,22 @@ export default function Register() {
             <h2 className="side-h">Where we deliver</h2>
             <div className="field">
               <label htmlFor="a1">Street and number</label>
-              <input id="a1" value={f.addressLine1}
+              <input id="a1" required maxLength={MAX.line} autoComplete="address-line1" value={f.addressLine1}
                      onChange={(e) => setF({ ...f, addressLine1: e.target.value })} />
             </div>
             <div className="field">
               <label htmlFor="a2">Building, unit or landmark (optional)</label>
-              <input id="a2" value={f.addressLine2}
+              <input id="a2" maxLength={MAX.line} autoComplete="address-line2" value={f.addressLine2}
                      onChange={(e) => setF({ ...f, addressLine2: e.target.value })} />
             </div>
             <div className="two">
               <div className="field">
                 <label htmlFor="ct">Town</label>
-                <input id="ct" value={f.city} onChange={(e) => setF({ ...f, city: e.target.value })} />
+                <input id="ct" required maxLength={MAX.town} autoComplete="address-level2" value={f.city} onChange={(e) => setF({ ...f, city: e.target.value })} />
               </div>
               <div className="field">
                 <label htmlFor="pa">Parish</label>
-                <select id="pa" value={f.parish} onChange={(e) => setF({ ...f, parish: e.target.value })}>
+                <select id="pa" required autoComplete="address-level1" value={f.parish} onChange={(e) => setF({ ...f, parish: e.target.value })}>
                   <option value="">Choose…</option>
                   {PARISHES.map((p) => <option key={p} value={p}>{p}</option>)}
                 </select>
@@ -185,7 +188,7 @@ export default function Register() {
             </div>
             <div className="field" style={{ marginBottom: 0 }}>
               <label htmlFor="nt">Anything else (optional)</label>
-              <input id="nt" value={f.notes} placeholder="How much you use, best delivery times"
+              <input id="nt" maxLength={MAX.notes} autoComplete="off" value={f.notes} placeholder="How much you use, best delivery times"
                      onChange={(e) => setF({ ...f, notes: e.target.value })} />
             </div>
           </section>

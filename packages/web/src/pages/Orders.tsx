@@ -1,6 +1,7 @@
 import { Fragment, useEffect, useState, type ReactNode } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { api } from '../lib/api';
+import { payMethods, useTakeCard } from '../lib/payments';
 import { money, date, day, relDay, toCents, todayInJamaica } from '../lib/format';
 
 /**
@@ -101,6 +102,7 @@ function origin(o: Order): string {
 }
 
 export default function Orders() {
+  const takeCard = useTakeCard();
   const navigate = useNavigate();
   const [params] = useSearchParams();
   const [orders, setOrders] = useState<Order[]>([]);
@@ -397,7 +399,7 @@ export default function Orders() {
           <div className="field">
             <label htmlFor={`how-${o.id}`}>How</label>
             <select id={`how-${o.id}`} value={paidHow} onChange={(e) => setPaidHow(e.target.value)}>
-              {['Cash', 'Card', 'Bank Transfer'].map((m) => <option key={m}>{m}</option>)}
+              {payMethods(['Cash', 'Card', 'Bank Transfer'], takeCard).map((m) => <option key={m}>{m}</option>)}
             </select>
           </div>
           <div className="field">

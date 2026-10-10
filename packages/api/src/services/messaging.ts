@@ -164,7 +164,8 @@ export async function sendOrderPlacedEmail(db: Db, orderId: string): Promise<{ s
       ? [['Collect from us', whenText]]
       : [['Delivery address', o.address ?? 'Your main address'], ['Delivery date', whenText]],
     button: { label: 'See my orders', url: portalLink('orders') },
-    outro: (o.empties_expected != null ? `You told us you will hand over ${o.empties_expected} empty 5-gallon bottle${o.empties_expected === 1 ? '' : 's'}.\n\n` : '')
+    // Wording from Everton, 10 Oct 2026.
+    outro: (o.empties_expected != null ? `Empties to be returned: ${o.empties_expected}\n\n` : '')
       + 'The invoice is made out from what is actually delivered.',
   });
   return sendLogged(db, 'OrderPlaced', o.order_number, o.customer_id, o.email.trim(),

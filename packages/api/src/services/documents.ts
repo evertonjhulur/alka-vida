@@ -18,7 +18,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { Db, Queryable } from '../db/index.ts';
 import type { Actor } from './core.ts';
-import { audit, businessToday, contactEmail, requireRole, num, siteUrl } from './core.ts';
+import { audit, businessToday, contactEmail, documentFooter, requireRole, num, siteUrl } from './core.ts';
 import { RuleViolation } from '@alka/shared';
 import { getInvoiceDetail } from './invoices.ts';
 import { getStatement, invoicesInStatus, type StatementFilter, type StatementStatus } from './ledger.ts';
@@ -39,25 +39,23 @@ const BRAND = {
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', '..');
 
 /**
- * The company logo, if the owner has supplied one.
+ * The company logo (tester's findings, 10 Oct 2026, point 16: into the app
+ * itself, so the hosted site, emails and PDFs all show it).
  *
- * A file beside the launcher, exactly where the settings file lives, because
- * that is the one folder a non-technical owner already knows to open. It is
- * deliberately NOT in the repository: a logo is the business's property, it
- * changes without the software changing, and a placeholder shipped in git
- * would eventually go out on a real customer's statement.
- *
- * With no logo present every document falls back to the wordmark set in type.
- * Nothing fails and nothing is blank - the letterhead is simply plainer.
+ * The owner's own file beside the launcher wins, so a new logo can still be
+ * dropped in without changing the software; otherwise the copy built into the
+ * app (packages/api/assets/alka-vida-logo.png). Should both be missing,
+ * documents fall back to the wordmark set in type.
  */
 const LOGO_CANDIDATES = ['Alka Vida logo.png', 'Alka Vida logo.jpg', 'logo.png'];
+const BUILT_IN_LOGO = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'assets', 'alka-vida-logo.png');
 
 export function logoPath(): string | null {
   for (const name of LOGO_CANDIDATES) {
     const p = join(REPO_ROOT, name);
     if (existsSync(p)) return p;
   }
-  return null;
+  return existsSync(BUILT_IN_LOGO) ? BUILT_IN_LOGO : null;
 }
 
 /**
@@ -116,6 +114,31 @@ export interface InvoiceDocument {
 }
 
 /** A new letter-size document collecting into a Buffer. */
+/**
+ * The bank details and note to the customer (Everton, 10 Oct 2026, point 5),
+ * printed on every invoice and statement - never on a quote or a credit
+ * note. The text is a setting (Settings › Invoices & payments) and is printed
+ * line for line as typed; "Electronic Transfers:" and "Note to customer" are
+ * set in bold as headings.
+ */
+async function drawPaymentFooter(doc: PDFKit.PDFDocument, db: Queryable, left: number, width: number): Promise<void> {
+  const text = await documentFooter(db);
+  if (!text) return;
+  const lines = text.split('\n');
+  const height = lines.length * 11 + 16;
+  if (doc.y + height > 760) { doc.addPage(); doc.y = 50; }
+  doc.moveDown(1.2);
+  const top = doc.y;
+  doc.moveTo(left, top).lineTo(left + width, top).strokeColor(COLOR_BLUE).lineWidth(0.5).stroke();
+  doc.y = top + 6;
+  for (const line of lines) {
+    const heading = /^(electronic transfers:?|note to customer:?)$/i.test(line.trim());
+    doc.font(heading ? 'Helvetica-Bold' : 'Helvetica').fontSize(8.5).fillColor('#222')
+      .text(line, left, doc.y, { width });
+  }
+  doc.font('Helvetica');
+}
+
 function newDoc(): { doc: PDFKit.PDFDocument; finished: Promise<Buffer> } {
   const doc = new PDFDocument({ size: 'LETTER', margin: 50 });
   const chunks: Buffer[] = [];
@@ -312,6 +335,8 @@ async function drawInvoice(doc: PDFKit.PDFDocument, db: Db, invoiceId: string) {
     row('Paid', ledger.amountPaidCents);
     row('Balance due', ledger.balanceCents, true);
   }
+
+  if (!isCN) await drawPaymentFooter(doc, db, left, 510);
 
   doc.moveDown(2).fontSize(8).fillColor('#777')
     .text(`${BRAND.company}  ·  All amounts in Jamaican dollars${ledger.gct_exempt ? '' : ', GCT inclusive'}.`
@@ -673,6 +698,8 @@ export async function renderStatementPdf(
     });
     doc.y = top + 34;
   }
+
+  await drawPaymentFooter(doc, db, left, right - left);
 
   doc.moveDown(1.5).fontSize(8).fillColor('#777')
     .text(

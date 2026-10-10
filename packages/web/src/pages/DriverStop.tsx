@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { api, getSession } from '../lib/api';
+import { payMethods, useTakeCard } from '../lib/payments';
 import { money, toCents } from '../lib/format';
 
 interface StopLine {
@@ -53,6 +54,10 @@ interface Stop {
   payment_amount_cents?: number;
   payment_method?: string | null;
   remainder_to?: string | null;
+  sheet_status?: string;
+  settled_at?: string | null;
+  /** Payments added after the delivery, each on a stop of its own (10 Oct 2026). */
+  laterPayments?: Array<{ id: string; payment_method: string | null; payment_amount_cents: number }>;
   /** 5-gallon empties the customer said they would hand over (point 13). */
   empties_expected?: number | null;
   bottleCharge?: { productId: string; name: string; priceCents: number } | null;
@@ -83,6 +88,7 @@ const OUTCOME_WORDS: Record<string, string> = {
  * underneath.
  */
 export default function DriverStop() {
+  const takeCard = useTakeCard();
   const { stopId } = useParams();
   const office = ['admin', 'user'].includes(getSession()?.role ?? '');
 
@@ -106,6 +112,10 @@ export default function DriverStop() {
   /** The bottle charge for empties short at the door (point 13). */
   const [charge, setCharge] = useState(false);
   const [chargeQty, setChargeQty] = useState('');
+
+  /** "Add a payment" on a stop already delivered (10 Oct 2026, point 2). */
+  const [addHow, setAddHow] = useState('Cash');
+  const [addAmt, setAddAmt] = useState('');
 
   const [saved, setSaved] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -282,6 +292,69 @@ export default function DriverStop() {
    * A payment-only stop (point 10): the driver added it to take money where
    * there was nothing to deliver. Nothing to do here but say what was taken.
    */
+  /** Amount and method only: the order and its lines are not touched. */
+  async function addPayment() {
+    setBusy(true); setError(null); setSaved(null);
+    try {
+      const amt = toCents(addAmt || '0');
+      await api.post(`/api/stops/${stop!.id}/add-payment`, { method: addHow, amountCents: amt });
+      setSaved(`${money(amt)} ${addHow.toLowerCase()} added. It goes on their account when the office settles the round.`);
+      setAddAmt('');
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not add the payment');
+    } finally { setBusy(false); }
+  }
+
+  const roundOpen = (stop.sheet_status ?? 'Open') === 'Open' && !stop.settled_at;
+  const payWays = payMethods(PAY_WAYS, takeCard).filter(([v]) => v);
+
+  /* A "Collect payment" stop the office planned (10 Oct 2026, point 3). */
+  if (!stop.order_id && stop.stop_outcome === 'Pending') {
+    const owes = stop.accountBalanceCents ?? 0;
+    return (
+      <div className="stop-screen">
+        <div className="stop-bar">
+          <Link to={back}>‹ {office ? 'The round' : 'My route'}</Link>
+          <strong>Collect payment</strong>
+          <span className="muted small">{stop.sheet_zone ?? ''}</span>
+        </div>
+        {error && <div className="notice error">{error}</div>}
+        <section className="panel stop-who">
+          <div className="stop-name">{stop.customer_name}</div>
+          <div className="muted">{stop.delivery_address ?? ''}</div>
+          {stop.driver_notes && <div className="stop-notes" style={{ marginTop: 8 }}>{stop.driver_notes}</div>}
+        </section>
+        <section className="panel">
+          <div className="collect-head">
+            <h2 className="side-h" style={{ margin: 0 }}>They owe</h2>
+            <div className="owed">{money(owes)}</div>
+          </div>
+          <div className="seg pay-ways" role="group" aria-label="How they paid">
+            {payWays.map(([v, label]) => (
+              <button key={label} type="button" className={method === v ? 'active' : ''} aria-pressed={method === v}
+                      onClick={() => { setMethod(v); if (!collected && owes > 0) setCollected((owes / 100).toFixed(2)); }}>{label}</button>
+            ))}
+          </div>
+          {method && (
+            <div className="field" style={{ marginTop: 10 }}>
+              <label htmlFor="amt">Amount taken</label>
+              <input id="amt" inputMode="decimal" style={{ width: '100%', boxSizing: 'border-box' }}
+                     value={collected} onChange={(e) => setCollected(e.target.value)} />
+            </div>
+          )}
+        </section>
+        <button type="button" className="big-go" disabled={busy || !method || collectedCents <= 0}
+                onClick={() => record('Payment Only')}>{busy ? 'Saving…' : 'Record the payment'}</button>
+        <div className="not-delivered">
+          <button type="button" className="secondary" disabled={busy} onClick={() => record('Customer Not Home')}>Not home</button>
+          <button type="button" className="secondary" disabled={busy} onClick={() => record('Other', { outcomeNotes: 'Did not pay' })}>Did not pay</button>
+        </div>
+        <p className="muted small" style={{ textAlign: 'center' }}>It goes on their account when the office settles the round.</p>
+      </div>
+    );
+  }
+
   if (!stop.order_id) {
     return (
       <div className="stop-screen">
@@ -450,7 +523,45 @@ export default function DriverStop() {
         )}
       </section>
 
-      <section className="panel">
+      {delivered_ && (
+        <section className="panel">
+          <h2 className="side-h" style={{ marginTop: 0 }}>Payments on this stop</h2>
+          {Number(stop.payment_amount_cents ?? 0) === 0 && !(stop.laterPayments ?? []).length && (
+            <p className="muted small" style={{ marginTop: 0 }}>Nothing taken yet{onTerms ? ` (${onCycle ? `billed ${stop.invoice_cycle!.toLowerCase()}` : stop.payment_terms})` : ''}.</p>
+          )}
+          {Number(stop.payment_amount_cents ?? 0) > 0 && (
+            <div className="total-line"><span>At the delivery · {(stop.payment_method ?? 'Cash').toLowerCase()}</span><span>{money(Number(stop.payment_amount_cents))}</span></div>
+          )}
+          {(stop.laterPayments ?? []).map((p) => (
+            <div key={p.id} className="total-line"><span>Added after · {(p.payment_method ?? 'Cash').toLowerCase()}</span><span>{money(Number(p.payment_amount_cents))}</span></div>
+          ))}
+          <div className="small" style={{ margin: '6px 0 10px' }}>Invoice total <strong>{money(stop.amountOwedCents)}</strong> incl. GCT
+            {(stop.accountBalanceCents ?? 0) > 0 && <> · on their account altogether <strong>{money(stop.accountBalanceCents!)}</strong></>}</div>
+          {roundOpen ? (
+            <div className="bottle-box">
+              <strong>Add a payment</strong>
+              <div className="muted small" style={{ marginBottom: 8 }}>Amount and how they paid only; the delivery itself stays as recorded.</div>
+              <div className="seg pay-ways" role="group" aria-label="How they paid">
+                {payWays.map(([v, label]) => (
+                  <button key={v} type="button" className={addHow === v ? 'active' : ''} aria-pressed={addHow === v}
+                          onClick={() => setAddHow(v)}>{label}</button>
+                ))}
+              </div>
+              <div className="field" style={{ marginTop: 10 }}>
+                <label htmlFor="add-amt">Amount taken</label>
+                <input id="add-amt" inputMode="decimal" style={{ width: '100%', boxSizing: 'border-box' }} placeholder="0.00"
+                       value={addAmt} onChange={(e) => setAddAmt(e.target.value)} />
+              </div>
+              <button type="button" disabled={busy || !(toCents(addAmt || '0') > 0)} onClick={addPayment}>
+                {busy ? 'Saving…' : 'Add the payment'}
+              </button>
+              <div className="muted small" style={{ marginTop: 6 }}>Like all round money, it reaches their account when the office settles the round.</div>
+            </div>
+          ) : <p className="muted small">This round is settled; take any further payment in the office.</p>}
+        </section>
+      )}
+
+      {!delivered_ && <section className="panel">
         <div className="collect-head">
           <h2 className="side-h" style={{ margin: 0 }}>To collect</h2>
           <div className="owed">{money(stop.amountOwedCents)}</div>
@@ -463,7 +574,7 @@ export default function DriverStop() {
             : onTerms ? `on ${stop.payment_terms} terms, so paying now is optional` : 'cash on delivery'}
         </div>
         <div className="seg pay-ways" role="group" aria-label="How they paid">
-          {PAY_WAYS.map(([v, label]) => (
+          {payMethods(PAY_WAYS, takeCard).map(([v, label]) => (
             <button key={label} type="button" className={method === v ? 'active' : ''} aria-pressed={method === v}
                     onClick={() => {
                       setMethod(v);
@@ -483,7 +594,7 @@ export default function DriverStop() {
             The invoice stays open until the office sees the transfer has cleared.
           </div>
         )}
-      </section>
+      </section>}
 
       {!delivered_ && (
         <>

@@ -1,7 +1,11 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { api, type Session } from '../lib/api';
-import { money, date, day, time } from '../lib/format';
+import { money, date, day, time, when } from '../lib/format';
+import {
+  AddStopPanel, AddToLoadPanel, AdditionsList, LoadingPanel, ReturnsPanel, TruckTable, KIND_WORDS, collectionSummary,
+  type Collection, type Truck,
+} from '../components/Truck';
 
 interface Stop {
   id: string;
@@ -37,6 +41,8 @@ interface Sheet {
   started_at: string | null;
   vehicle: string | null;
   stops: Stop[];
+  collections: Collection[];
+  truck: Truck | null;
 }
 
 interface Driver { id: string; name: string }
@@ -67,6 +73,12 @@ export default function RouteDetail({ session }: { session: Session }) {
   const [error, setError] = useState<string | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  /** Office panels: record the loading, + Add a stop, correct the returns. */
+  const [loading, setLoading] = useState(false);
+  const [adding, setAdding] = useState(false);
+  const [fixReturns, setFixReturns] = useState(false);
+  /** Adding to a load the driver has already confirmed. */
+  const [adding2, setAdding2] = useState(false);
 
   const office = session.role === 'admin' || session.role === 'user';
 
@@ -136,11 +148,19 @@ export default function RouteDetail({ session }: { session: Session }) {
     return 'Visit order updated.';
   });
 
+  const done = (message: string) => {
+    setMsg(message); setError(null); setLoading(false); setAdding(false); setFixReturns(false); setAdding2(false);
+    load();
+  };
+
   if (error && !sheet) return <div className="notice error">{error}</div>;
   if (!sheet) return <p className="muted">Loading…</p>;
 
   const open = sheet.status === 'Open';
-  const worked = sheet.stops.filter((s) => s.stop_outcome !== 'Pending').length;
+  const collections = sheet.collections ?? [];
+  const worked = sheet.stops.filter((s) => s.stop_outcome !== 'Pending').length
+    + collections.filter((c) => c.status !== 'Pending').length;
+  const visitCount = sheet.stops.length + collections.length;
   /**
    * The filled button is the NEXT thing to do with this round, so it follows
    * the round's state: start it, then settle it once every stop has an
@@ -148,7 +168,7 @@ export default function RouteDetail({ session }: { session: Session }) {
    * round can be closed early - but it is no longer the first thing an
    * unstarted round offers.
    */
-  const allWorked = sheet.stops.length > 0 && worked === sheet.stops.length;
+  const allWorked = visitCount > 0 && worked === visitCount;
   const settleIsNext = !!sheet.started_at && allWorked;
 
   /*
@@ -159,13 +179,15 @@ export default function RouteDetail({ session }: { session: Session }) {
   const assigned = !!sheet.assigned_driver_id || !!sheet.driver_name;
   const stage = !open ? 5 : !assigned ? 1 : !sheet.started_at ? 2 : !allWorked ? 3 : 4;
   const statusChip = !open ? ['Settled', 'ok'] : !sheet.started_at ? ['Not started', 'neutral']
-    : allWorked ? ['Back, ready to settle', 'warn'] : ['On the road', 'info'];
+    : allWorked ? ['Back, ready to settle', 'warn'] : ['Out on the road', 'info'];
   const firstPending = sheet.stops.findIndex((s) => s.stop_outcome === 'Pending');
   const onTruck = sheet.stops.reduce((t, s) => t + Number(s.order_total_cents ?? 0), 0);
   const cash = sheet.stops.reduce((t, s) => t + Number(s.payment_amount_cents ?? 0), 0);
   const fullOut = sheet.stops.reduce((t, s) => t + Number(s.bottles_delivered_full ?? 0), 0);
-  const emptiesBack = sheet.stops.reduce((t, s) => t + Number(s.bottles_empties_picked_up ?? 0), 0);
-  const stillOut = sheet.stops.length - worked;
+  const emptiesBack = sheet.stops.reduce((t, s) => t + Number(s.bottles_empties_picked_up ?? 0), 0)
+    + collections.filter((c) => c.kind === 'Empties' && c.status === 'Collected').reduce((t, c) => t + Number(c.empties_count), 0);
+  const stillOut = visitCount - worked;
+  const truck = sheet.truck;
   const stepClass = (n: number) => `step${stage === n ? ' now' : stage > n ? ' done' : ''}`;
 
   return (
@@ -178,7 +200,7 @@ export default function RouteDetail({ session }: { session: Session }) {
       <p className="subtitle">
         {[sheet.driver_name ?? 'No driver yet', sheet.vehicle,
           sheet.started_at ? `started ${time(sheet.started_at)}` : null,
-          `${sheet.stops.length} ${sheet.stops.length === 1 ? 'stop' : 'stops'}`].filter(Boolean).join(' · ')}
+          `${visitCount} ${visitCount === 1 ? 'stop' : 'stops'}`].filter(Boolean).join(' · ')}
       </p>
 
       {error && <div className="notice error">{error}</div>}
@@ -201,14 +223,29 @@ export default function RouteDetail({ session }: { session: Session }) {
           ) : <div className="small">{sheet.driver_name ?? 'no driver'}{sheet.vehicle ? `, ${sheet.vehicle}` : ''}</div>}
         </li>
         <li className={stepClass(2)}>
-          <strong>2 · Started</strong>
-          {sheet.started_at ? <div className="small">{time(sheet.started_at)}</div>
-            : open ? <button type="button" disabled={busy} onClick={start}>Start round</button>
-              : <div className="small">—</div>}
+          <strong>2 · Loaded and started</strong>
+          {/* Dual accountability (10 Oct 2026): the office logs the loading and
+              confirms it loaded; the driver confirms the totals to start. */}
+          {sheet.started_at ? (
+            <div className="small">{time(sheet.started_at)}{truck?.driverConfirmedName ? ` · load confirmed by ${truck.driverConfirmedName}` : ''}</div>
+          ) : !open ? <div className="small">—</div>
+            : !truck ? (
+              <>
+                <button type="button" disabled={busy} onClick={() => setLoading(!loading)}>{loading ? 'Close' : 'Log the loading'}</button>
+                <div><button type="button" className="as-link small" disabled={busy} onClick={start}>start without a loading</button></div>
+              </>
+            ) : (
+              <>
+                <div className="small">Loaded · waiting for {sheet.driver_name ?? 'the driver'} to confirm the load</div>
+                <button type="button" className="as-link small" disabled={busy} onClick={() => setLoading(!loading)}>
+                  {loading ? 'Close' : 'Change the loading'}
+                </button>
+              </>
+            )}
         </li>
         <li className={stepClass(3)}>
           <strong>3 · Delivering</strong>
-          <div className="small">{worked} of {sheet.stops.length} stops worked</div>
+          <div className="small">{worked} of {visitCount} stops worked</div>
         </li>
         <li className={stepClass(4)}>
           <strong>4 · Settle</strong>
@@ -217,6 +254,10 @@ export default function RouteDetail({ session }: { session: Session }) {
           ) : <div className="small">{open ? 'when the driver is back' : 'done'}</div>}
         </li>
       </ol>
+
+      {loading && open && !sheet.started_at && (
+        <LoadingPanel sheetId={sheet.id} onDone={done} onCancel={() => setLoading(false)} />
+      )}
 
       <div className="inv-grid">
         <section className="panel" style={{ padding: 0 }}>
@@ -283,9 +324,30 @@ export default function RouteDetail({ session }: { session: Session }) {
                   </td>
                 </tr>
               ))}
+              {collections.map((c) => (
+                <tr key={c.id}>
+                  <td data-label="Order"><span className="stop-no">·</span></td>
+                  <td data-label="Customer">
+                    <strong>{c.kind === 'Supplier' ? c.supplier_name : c.customer_name}</strong>
+                    <div className="muted small">{(c.kind === 'Supplier' ? c.supplier_address : c.delivery_address) ?? ''}</div>
+                    <div className="small">{KIND_WORDS[c.kind]}{c.added_by_name ? ` · added by ${c.added_by_name}` : ''}</div>
+                  </td>
+                  <td data-label="How" className="small">{collectionSummary(c)}</td>
+                  <td data-label="Status">
+                    <span className={`chip ${c.status === 'Collected' ? 'ok' : c.status === 'Pending' ? 'neutral' : 'warn'}`}>
+                      {c.status === 'Pending' ? 'To do' : c.status}
+                    </span>
+                    {c.kind === 'Returns' && c.credit_decision && (
+                      <div className="small">{c.credit_decision}{c.credit_note_number ? ` ${c.credit_note_number}` : ''}</div>
+                    )}
+                  </td>
+                  <td data-label="Total" className="num"><span className="muted">—</span></td>
+                  <td className="num order-actions"><Link to={`/route/collection/${c.id}`}>Open</Link></td>
+                </tr>
+              ))}
             </tbody>
           </table>
-          {sheet.stops.length === 0 && (
+          {visitCount === 0 && (
             <p className="muted" style={{ padding: '0 16px 14px', margin: 0 }}>
               No stops on this round yet. Add an order waiting for delivery below.
             </p>
@@ -312,11 +374,50 @@ export default function RouteDetail({ session }: { session: Session }) {
               <p className="muted small" style={{ margin: '6px 0 0' }}>
                 Any order not already on an open round, whatever its zone or date: yesterday's missed drop belongs here too.
               </p>
+              <button type="button" className="secondary" style={{ marginTop: 10 }} aria-expanded={adding}
+                      onClick={() => setAdding(!adding)}>
+                {adding ? 'Close' : '+ Add a stop: payment, empties, returned goods or a supplier pick-up'}
+              </button>
+              {adding && <AddStopPanel sheetId={sheet.id} office onDone={done} />}
             </div>
           )}
         </section>
 
         <aside className="inv-side">
+          {truck && (
+            <section className="panel">
+              <h2 className="side-h">The truck</h2>
+              <p className="muted small" style={{ marginTop: 0 }}>
+                Logged {when(truck.loadedAt)} {time(truck.loadedAt)} by {truck.loadedByName ?? '—'}; loaded by {truck.loaderNames.join(', ') || '—'}.
+                {truck.driverConfirmedName
+                  ? ` Confirmed by ${truck.driverConfirmedName} ${time(truck.driverConfirmedAt)}.`
+                  : ' Not yet confirmed by the driver.'}
+                {truck.returnedAt ? ` Counted back ${time(truck.returnedAt)} by ${truck.returnedByName ?? '—'}.` : ''}
+              </p>
+              <TruckTable truck={truck} />
+              <AdditionsList additions={truck.additions ?? []} role="office" onDone={done} />
+              {open && office && truck.driverConfirmedAt && !truck.returnedAt && (
+                adding2
+                  ? <AddToLoadPanel sheetId={sheet.id} onDone={done} onCancel={() => setAdding2(false)} />
+                  : <button type="button" className="secondary" style={{ marginTop: 8 }} onClick={() => setAdding2(true)}>+ Add to the load</button>
+              )}
+              {truck.returnedAt && truck.emptiesBack !== null && (
+                <div className="total-line"><span>Empties off the truck</span><span>{truck.emptiesBack}{truck.emptiesBack !== emptiesBack ? ` (recorded ${emptiesBack})` : ''}</span></div>
+              )}
+              {truck.returnNotes && <div className="small">{truck.returnNotes}</div>}
+              {open && office && !truck.returnedAt && !allWorked && !fixReturns && sheet.started_at && (
+                <button type="button" className="as-link small" onClick={() => setFixReturns(true)}>
+                  Count what came back now (the driver is still out)
+                </button>
+              )}
+              {open && office && sheet.started_at && ((!truck.returnedAt && allWorked) || fixReturns) && (
+                <ReturnsPanel sheetId={sheet.id} truck={truck} expectedEmpties={emptiesBack} onDone={done} />
+              )}
+              {open && office && truck.returnedAt && !fixReturns && (
+                <button type="button" className="as-link small" onClick={() => setFixReturns(true)}>Correct what came back</button>
+              )}
+            </section>
+          )}
           <section className="panel">
             <h2 className="side-h">Cash and bottles so far</h2>
             <div className="total-line"><span>On the truck</span><span>{money(onTruck)}</span></div>

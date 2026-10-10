@@ -58,9 +58,21 @@ interface MaterialCost {
 }
 
 const TABS = [
-  ['sales', 'Sales'], ['transactions', 'Sales transactions'], ['margin', 'Margin'], ['rounds', 'Rounds and cash'], ['owed', 'Money owed'], ['bottles', 'Bottles'],
-  ['discounts', 'Discounts'], ['materials', 'Material cost'],
+  ['sales', 'Sales'], ['transactions', 'Sales transactions'], ['margin', 'Margin'], ['rounds', 'Rounds and cash'], ['loadings', 'Truck loadings'],
+  ['owed', 'Money owed'], ['bottles', 'Bottles'], ['discounts', 'Discounts'], ['materials', 'Material cost'],
 ] as const;
+
+/** One truck loading (10 Oct 2026, point 4): every loader is credited with the whole load. */
+interface Loading {
+  sheetId: string; day: string; zone: string; driverName: string | null; loadedAt: string;
+  loadedByName: string | null; loaders: string[]; returned: boolean;
+  driverConfirmedName: string | null; driverConfirmedAt: string | null;
+  lines: Array<{ product: string; bottlesPerCase: number; loaded: number; added?: number; delivered: number; returned: number | null; difference: number | null }>;
+  /** Added after the driver confirmed; credited to their own loaders. */
+  additions?: Array<{ addedAt: string; addedByName: string | null; loaderNames: string[]; driverConfirmedName: string | null;
+    lines: Array<{ name: string; bottlesPerCase: number; bottles: number }> }>;
+}
+const qtyOf = (bpc: number, bottles: number) => (bpc > 0 ? `${Math.round((bottles / bpc) * 100) / 100} cs` : `${bottles}`);
 type Tab = typeof TABS[number][0];
 type Period = 'month' | 'last' | 'year' | 'all' | 'custom';
 
@@ -100,6 +112,7 @@ export default function Reports() {
   const [disc, setDisc] = useState<{ totals: DiscountTotals; byClient: PerClient[] } | null>(null);
   const [materials, setMaterials] = useState<MaterialCost[] | null>(null);
   const [txns, setTxns] = useState<Txn[] | null>(null);
+  const [loadings, setLoadings] = useState<Loading[] | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const q = new URLSearchParams();
@@ -113,6 +126,7 @@ export default function Reports() {
     if (tab === 'sales' || tab === 'bottles') api.get<Sales>(`/api/reports/sales?${qs}`).then(setSales).catch(fail);
     if (tab === 'rounds') api.get<Rounds>(`/api/reports/rounds?${qs}`).then(setRounds).catch(fail);
     if (tab === 'margin') api.get<Margin[]>(`/api/reports/margin?${qs}`).then(setMargin).catch(fail);
+    if (tab === 'loadings') api.get<Loading[]>(`/api/reports/loadings?${qs}`).then(setLoadings).catch(fail);
     if (tab === 'transactions') api.get<Txn[]>(`/api/reports/sales-transactions?${qs}`).then(setTxns).catch(fail);
     if (tab === 'discounts') api.get<{ totals: DiscountTotals; byClient: PerClient[] }>(`/api/reports/discounts?${qs}`).then(setDisc).catch(fail);
   }, [tab, qs]);
@@ -168,6 +182,25 @@ export default function Reports() {
         ...margin.map((m) => [m.name, m.bottlesSold, dollars(m.salesCents), dollars(m.materialPerBottleCents),
           dollars(m.materialCents), dollars(m.marginCents), m.marginPercent ?? '']),
         [], ['Labour, delivery and overheads are not included.'],
+      ]);
+    } else if (tab === 'loadings' && loadings) {
+      downloadCsv(file('truck-loadings'), [
+        ['Day', 'Logged at', 'Round', 'Driver', 'Loaded by', 'Logged by (office)', 'Confirmed by (driver)', 'Product', 'Loaded', 'Delivered', 'Back', 'Difference', 'Unit'],
+        ...loadings.flatMap((l) => l.loaders.length ? l.loaders.map((who) => ({ l, who })) : [{ l, who: '' }]).flatMap(({ l, who }) =>
+          l.lines.map((x) => {
+            const per = x.bottlesPerCase > 0 ? x.bottlesPerCase : 1;
+            return [l.day, new Date(l.loadedAt).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', timeZone: 'America/Jamaica' }),
+              l.zone, l.driverName ?? '', who, l.loadedByName ?? '', l.driverConfirmedName ?? 'not confirmed', short(x.product), x.loaded / per, x.delivered / per,
+              x.returned === null ? '' : x.returned / per, x.difference === null ? '' : x.difference / per,
+              x.bottlesPerCase > 0 ? 'cases' : 'bottles'];
+          })),
+        ...loadings.flatMap((l) => (l.additions ?? []).flatMap((a) => (a.loaderNames.length ? a.loaderNames : ['']).flatMap((who) =>
+          a.lines.map((x) => {
+            const per = x.bottlesPerCase > 0 ? x.bottlesPerCase : 1;
+            return [l.day, new Date(a.addedAt).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', timeZone: 'America/Jamaica' }),
+              `${l.zone} (added later)`, l.driverName ?? '', who, a.addedByName ?? '', a.driverConfirmedName ?? 'not confirmed',
+              short(x.name), x.bottles / per, '', '', '', x.bottlesPerCase > 0 ? 'cases' : 'bottles'];
+          })))),
       ]);
     } else if (tab === 'owed' && owed) {
       downloadCsv('alka-vida-money-owed.csv', [
@@ -517,6 +550,69 @@ export default function Reports() {
     );
   };
 
+  const loadingsTab = () => {
+    if (!loadings) return <p className="muted">Loading…</p>;
+    if (loadings.length === 0) return <div className="panel"><p className="muted" style={{ margin: 0 }}>No truck loadings recorded in {range.label}.</p></div>;
+    // By day and loader: how many loadings each person did, and what they loaded.
+    const byDayLoader = new Map<string, { day: string; who: string; loads: number; units: Map<string, number> }>();
+    for (const l of loadings) {
+      for (const who of l.loaders.length ? l.loaders : ['(nobody named)']) {
+        const key = `${l.day}|${who}`;
+        const row = byDayLoader.get(key) ?? { day: l.day, who, loads: 0, units: new Map<string, number>() };
+        row.loads += 1;
+        for (const x of l.lines) row.units.set(short(x.product), (row.units.get(short(x.product)) ?? 0) + x.loaded / (x.bottlesPerCase > 0 ? x.bottlesPerCase : 1));
+        byDayLoader.set(key, row);
+      }
+      for (const a of l.additions ?? []) {
+        for (const who of a.loaderNames.length ? a.loaderNames : ['(nobody named)']) {
+          const key = `${l.day}|${who}`;
+          const row = byDayLoader.get(key) ?? { day: l.day, who, loads: 0, units: new Map<string, number>() };
+          row.loads += 1;
+          for (const x of a.lines) row.units.set(short(x.name), (row.units.get(short(x.name)) ?? 0) + x.bottles / (x.bottlesPerCase > 0 ? x.bottlesPerCase : 1));
+          byDayLoader.set(key, row);
+        }
+      }
+    }
+    return (
+      <>
+        <div className="panel">
+          <h2 style={{ marginTop: 0 }}>By day and loader</h2>
+          <table>
+            <thead><tr><th>Day</th><th>Loader</th><th className="num">Loadings</th><th>Loaded</th></tr></thead>
+            <tbody>
+              {[...byDayLoader.values()].sort((a, b) => b.day.localeCompare(a.day) || a.who.localeCompare(b.who)).map((r) => (
+                <tr key={`${r.day}|${r.who}`}>
+                  <td>{day(r.day)}</td><td>{r.who}</td><td className="num">{r.loads}</td>
+                  <td className="small">{[...r.units].map(([p, n]) => `${Math.round(n * 100) / 100} ${p}`).join(', ')}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        <div className="panel">
+          <h2 style={{ marginTop: 0 }}>Every loading</h2>
+          <table>
+            <thead><tr><th>Round</th><th>Loaded by</th><th>Product</th><th className="num">Loaded</th><th className="num">Delivered</th><th className="num">Back</th><th className="num">Difference</th></tr></thead>
+            <tbody>
+              {loadings.flatMap((l) => l.lines.map((x, i) => (
+                <tr key={`${l.sheetId}-${i}`}>
+                  <td>{i === 0 && <><Link to={`/delivery/${l.sheetId}`}>{day(l.day)} · {l.zone}</Link><div className="muted small">{l.driverName ?? ''}</div></>}</td>
+                  <td className="small">{i === 0 && <>{l.loaders.join(', ')}<div className="muted">logged by {l.loadedByName ?? '—'}; {l.driverConfirmedName ? `confirmed by ${l.driverConfirmedName}` : 'driver not confirmed'}</div></>}</td>
+                  <td>{short(x.product)}</td>
+                  <td className="num">{qtyOf(x.bottlesPerCase, x.loaded + (x.added ?? 0))}{(x.added ?? 0) > 0 && <div className="muted small">incl. {qtyOf(x.bottlesPerCase, x.added!)} added later</div>}</td>
+                  <td className="num">{qtyOf(x.bottlesPerCase, x.delivered)}</td>
+                  <td className="num">{x.returned === null ? <span className="muted">not yet</span> : qtyOf(x.bottlesPerCase, x.returned)}</td>
+                  <td className="num">{x.difference === null || x.difference === 0 ? <span className="muted">—</span>
+                    : <span className="chip bad">{qtyOf(x.bottlesPerCase, Math.abs(x.difference))} {x.difference > 0 ? 'missing' : 'over'}</span>}</td>
+                </tr>
+              )))}
+            </tbody>
+          </table>
+        </div>
+      </>
+    );
+  };
+
   const materialsTab = () => {
     if (!materials) return <p className="muted">Loading…</p>;
     const held = materials.filter((m) => m.quantityOnHand > 0);
@@ -545,7 +641,7 @@ export default function Reports() {
     );
   };
 
-  const body = tab === 'sales' ? salesTab() : tab === 'transactions' ? transactionsTab() : tab === 'margin' ? marginTab() : tab === 'rounds' ? roundsTab() : tab === 'owed' ? owedTab()
+  const body = tab === 'sales' ? salesTab() : tab === 'transactions' ? transactionsTab() : tab === 'margin' ? marginTab() : tab === 'rounds' ? roundsTab() : tab === 'loadings' ? loadingsTab() : tab === 'owed' ? owedTab()
     : tab === 'bottles' ? bottlesTab() : tab === 'discounts' ? discountsTab() : materialsTab();
 
   return (

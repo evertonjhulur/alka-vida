@@ -344,7 +344,7 @@ export default function Portal({ session }: { session: Session }) {
             ? `It came in after our ${cutoff} cut-off for same-day delivery, so we will check it and confirm the day with you shortly.`
             : order.deliveryDate ? `It is booked for delivery on ${when(order.deliveryDate)}.`
               : 'It will go out on the next round for your area.')
-        + '',
+        + (fullFives > 0 && empties !== '' ? ` Empties to be returned: ${Math.max(0, Math.round(Number(empties)) || 0)}` : ''),
       );
       setQty({});
       setWanted(''); setNotes(''); setPo(''); setEmpties('');

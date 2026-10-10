@@ -121,7 +121,11 @@ export async function userAccess(
 
 const b64url = (b: Buffer) => b.toString('base64url');
 
-export function signToken(session: Omit<Session, 'exp'>, ttlSeconds = 12 * 3600): string {
+/** The sign-in cookie (10 Oct 2026): httpOnly, so page scripts never see the token. */
+export const SESSION_COOKIE = 'av_session';
+export const SESSION_TTL_SECONDS = 12 * 3600;
+
+export function signToken(session: Omit<Session, 'exp'>, ttlSeconds = SESSION_TTL_SECONDS): string {
   const payload = { ...session, exp: Math.floor(Date.now() / 1000) + ttlSeconds };
   const header = b64url(Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })));
   const body = b64url(Buffer.from(JSON.stringify(payload)));

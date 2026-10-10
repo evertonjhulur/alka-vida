@@ -9,6 +9,7 @@
 
 import type { Db, Queryable } from '../db/index.ts';
 import type { Actor } from './core.ts';
+import { markPickupsReceived } from './collections.ts';
 import { audit, businessToday, nextNumber, requireRole, num } from './core.ts';
 import type { Cents } from '@alka/shared';
 import {
@@ -345,6 +346,10 @@ export async function receivePurchaseOrder(
       `UPDATE purchase_orders SET status = $2, receiving_date = COALESCE($3::date, business_today()) WHERE id = $1`,
       [poId, status, day],
     );
+
+    // Goods picked up from the supplier on a round are received here; their
+    // pick-up stops stop offering to prefill this (10 Oct 2026, point 3).
+    if (batchIds.length > 0) await markPickupsReceived(t, poId);
 
     await audit(t, actor, 'receive', 'PurchaseOrder', poId, po.po_number,
       { receipts, batchIds, status, receivedOn: day });

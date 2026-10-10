@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useState } from 'react';
-import { useParams } from 'react-router-dom';
+import { Link, useParams } from 'react-router-dom';
 import { api, type Session } from '../lib/api';
 import { money, toCents, date, when } from '../lib/format';
+import { ReturnsPanel, TruckTable, KIND_WORDS, collectionSummary, type Collection, type Truck } from '../components/Truck';
 
 interface Allocation {
   invoiceId: string | null;
@@ -23,6 +24,8 @@ interface StopRow {
   customerName: string;
   outcome: string;
   orderRef: string | null;
+  paymentAfterDelivery?: boolean;
+  note?: string | null;
   deliveredSummary: string;
   paymentMethod: string | null;
   bottlesDeliveredFull: number;
@@ -63,10 +66,16 @@ export default function Settlement({ session }: { session: Session }) {
   const [msg, setMsg] = useState<string | null>(null);
   const [done, setDone] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  /** The truck and the collection stops (10 Oct 2026, points 3 and 4). */
+  const [round, setRound] = useState<{ truck: Truck | null; collections: Collection[]; stops: Array<{ bottles_empties_picked_up?: number }> } | null>(null);
+  const [restock, setRestock] = useState<Record<string, boolean>>({});
 
   const load = useCallback(async () => {
     const r = await api.get<Review>(`/api/delivery-sheets/${sheetId}/settlement`);
     setReview(r);
+    const sh = await api.get<{ truck: Truck | null; collections: Collection[]; stops: Array<{ bottles_empties_picked_up?: number }> }>(`/api/delivery-sheets/${sheetId}`);
+    setRound(sh);
+    if (sh.truck?.emptiesBack != null) setBottlesBack((cur) => (cur === '' ? String(sh.truck!.emptiesBack) : cur));
     // The cash handed in is almost always exactly what the driver recorded
     // collecting, so start there and let it be overridden. Only prefill until
     // the person actually types - never overwrite what they entered.
@@ -79,6 +88,13 @@ export default function Settlement({ session }: { session: Session }) {
   if (error && !review) return <div className="notice error">{error}</div>;
   if (!review) return <p className="muted">Loading…</p>;
 
+  const truck = round?.truck ?? null;
+  const collections = round?.collections ?? [];
+  const emptiesRecorded = (round?.stops ?? []).reduce((t, s) => t + Number(s.bottles_empties_picked_up ?? 0), 0)
+    + collections.filter((c) => c.kind === 'Empties' && c.status === 'Collected').reduce((t, c) => t + Number(c.empties_count), 0);
+  const undecided = collections.filter((c) => c.kind === 'Returns' && c.status === 'Collected' && !c.credit_decision);
+  const truckOut = !!truck && !truck.returnedAt;
+  const unconfirmedAdds = (truck?.additions ?? []).filter((a) => !a.driverConfirmedAt).length;
   const recorded = review.totalCollectedCents;
   const handedIn = actualCash === '' ? null : toCents(actualCash);
   const variance = handedIn === null ? null : handedIn - recorded;
@@ -162,6 +178,20 @@ export default function Settlement({ session }: { session: Session }) {
       await load();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not record the correction');
+    } finally { setBusy(false); }
+  }
+
+  async function decide(c: Collection, creditNote: boolean) {
+    setBusy(true); setError(null); setMsg(null);
+    try {
+      const out = await api.post<{ creditNoteNumber: string | null; approvalRequestId: string | null }>(
+        `/api/collections/${c.id}/decision`, { creditNote, restock: !!restock[c.id] });
+      setMsg(creditNote
+        ? `Credit note ${out.creditNoteNumber ?? ''} raised for ${c.customer_name}${out.approvalRequestId ? '; it counts once an administrator approves it' : ''}.`
+        : `No credit note for ${c.customer_name}'s returned goods.`);
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not save the decision');
     } finally { setBusy(false); }
   }
 
@@ -366,7 +396,7 @@ export default function Settlement({ session }: { session: Session }) {
               <tr key={s.stopId}>
                 <td>
                   <strong>{s.customerName}</strong>
-                  <div className="muted small">{s.orderRef ?? '—'}</div>
+                  <div className="muted small">{s.paymentAfterDelivery ? (s.note ?? 'Payment after delivery') : s.orderRef ?? s.note ?? '—'}</div>
                 </td>
                 <td>
                   <span className={`chip ${s.outcome === 'Delivered' ? 'ok' : s.outcome === 'Payment Only' ? 'info' : 'neutral'}`}>
@@ -413,6 +443,62 @@ export default function Settlement({ session }: { session: Session }) {
         </div>
       ))}
 
+      {truck && (
+        <div className="panel">
+          <h2 style={{ marginTop: 0 }}>The truck</h2>
+          <TruckTable truck={truck} />
+          {truckOut && !locked && (
+            <>
+              <div className="notice warn" style={{ marginTop: 10 }}>
+                Count what came back on the truck before closing: full goods go back on the warehouse stock.
+              </div>
+              <ReturnsPanel sheetId={sheetId!} truck={truck} expectedEmpties={emptiesRecorded}
+                            onDone={(m) => { setMsg(m); load(); }} />
+            </>
+          )}
+        </div>
+      )}
+
+      {collections.length > 0 && (
+        <div className="panel">
+          <h2 style={{ marginTop: 0 }}>Collection stops</h2>
+          <p className="muted small" style={{ marginTop: 0 }}>
+            Settling puts collected empties back into the bottle pool. Returned goods need your decision first.
+            Anything not visited is closed as not collected.
+          </p>
+          <table>
+            <thead><tr><th>Who</th><th>What</th><th>Status</th><th>When settled</th></tr></thead>
+            <tbody>
+              {collections.map((c) => (
+                <tr key={c.id}>
+                  <td><strong>{c.kind === 'Supplier' ? c.supplier_name : c.customer_name}</strong><div className="muted small">{KIND_WORDS[c.kind]}</div></td>
+                  <td className="small">{collectionSummary(c)}</td>
+                  <td><span className={`chip ${c.status === 'Collected' ? 'ok' : c.status === 'Pending' ? 'neutral' : 'warn'}`}>{c.status === 'Pending' ? 'Not visited' : c.status}</span></td>
+                  <td className="small">
+                    {c.kind === 'Empties' && c.status === 'Collected' && `${c.empties_count} back into the pool`}
+                    {c.kind === 'Supplier' && c.status === 'Collected' && (c.purchase_order_id
+                      ? <>Receive on <Link to={`/purchase-orders?po=${c.purchase_order_id}`}>{c.po_number}</Link>{c.received_at ? ' (done)' : ''}</>
+                      : 'Nothing moves: receive it on a PO')}
+                    {c.kind === 'Returns' && c.status === 'Collected' && (c.credit_decision ? (
+                      <>{c.credit_decision}{c.credit_note_number ? ` ${c.credit_note_number}${c.credit_status === 'Pending' ? ' (awaiting approval)' : ''}` : ''}{c.restock ? '; back in stock' : '; not restocked'}</>
+                    ) : !locked && (
+                      <div>
+                        <label className="check" style={{ margin: '0 0 6px' }}>
+                          <input type="checkbox" checked={!!restock[c.id]} onChange={(e) => setRestock({ ...restock, [c.id]: e.target.checked })} />
+                          Put the goods back in stock
+                        </label>
+                        <button type="button" disabled={busy} onClick={() => decide(c, true)}>Raise a credit note</button>{' '}
+                        <button type="button" className="secondary" disabled={busy} onClick={() => decide(c, false)}>No credit note</button>
+                      </div>
+                    ))}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
       {!locked && (
         <div className="panel">
           <h2 style={{ marginTop: 0 }}>Cash and bottle reconciliation</h2>
@@ -458,7 +544,14 @@ export default function Settlement({ session }: { session: Session }) {
                       value={notes} onChange={(e) => setNotes(e.target.value)} />
           </div>
 
-          <button disabled={busy || handedIn === null} onClick={settle}>
+          {(truckOut || undecided.length > 0 || unconfirmedAdds > 0) && (
+            <div className="notice warn">
+              {truckOut ? 'Count what came back on the truck first (above). ' : ''}
+              {unconfirmedAdds ? 'The driver has not confirmed what was added to the load: they confirm it on My route, or cancel it on the round page. ' : ''}
+              {undecided.length ? `Decide on the goods returned by ${undecided.map((c) => c.customer_name).join(', ')}.` : ''}
+            </div>
+          )}
+          <button disabled={busy || handedIn === null || truckOut || undecided.length > 0 || unconfirmedAdds > 0} onClick={settle}>
             {busy ? 'Settling…' : 'Confirm and close route'}
           </button>
         </div>

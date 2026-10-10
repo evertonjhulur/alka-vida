@@ -1195,3 +1195,134 @@ a.button-link.whatsapp:hover { background: #178a45; }
 .remind-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .remind-msg { margin-top: 8px; padding: 8px 10px; background: #f3f8f4; border-radius: 8px; font-size: 14px; white-space: pre-line; }
 @media (max-width: 760px) { .remind-actions { width: 100%; } .remind-actions a { flex: 1; text-align: center; } }
+
+/* ---- Truck loading, returns and collection stops (10 Oct 2026) ---- */
+.load-panel { border: 2px solid var(--brand); }
+.loader-picks { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 0 12px; }
+.truck-table td { white-space: nowrap; }
+.truck-table th { white-space: normal; }
+@media (max-width: 760px) { .truck-table th, .truck-table td { padding-left: 4px; padding-right: 4px; } }
+.truck-table tr.truck-diff td { background: var(--bad-bg); }
+.returns-box { border: 1px solid #e3e8ee; border-radius: 10px; padding: 12px; margin-top: 12px; background: #fafbfc; }
+
+.additions { margin-top: 10px; display: grid; gap: 8px; }
+.addition { border: 1px solid #e3e8ee; border-radius: 10px; padding: 10px 12px; display: grid; gap: 8px; }
+.addition.waiting { border: 2px solid var(--warn); background: var(--warn-bg); }
+
+/* ---- Tomorrow's reminders: tester's findings, 10 Oct 2026 ---- */
+.remind-tick { min-width: 44px; min-height: 44px; justify-content: center; }
+.remind-tick input { width: 22px; height: 22px; }
+.remind-actions a.button-link, .remind-actions button { min-height: 44px; display: inline-flex; align-items: center; justify-content: center; }
+.remind-actions button.as-link { min-width: 44px; }
+a.button-link.is-busy { opacity: .6; pointer-events: none; }
+.no-email { color: var(--warn); margin-top: 2px; }
+@media (max-width: 760px) {
+  .filter-row label.check { min-height: 44px; }
+  .filter-row button, .filter-row a.button-link { min-height: 44px; }
+}
+
+
+/* ---- Tablet widths (tester's findings, 10 Oct 2026, point 10) ----
+ * Between a phone and a laptop (761-900px) the sidebar plus the top bar left
+ * the page too narrow: the top bar's buttons wrapped and tables pushed the
+ * page sideways. Below 900px the navigation is the phone's (top strip / Menu
+ * drawer) and the page gets the full width. The top bar keeps only the
+ * search box, so search is reachable on a phone too. Phone-sized touch
+ * targets and card tables still start at 760px. */
+@media (max-width: 900px) {
+  .app { display: block; }
+  .content-col { display: block; }
+  .deskbar { display: none; }
+  .sidebar { display: none; }
+
+  .topbar {
+    display: block;
+    position: sticky;
+    top: 0;
+    z-index: 20;
+    background: var(--nav);
+    color: #fff;
+  }
+
+  .topbar-main {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 10px 14px;
+  }
+  .topbar-brand { font-weight: 700; font-size: 17px; letter-spacing: .2px; }
+
+  .topbar-menu,
+  .topbar-signout {
+    /* 44px is the smallest thing a thumb hits reliably while standing up. */
+    min-height: 44px;
+    padding: 0 16px;
+    background: transparent;
+    border: 1px solid rgba(255, 255, 255, .35);
+    color: #fff;
+    border-radius: 8px;
+    font-size: 15px;
+  }
+
+  /*
+   * Few destinations: show them all, so reaching one is a single tap.
+   *
+   * A grid, not a sideways-scrolling strip. The strip hid the portal's fourth
+   * module (Statements & invoices) past the right edge of a phone, with its
+   * scrollbar hidden, so nothing said it was there. Two to a row keeps every
+   * one in view.
+   */
+  .topbar-tabs {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 6px;
+    padding: 0 10px 10px;
+  }
+  .topbar-tabs a {
+    min-height: 40px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    padding: 0 12px;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, .1);
+    color: var(--nav-text);
+    text-decoration: none;
+    font-size: 14px;
+  }
+  .topbar-tabs a.active { background: var(--cyan); color: var(--ink); font-weight: 600; }
+
+  /* Many destinations: behind a button, laid over the content. */
+  .topbar-drawer {
+    border-top: 1px solid rgba(255, 255, 255, .12);
+    max-height: 72vh;
+    overflow-y: auto;
+    padding-bottom: 8px;
+  }
+  .topbar-drawer a {
+    display: block;
+    min-height: 46px;
+    line-height: 46px;
+    padding: 0 18px;
+    color: var(--nav-text);
+    text-decoration: none;
+  }
+  .topbar-drawer a.active { background: var(--cyan); color: var(--ink); font-weight: 600; }
+  .topbar-drawer .signout { padding: 12px 18px 4px; }
+  .main { padding: 16px; }
+  .deskbar { display: flex; position: static; height: auto; padding: 8px 14px; }
+  .deskbar > :not(.deskbar-search) { display: none; }
+  .deskbar-search { width: 100%; max-width: none; }
+  .deskbar:not(:has(.deskbar-search)) { display: none; }
+}
+
+/* Wide tables scroll inside their own box, never the whole page; rows of
+ * filters wrap and stack. (A panel holding row menus is left alone: a
+ * scrolling box would clip the menu.) */
+@media (max-width: 1100px) {
+  .main .panel:not(:has(.row-menu)):not(:has(.deskbar-pop)) { overflow-x: auto; }
+  .row, .filter-row, .list-filters, .panel-head { flex-wrap: wrap; }
+  .main input, .main select, .main textarea { max-width: 100%; }
+  .main .field { min-width: 0; max-width: 100%; }
+}

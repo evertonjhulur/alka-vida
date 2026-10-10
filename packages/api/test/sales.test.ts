@@ -75,7 +75,8 @@ describe('Collecting a pickup order', () => {
   test('paying at collection settles the invoice there and then', async () => {
     const order = await pickup();
     const out = await collectOrder(f.db, f.office, {
-      orderId: order.id, amountPaidCents: order.grandTotalCents, method: 'Card',
+      // Was 'Card'; card payments are off by default since 10 Oct 2026 (point 6).
+      orderId: order.id, amountPaidCents: order.grandTotalCents, method: 'Cash',
     });
     assert.equal(out.balanceCents, 0);
     assert.equal(out.status, 'Paid');

@@ -25,12 +25,17 @@ import { insertPayment } from './payments.ts';
 import { amountOwedForStop } from './delivery.ts';
 import { recomputeDelivered } from './orders.ts';
 import { openInvoicesForCustomer } from './invoices.ts';
+import { collectedEmpties, settleCollections } from './collections.ts';
+import { unconfirmedAdditions } from './trucks.ts';
 
 export interface SettlementStopRow {
   stopId: string;
   customerName: string;
   outcome: string;
   orderRef: string | null;
+  /** A payment the driver added after the stop was delivered (10 Oct 2026). */
+  paymentAfterDelivery?: boolean;
+  note?: string | null;
   deliveredSummary: string;
   paymentMethod: string | null;
   bottlesDeliveredFull: number;
@@ -75,9 +80,10 @@ export async function getSettlementReview(
     order_ref: string | null; payment_method: string | null;
     payment_amount_cents: number; settled_at: string | null;
     bottles_delivered_full: number; bottles_empties_picked_up: number;
-    bottles_lost_damaged: number;
+    bottles_lost_damaged: number; after_stop_id: string | null; line_items_summary: string | null;
   }>(
-    `SELECT s.id, s.customer_id, c.name AS customer_name, s.stop_outcome, s.order_ref,
+    `SELECT s.id, s.customer_id, c.name AS customer_name, s.stop_outcome, s.order_ref, s.after_stop_id,
+            s.line_items_summary,
             s.payment_method, s.payment_amount_cents, s.settled_at,
             s.bottles_delivered_full, s.bottles_empties_picked_up, s.bottles_lost_damaged
      FROM delivery_stops s JOIN customers c ON c.id = s.customer_id
@@ -113,6 +119,8 @@ export async function getSettlementReview(
       customerName: s.customer_name,
       outcome: s.stop_outcome,
       orderRef: s.order_ref,
+      paymentAfterDelivery: !!s.after_stop_id,
+      note: s.after_stop_id || s.stop_outcome === 'Payment Only' ? s.line_items_summary : null,
       deliveredSummary: lines
         .map((l) => `${num(l.cases) > 0 ? `${l.cases} cs` : `${l.loose_bottles} btl`} ${l.product_name}`)
         .join(', '),
@@ -425,6 +433,22 @@ export async function settleRoute(
     if (sheet.status === 'Completed') {
       throw new RuleViolation('this route is already settled and locked');
     }
+    // A loaded truck has to be counted back first (10 Oct 2026, point 4):
+    // otherwise its goods would sit "on the truck" for ever.
+    if (args.complete !== false) {
+      const load = await t.maybeOne<{ returned_at: string | null }>(
+        `SELECT returned_at FROM round_loads WHERE delivery_sheet_id = $1`, [sheetId],
+      );
+      if (load && !load.returned_at) {
+        throw new RuleViolation('confirm what came back on the truck before closing the round');
+      }
+      // Something added to the load after the driver confirmed it has to be
+      // reconfirmed by the driver (or cancelled by the office) first.
+      if (load && await unconfirmedAdditions(t, sheetId) > 0) {
+        throw new RuleViolation('the driver has not confirmed what was added to the load. '
+          + 'Ask them to confirm it on My route, or cancel the addition on the round page.');
+      }
+    }
 
     const stops = await t.query<{ id: string }>(
       `SELECT id FROM delivery_stops
@@ -447,13 +471,17 @@ export async function settleRoute(
        FROM delivery_stops WHERE delivery_sheet_id = $1`,
       [sheetId],
     );
+    // Collection stops: empties into the pool, returned goods per the office's
+    // decision (refuses if one is still undecided), unvisited ones closed.
+    if (args.complete !== false) await settleCollections(t, actor, sheetId);
+    const bottlesOut = num(totals.bottles_out) + await collectedEmpties(t, sheetId);
     const expectedCash = num(totals.recorded);
     const cashVariance = num(args.actualCashCents) - expectedCash;
 
     const bottleActual = args.bottleActualReturned ?? null;
     const bottleVariance = bottleActual === null
       ? null
-      : bottleActual - num(totals.bottles_out);
+      : bottleActual - bottlesOut;
 
     const status = args.complete === false ? sheet.status : 'Completed';
 

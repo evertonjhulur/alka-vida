@@ -71,6 +71,7 @@ describe('Asking for an account', () => {
     const r = await submitApplication(db, {
       accountType: 'Individual', firstName: 'Marcia', lastName: 'Reid',
       email: 'marcia.reid@example.jm', phone: '876-555-0301',
+      addressLine1: '12 Hope Road', city: 'Kingston 6', parish: 'St Andrew',
     });
     assert.equal(r.name, 'Marcia Reid');
 
@@ -81,6 +82,14 @@ describe('Asking for an account', () => {
       }),
       /last name is needed/,
     );
+  });
+
+  test('where to deliver is required: street, town and parish (10 Oct 2026, point 15)', async () => {
+    await assert.rejects(() => submitApplication(db, { ...corporate('a1@y.jm'), addressLine1: '' }), /street address/);
+    await assert.rejects(() => submitApplication(db, { ...corporate('a2@y.jm'), city: '' }), /town/);
+    await assert.rejects(() => submitApplication(db, { ...corporate('a3@y.jm'), parish: '' }), /parish/);
+    await assert.rejects(() => submitApplication(db, { ...corporate('a4@y.jm'), parish: 'Atlantis' }), /from the list/);
+    await assert.rejects(() => submitApplication(db, { ...corporate('a5@y.jm'), businessName: 'x'.repeat(121) }), /too long/);
   });
 
   test('applying does NOT create a customer, a login, or any way in', async () => {

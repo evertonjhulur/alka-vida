@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { api, getSession, idempotencyKey } from '../lib/api';
+import { payMethods, useTakeCard } from '../lib/payments';
 import { money, day, date, todayInJamaica } from '../lib/format';
 import CustomerPicker from '../components/CustomerPicker';
 
@@ -116,6 +117,7 @@ function nextAfter(iso: string, p: Pattern): string {
 }
 
 export default function NewOrder() {
+  const takeCard = useTakeCard();
   // Arriving from "+ New > Counter sale" (?mode=Counter) or from a customer's
   // page (?customer=<id>) starts the form there instead of blank.
   const [params] = useSearchParams();
@@ -793,7 +795,7 @@ export default function NewOrder() {
                   <label htmlFor="meth">Paid by</label>
                   <select id="meth" value={method} style={{ width: '100%' }}
                           onChange={(e) => setMethod(e.target.value)}>
-                    {['Cash', 'Card', 'Bank Transfer', 'Cheque', 'Other'].map((m) => <option key={m}>{m}</option>)}
+                    {payMethods(['Cash', 'Card', 'Bank Transfer', 'Cheque', 'Other'], takeCard).map((m) => <option key={m}>{m}</option>)}
                   </select>
                 </div>
                 <div className="field" style={{ flex: 1 }}>

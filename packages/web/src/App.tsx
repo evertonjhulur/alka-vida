@@ -1,8 +1,8 @@
 import { useEffect, useState, type ReactNode } from 'react';
 import {
-  HashRouter, Routes, Route, NavLink, Navigate, useNavigate, useLocation,
+  HashRouter, Link, Routes, Route, NavLink, Navigate, useNavigate, useLocation,
 } from 'react-router-dom';
-import { api, getSession, clearSession, type Session, type Role } from './lib/api';
+import { api, getSession, takeReturnPath, type Session, type Role } from './lib/api';
 
 import Login from './pages/Login';
 import Dashboard from './pages/Dashboard';
@@ -50,6 +50,8 @@ import CreditNotes from './pages/CreditNotes';
 import AutoEmails from './pages/AutoEmails';
 import Messages from './pages/Messages';
 import Reminders from './pages/Reminders';
+import MoneySettings from './pages/MoneySettings';
+import DriverCollection from './pages/DriverCollection';
 
 interface NavItem {
   to: string;
@@ -114,6 +116,7 @@ const NAV: NavItem[] = [
   { to: '/pricing', label: 'Products & pricing', roles: ['admin', 'user'], section: 'Settings' },
   { to: '/zones', label: 'Delivery zones', roles: ['admin', 'user'], section: 'Settings' },
   { to: '/auto-emails', label: 'Emails & ordering', roles: ['admin', 'user'], section: 'Settings' },
+  { to: '/settings/money', label: 'Invoices & payments', roles: ['admin', 'user'], section: 'Settings' },
   // Logins are the administrator's alone, so office staff see just Employees.
   { to: '/employees', label: 'People and logins', roles: ['admin'], section: 'Settings', also: ['/users'] },
   { to: '/employees', label: 'Employees', roles: ['user'], section: 'Settings' },
@@ -177,7 +180,7 @@ function Shell({ session }: { session: Session }) {
     api.get<PendingCounts>('/api/pending-counts').then(setPending).catch(() => {});
   }, [office, pathname]);
 
-  const signOut = () => { clearSession(); navigate('/login'); location.reload(); };
+  const signOut = () => { api.logout().finally(() => { navigate('/login'); location.reload(); }); };
 
   const waiting = pending.applications + pending.approvals;
   const badgeFor = (n: NavItem) => {
@@ -287,7 +290,6 @@ function Shell({ session }: { session: Session }) {
         <nav>{groupedLinks(false)}</nav>
       </aside>
 
-      <DialogHost />
       <div className="content-col">
       <TopBar session={session} pending={pending} onSignOut={signOut} />
       <main className="main">
@@ -311,6 +313,7 @@ function Shell({ session }: { session: Session }) {
           <Route path="/quotes/:quoteId/:mode" element={<Quotes />} />
           <Route path="/credit-notes" element={<Keyed><CreditNotes session={session} /></Keyed>} />
           <Route path="/auto-emails" element={<AutoEmails session={session} />} />
+          <Route path="/settings/money" element={<MoneySettings session={session} />} />
           <Route path="/messages" element={<Messages session={session} />} />
           <Route path="/reminders" element={<Reminders />} />
           <Route path="/payments" element={<Payments />} />
@@ -330,6 +333,7 @@ function Shell({ session }: { session: Session }) {
           <Route path="/reports" element={<Reports />} />
           <Route path="/route" element={<DriverRoute session={session} />} />
           <Route path="/route/stop/:stopId" element={<DriverStop />} />
+          <Route path="/route/collection/:collectionId" element={<DriverCollection />} />
           {/* Four modules, one screen behind them. */}
           <Route path="/portal" element={<Navigate to="/portal/home" replace />} />
           <Route path="/portal/invoices/:invoiceId" element={<PortalInvoice />} />
@@ -339,7 +343,9 @@ function Shell({ session }: { session: Session }) {
           <Route path="/employees" element={<>{session.role === 'admin' && <SectionTabs tabs={PEOPLE} />}<Employees session={session} /></>} />
           <Route path="/employees/:employeeId" element={<EmployeeRecord session={session} />} />
           <Route path="/my-account" element={<MyAccount session={session} />} />
-          <Route path="*" element={<Navigate to="/" replace />} />
+          {/* Signing in from #/login lands on the start, not on "not found". */}
+          <Route path="/login" element={<Navigate to="/" replace />} />
+          <Route path="*" element={<NotFound />} />
         </Routes>
         </ErrorBoundary>
       </main>
@@ -356,6 +362,18 @@ function Shell({ session }: { session: Session }) {
 function Keyed({ children }: { children: ReactNode }) {
   const { search } = useLocation();
   return <div key={search} style={{ display: 'contents' }}>{children}</div>;
+}
+
+/** An address that is not a page (tester's findings, 10 Oct 2026, point 11). */
+function NotFound() {
+  const { pathname } = useLocation();
+  return (
+    <div className="panel not-found">
+      <h1>Page not found</h1>
+      <p>There is no page at <code>{pathname}</code>. The link may be old, or mistyped.</p>
+      <Link to="/" className="button-link">Go to the start</Link>
+    </div>
+  );
 }
 
 /** Each role lands on the screen that matches their job. */
@@ -414,13 +432,29 @@ export default function App() {
 
   useEffect(() => {
     const onStorage = () => setSession(getSession());
+    // The session ran out on the server (lib/api.ts): show the sign-in page.
+    const onSignedOut = () => setSession(null);
     window.addEventListener('storage', onStorage);
-    return () => window.removeEventListener('storage', onStorage);
+    window.addEventListener('alkavida:signed-out', onSignedOut);
+    return () => {
+      window.removeEventListener('storage', onStorage);
+      window.removeEventListener('alkavida:signed-out', onSignedOut);
+    };
   }, []);
+
+  /** Signed in again after the session ran out: back to the page they were on (point 12). */
+  const onSignedIn = (s: Session) => {
+    const back = takeReturnPath();
+    setSession(s);
+    if (back) window.location.hash = back;
+  };
 
   return (
     <HashRouter>
-      <Routed session={session} onSignedIn={setSession} />
+      {/* Always mounted, signed in or not, so no question ever falls back to
+          the browser's own confirm() or prompt() (point 14). */}
+      <DialogHost />
+      <Routed session={session} onSignedIn={onSignedIn} />
     </HashRouter>
   );
 }

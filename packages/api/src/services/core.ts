@@ -2,7 +2,7 @@
 
 import type { Queryable } from '../db/index.ts';
 import type { Role } from '@alka/shared';
-import { ForbiddenError } from '@alka/shared';
+import { ForbiddenError, RuleViolation } from '@alka/shared';
 
 export interface Actor {
   id: string;
@@ -137,6 +137,44 @@ export function businessTimeNow(at: Date = new Date()): string {
 /** The address customers write to (orders@alkavidaja.com), on every email and document. */
 export async function contactEmail(t: Queryable): Promise<string> {
   return (await getSetting(t, 'contact_email', 'orders@alkavidaja.com')).trim() || 'orders@alkavidaja.com';
+}
+
+/**
+ * The bank details and note printed at the foot of every invoice and
+ * statement PDF (Everton, 10 Oct 2026). Not on quotes or credit notes.
+ * Edited in Settings › Invoices & payments.
+ */
+export const DEFAULT_DOCUMENT_FOOTER = [
+  'Invoice payable to 1506 Investments Limited.',
+  'Electronic Transfers:',
+  'Bank: JMMB',
+  'Account Holder: 1506 Investments Limited',
+  'Account: 000300249266',
+  'Branch: Knutsford Boulevard branch',
+  '11 Knutsford Boulevard',
+  'Kingston 5, Jamaica',
+  'Note to customer',
+  '1506 Investments Limited will not assume liability for goods damaged after receipt.',
+].join('\n');
+
+export async function documentFooter(t: Queryable): Promise<string> {
+  return (await getSetting(t, 'document_footer', DEFAULT_DOCUMENT_FOOTER)).replace(/\r\n/g, '\n').trim();
+}
+
+/** "We take card payments" (10 Oct 2026). Off until Everton turns it on. */
+export async function takesCard(t: Queryable): Promise<boolean> {
+  return (await getSetting(t, 'take_card_payments', 'false')) === 'true';
+}
+
+/**
+ * Refuse a NEW payment by card while card payments are switched off. Never
+ * called from markStop (invariant 3) or from settlement, reversal or
+ * reassignment: a card payment already recorded stays exactly as it was.
+ */
+export async function assertMethodAllowed(t: Queryable, method: string | null | undefined): Promise<void> {
+  if (method === 'Card' && !(await takesCard(t))) {
+    throw new RuleViolation('we are not taking card payments at the moment. Choose another way they paid.');
+  }
 }
 
 /** One value from system_settings, or the fallback when it is not there. */

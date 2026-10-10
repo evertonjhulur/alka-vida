@@ -24,6 +24,9 @@ import { whatsappDigits, whatsappLink } from './messaging.ts';
 import { mailConfigured, sendMail } from './documents.ts';
 import { customerEmail, customerWants } from './emailkit.ts';
 
+/** Longest reminder template (point 8): one WhatsApp message, readable on a phone. */
+export const MAX_TEMPLATE = 500;
+
 export const DEFAULT_TEMPLATE =
   'Good day {name}, our truck is in {zone} {when}. {ask} Reply here or order online: {link}';
 
@@ -37,6 +40,27 @@ function weekdayOf(iso: string): string {
 function dayWords(iso: string): string {
   const [, m, d] = iso.split('-').map(Number);
   return `${weekdayOf(iso)} ${d} ${MONTH[m - 1]}`;
+}
+
+/**
+ * A delivery day typed or picked by the office (tester's findings, 10 Oct
+ * 2026, point 1): an impossible or unreadable date is refused with a clear
+ * message (400), never a 500 and never a silent switch to another day; a day
+ * already gone is refused too. Blank means tomorrow.
+ */
+export function reminderDay(raw: unknown, opts: { allowPast?: boolean } = {}): string {
+  const today = businessToday();
+  const s = String(raw ?? '').trim();
+  if (!s) return addDays(today, 1);
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(s);
+  const ok = m && (() => {
+    const [y, mo, d] = [Number(m[1]), Number(m[2]), Number(m[3])];
+    const dt = new Date(Date.UTC(y, mo - 1, d));
+    return dt.getUTCFullYear() === y && dt.getUTCMonth() === mo - 1 && dt.getUTCDate() === d;
+  })();
+  if (!ok) throw new RuleViolation(`"${s.slice(0, 20)}" is not a date we can use. Pick the day from the calendar.`);
+  if (!opts.allowPast && s < today) throw new RuleViolation('that day has gone. Reminders are for today or a later day.');
+  return s;
 }
 
 export interface ReminderRow {
@@ -55,18 +79,25 @@ export interface ReminderRow {
   whatsappLink: string | null;
   /** Wants service emails and has an address. */
   canEmail: boolean;
+  /** When canEmail is false, why: "No email address" / "Turned off service emails". */
+  emailBlocked: string | null;
   /** Already reminded for this day, and how. */
   remindedBy: string[];
   remindedAt: string | null;
 }
 
-/** "3 cases of 500ml, 2 x 5 Gallon": their last real order, bottles bought left out. */
+/**
+ * "3 cases of 500ml, 2 x 5 Gallon": their last DELIVERED order, bottles
+ * bought left out. Delivered only (tester's findings, point 3): an order
+ * still to come is not their "last order", and its date is in the future.
+ */
 async function usualOrder(t: Queryable, customerId: string): Promise<{ text: string | null; on: string | null }> {
   const last = await t.maybeOne<{ id: string; on_day: string }>(
-    `SELECT id, COALESCE(fulfilled_on, requested_delivery_date, order_date)::text AS on_day
+    `SELECT id, fulfilled_on::text AS on_day
      FROM customer_orders
-     WHERE customer_id = $1 AND status <> 'Cancelled' AND delivery_mode <> 'Counter'
-     ORDER BY COALESCE(requested_delivery_date, order_date) DESC, created_at DESC LIMIT 1`, [customerId],
+     WHERE customer_id = $1 AND status IN ('Delivered','Partially Delivered') AND delivery_mode <> 'Counter'
+       AND fulfilled_on IS NOT NULL AND fulfilled_on <= business_today()
+     ORDER BY fulfilled_on DESC, created_at DESC LIMIT 1`, [customerId],
   );
   if (!last) return { text: null, on: null };
   const lines = await t.query<{ name: string; bpc: number; cases: number; loose: number }>(
@@ -93,8 +124,10 @@ export function fillTemplate(template: string, v: Record<string, string>): strin
  */
 export async function remindersFor(db: Db, opts: { date?: string | null } = {}) {
   const today = businessToday();
-  const date = opts.date && /^\d{4}-\d{2}-\d{2}$/.test(opts.date) ? opts.date : addDays(today, 1);
+  const date = reminderDay(opts.date);
   const wd = weekdayOf(date);
+  // The page heading (point 2): Today / Tomorrow / Tue 13 Oct.
+  const heading = date === today ? 'Today' : date === addDays(today, 1) ? 'Tomorrow' : dayWords(date);
   const template = (await getSetting(db, 'reminder_template', DEFAULT_TEMPLATE)).trim() || DEFAULT_TEMPLATE;
   const when = date === addDays(today, 1) ? `tomorrow, ${dayWords(date)}`
     : date === today ? `today, ${dayWords(date)}` : `on ${dayWords(date)}`;
@@ -156,11 +189,12 @@ export async function remindersFor(db: Db, opts: { date?: string | null } = {}) 
       message,
       whatsappLink: whatsappLink(wa, message),
       canEmail: !!c.email?.trim() && c.service_emails !== false,
+      emailBlocked: !c.email?.trim() ? 'No email address' : c.service_emails === false ? 'Turned off service emails' : null,
       remindedBy: [...new Set(mine.map((s) => s.channel))],
       remindedAt: mine.at(-1)?.sent_at ?? null,
     });
   }
-  return { date, weekday: wd, when, template, mailConfigured: mailConfigured(), rows };
+  return { date, today, weekday: wd, when, heading, template, maxTemplate: MAX_TEMPLATE, mailConfigured: mailConfigured(), rows };
 }
 
 /** The office pressed "Send on WhatsApp" for this customer: tick them off. */
@@ -168,10 +202,17 @@ export async function markReminded(
   db: Db, actor: Actor, customerId: string, date: string, channel: 'WhatsApp' | 'Email' = 'WhatsApp',
 ): Promise<void> {
   requireRole(actor, 'admin', 'user');
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(date))) throw new RuleViolation('which delivery day was this about?');
+  if (!String(date ?? '').trim()) throw new RuleViolation('which delivery day was this about?');
+  const day = reminderDay(date);
+  // A double tap sends one tick, not two.
+  const recent = await db.maybeOne(
+    `SELECT 1 FROM order_reminders WHERE customer_id = $1 AND for_date = $2::date AND channel = $3
+       AND sent_at > now() - interval '30 seconds'`, [customerId, day, channel],
+  );
+  if (recent) return;
   await db.query(
     `INSERT INTO order_reminders (customer_id, for_date, channel, sent_by, sent_by_name)
-     VALUES ($1,$2::date,$3,$4,$5)`, [customerId, date, channel, actor.id, actor.name],
+     VALUES ($1,$2::date,$3,$4,$5)`, [customerId, day, channel, actor.id, actor.name],
   );
 }
 
@@ -180,7 +221,7 @@ export async function unmarkReminded(db: Db, actor: Actor, customerId: string, d
   requireRole(actor, 'admin', 'user');
   await db.query(
     `DELETE FROM order_reminders WHERE customer_id = $1 AND for_date = $2::date AND channel = 'WhatsApp'`,
-    [customerId, date],
+    [customerId, reminderDay(date, { allowPast: true })],
   );
 }
 
@@ -193,6 +234,7 @@ export async function emailReminders(
 ): Promise<{ sent: number; skipped: number; failed: Array<{ name: string; reason: string }> }> {
   requireRole(actor, 'admin', 'user');
   if (!mailConfigured()) throw new RuleViolation('email is not set up, so reminders can only go by WhatsApp');
+  if (!String(date ?? '').trim()) throw new RuleViolation('which delivery day are these reminders for?');
   const list = await remindersFor(db, { date });
   const out = { sent: 0, skipped: 0, failed: [] as Array<{ name: string; reason: string }> };
   for (const r of list.rows.filter((x) => customerIds.includes(x.customerId))) {
@@ -230,7 +272,7 @@ export async function emailReminders(
 export async function setReminderTemplate(db: Db, actor: Actor, template: string): Promise<string> {
   requireRole(actor, 'admin', 'user');
   const t = String(template ?? '').trim() || DEFAULT_TEMPLATE;
-  if (t.length > 700) throw new RuleViolation('keep the message under 700 characters');
+  if (t.length > MAX_TEMPLATE) throw new RuleViolation(`keep the message to ${MAX_TEMPLATE} characters or fewer`);
   await db.query(
     `INSERT INTO system_settings (key, value) VALUES ('reminder_template', $1)
      ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`, [t],

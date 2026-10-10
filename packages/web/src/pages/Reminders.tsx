@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../lib/api';
-import { money, when } from '../lib/format';
+import { money, todayInJamaica, when } from '../lib/format';
+import { ask } from '../components/Dialog';
 
 /**
  * Tomorrow's round: remind customers to order (Everton, 7 Oct 2026).
@@ -17,11 +18,12 @@ interface Row {
   customerId: string; name: string; contactPerson: string | null; zone: string | null;
   phone: string | null; whatsapp: string | null; email: string | null;
   usual: string | null; lastOrderOn: string | null; balanceCents: number;
-  message: string; whatsappLink: string | null; canEmail: boolean;
+  message: string; whatsappLink: string | null; canEmail: boolean; emailBlocked?: string | null;
   remindedBy: string[]; remindedAt: string | null;
 }
 interface Data {
-  date: string; weekday: string; when: string; template: string; mailConfigured: boolean; rows: Row[];
+  date: string; today?: string; weekday: string; when: string; heading?: string; maxTemplate?: number;
+  template: string; mailConfigured: boolean; rows: Row[];
 }
 
 export default function Reminders() {
@@ -35,13 +37,32 @@ export default function Reminders() {
   const [editing, setEditing] = useState(false);
   const [template, setTemplate] = useState('');
   const rowRefs = useRef<Record<string, HTMLDivElement | null>>({});
+  /** Customers whose tick-off is being saved: a second tap does nothing (point 9). */
+  const [saving, setSaving] = useState<Record<string, boolean>>({});
+  /**
+   * Each load is numbered; only the newest one's answer is used, so picking
+   * another day cancels what an earlier pick was still fetching (point 9).
+   */
+  const seq = useRef(0);
 
   async function load(d = date) {
-    const r = await api.get<Data>(`/api/reminders${d ? `?date=${d}` : ''}`);
+    const mine = ++seq.current;
+    const r = await api.get<Data>(`/api/reminders${d ? `?date=${encodeURIComponent(d)}` : ''}`);
+    if (mine !== seq.current) return r;
     setData(r);
     if (!d) setDate(r.date);
     setTemplate(r.template);
     return r;
+  }
+
+  /** Another day. Ticks for email are for the day shown, so say so before clearing them (point 6). */
+  async function changeDay(d: string) {
+    const ticked = Object.values(picked).filter(Boolean).length;
+    if (ticked > 0 && !(await ask(`You have ${ticked} customer${ticked === 1 ? '' : 's'} ticked for email on this day.\n\nChanging the day clears those ticks. Change the day anyway?`,
+      { confirmLabel: 'Change the day', cancelLabel: 'Stay on this day' }))) return;
+    setDate(d); setPicked({}); setError(null); setMsg(null);
+    if (!d) return;
+    load(d).catch((x) => { setData(null); setError(x.message); });
   }
   useEffect(() => { load().catch((e) => setError(e.message)); }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -49,20 +70,30 @@ export default function Reminders() {
   const rows = (data?.rows ?? []).filter((r) => !hideDone || !done(r));
   const next = data?.rows.find((r) => !done(r) && r.whatsappLink) ?? null;
   const doneCount = (data?.rows ?? []).filter(done).length;
+  // Counted against what is on the screen (point 4).
+  const leftCount = rows.filter((r) => !done(r)).length;
 
-  /** The link opens straight from the click (so no pop-up blocker); the tick follows. */
-  async function sentOnWhatsApp(r: Row) {
+  /**
+   * The link opens straight from the click (so no pop-up blocker); the tick
+   * follows. While it is saving, another tap on the same customer does
+   * nothing at all - no second chat, no second tick.
+   */
+  async function sentOnWhatsApp(r: Row, e: React.MouseEvent) {
+    if (saving[r.customerId]) { e.preventDefault(); return; }
+    setSaving((s) => ({ ...s, [r.customerId]: true }));
     setError(null); setMsg(null);
     try {
       await api.post(`/api/reminders/${r.customerId}/sent`, { date: data!.date });
       const fresh = await load(data!.date);
       const after = fresh.rows.find((x) => !done(x) && x.whatsappLink);
       if (after) setTimeout(() => rowRefs.current[after.customerId]?.scrollIntoView({ behavior: 'smooth', block: 'center' }), 100);
-    } catch (e) { setError(e instanceof Error ? e.message : 'Could not tick them off'); }
+    } catch (err) { setError(err instanceof Error ? err.message : 'Could not tick them off'); } finally {
+      setSaving((s) => ({ ...s, [r.customerId]: false }));
+    }
   }
 
   async function undo(r: Row) {
-    setBusy(true);
+    setBusy(true); setError(null); setMsg(null);
     try {
       await api.del(`/api/reminders/${r.customerId}/sent?date=${data!.date}`);
       await load(data!.date);
@@ -84,7 +115,7 @@ export default function Reminders() {
   }
 
   async function saveTemplate() {
-    setBusy(true); setError(null);
+    setBusy(true); setError(null); setMsg(null);
     try {
       await api.put('/api/reminders/template', { template });
       setEditing(false);
@@ -97,7 +128,8 @@ export default function Reminders() {
 
   return (
     <>
-      <h1>Tomorrow&rsquo;s round: remind customers</h1>
+      <h1>{!data?.heading || data.heading === 'Tomorrow' ? 'Tomorrow\u2019s round'
+        : data.heading === 'Today' ? 'Today\u2019s round' : `Round on ${data.heading}`}: remind customers</h1>
       <p className="subtitle">
         Customers whose delivery day it is and who have not ordered yet. Press <strong>Send on WhatsApp</strong>,
         press send in WhatsApp, and the next one comes up.
@@ -110,12 +142,13 @@ export default function Reminders() {
         <div className="filter-row">
           <div className="field">
             <label htmlFor="rd">Delivery day</label>
-            <input id="rd" type="date" value={date}
-                   onChange={(e) => { setDate(e.target.value); setPicked({}); load(e.target.value).catch((x) => setError(x.message)); }} />
+            <input id="rd" type="date" value={date} min={data?.today ?? todayInJamaica()}
+                   onChange={(e) => { changeDay(e.target.value); }} />
           </div>
           {data && (
             <div className="field">
-              <strong>{data.rows.length}</strong> to remind for {when(data.date)} · <strong>{doneCount}</strong> done
+              <strong>{leftCount}</strong> left to remind · <strong>{doneCount}</strong> done{hideDone && doneCount ? ' (hidden)' : ''}
+              <div className="muted small">for {when(data.date)}</div>
             </div>
           )}
           <label className="check" style={{ margin: 0 }}>
@@ -126,7 +159,7 @@ export default function Reminders() {
           </button>
           {next && (
             <a className="button-link whatsapp" href={next.whatsappLink!} target="_blank" rel="noreferrer"
-               onClick={() => sentOnWhatsApp(next)}>
+               aria-disabled={!!saving[next.customerId]} onClick={(e) => sentOnWhatsApp(next, e)}>
               Next: {next.name}
             </a>
           )}
@@ -135,7 +168,10 @@ export default function Reminders() {
           <div className="sub-panel" style={{ marginTop: 10 }}>
             <label htmlFor="tpl">The message (the same for everyone; the words in braces are filled in for each customer)</label>
             <textarea id="tpl" rows={3} style={{ width: '100%', boxSizing: 'border-box' }} value={template}
-                      onChange={(e) => setTemplate(e.target.value)} />
+                      maxLength={data?.maxTemplate ?? 500} onChange={(e) => setTemplate(e.target.value)} />
+            <div className={`small ${template.length >= (data?.maxTemplate ?? 500) ? '' : 'muted'}`} style={{ textAlign: 'right' }}>
+              {template.length} / {data?.maxTemplate ?? 500} characters
+            </div>
             <div className="muted small" style={{ margin: '4px 0 8px' }}>
               {'{name}'} their contact person (or the business) · {'{business}'} the business name · {'{zone}'} the round ·
               {' '}{'{when}'} "tomorrow, Thu 8 Oct" · {'{ask}'} "Would you like your usual 3 cases of 500ml?" ·
@@ -158,8 +194,10 @@ export default function Reminders() {
           <div key={r.customerId} ref={(el) => { rowRefs.current[r.customerId] = el; }}
                className={`panel remind-row${done(r) ? ' done' : ''}${isNext ? ' next' : ''}`}>
             <div className="remind-head">
-              <label className="check" style={{ margin: 0 }} title={r.canEmail ? 'Tick to email' : 'No email, or they turned off service announcements'}>
+              <label className="check remind-tick" style={{ margin: 0 }}
+                     title={r.canEmail ? 'Tick to email' : (r.emailBlocked ?? 'Cannot be emailed')}>
                 <input type="checkbox" disabled={!r.canEmail} checked={!!picked[r.customerId]}
+                       aria-label={r.canEmail ? `Email ${r.name}` : `${r.name}: ${r.emailBlocked ?? 'cannot be emailed'}`}
                        onChange={(e) => setPicked({ ...picked, [r.customerId]: e.target.checked })} />
               </label>
               <div style={{ flex: 1 }}>
@@ -167,17 +205,18 @@ export default function Reminders() {
                 {r.contactPerson && <span className="muted small"> · {r.contactPerson}</span>}
                 <div className="muted small">
                   {r.zone ?? 'No zone'}
-                  {r.usual ? ` · usual: ${r.usual}` : ' · no orders yet'}
-                  {r.lastOrderOn ? ` (last ${when(r.lastOrderOn)})` : ''}
+                  {r.usual ? ` · usual: ${r.usual}` : ' · no deliveries yet'}
+                  {r.lastOrderOn ? ` (last delivered ${when(r.lastOrderOn)})` : ''}
                   {r.balanceCents > 0 ? ` · owes ${money(r.balanceCents)}` : ''}
                 </div>
+                {!r.canEmail && r.emailBlocked && <div className="small no-email" title={r.emailBlocked}>No email: {r.emailBlocked.toLowerCase()}</div>}
               </div>
               <div className="remind-actions">
                 {done(r) && <span className="chip ok">Sent{r.remindedBy.length ? ` · ${r.remindedBy.join(', ')}` : ''}</span>}
                 {r.whatsappLink ? (
-                  <a className={`button-link ${done(r) ? 'secondary' : 'whatsapp'}`} href={r.whatsappLink}
-                     target="_blank" rel="noreferrer" onClick={() => sentOnWhatsApp(r)}>
-                    {done(r) ? 'Send again' : 'Send on WhatsApp'}
+                  <a className={`button-link ${done(r) ? 'secondary' : 'whatsapp'}${saving[r.customerId] ? ' is-busy' : ''}`} href={r.whatsappLink}
+                     target="_blank" rel="noreferrer" aria-disabled={!!saving[r.customerId]} onClick={(e) => sentOnWhatsApp(r, e)}>
+                    {saving[r.customerId] ? 'Saving…' : done(r) ? 'Send again' : 'Send on WhatsApp'}
                   </a>
                 ) : <span className="muted small">No WhatsApp or phone number</span>}
                 {r.remindedBy.includes('WhatsApp') && (
@@ -203,8 +242,8 @@ export default function Reminders() {
             {!data.mailConfigured && <span className="muted small">Email is not set up on this copy.</span>}
           </div>
           <p className="muted small" style={{ marginBottom: 0 }}>
-            The email carries the same words, an Order now button and an unsubscribe link. Customers who turned off
-            service announcements cannot be ticked.
+            The email carries the same words, an Order now button and an unsubscribe link. A customer with no email
+            address, or who turned off service emails, cannot be ticked; it says which under their name.
           </p>
         </div>
       )}

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api, idempotencyKey } from '../lib/api';
+import { payMethods, useTakeCard } from '../lib/payments';
 import { money, toCents, day } from '../lib/format';
 import { todayInJamaica as todayJa } from '../lib/format';
 import CustomerPicker, { type PickerCustomer } from '../components/CustomerPicker';
@@ -37,6 +38,7 @@ const oldestFirst = (a: Invoice, b: Invoice) =>
   a.invoice_date.localeCompare(b.invoice_date) || a.invoice_number.localeCompare(b.invoice_number);
 
 export default function Payments() {
+  const takeCard = useTakeCard();
   const [customers, setCustomers] = useState<PickerCustomer[]>([]);
   const [unapplied, setUnapplied] = useState<Unapplied[]>([]);
   const [open, setOpen] = useState<Invoice[]>([]);
@@ -183,7 +185,7 @@ export default function Payments() {
           <div className="field">
             <label htmlFor="pmeth">How</label>
             <select id="pmeth" value={form.method} onChange={(e) => setForm({ ...form, method: e.target.value })}>
-              {METHODS.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+              {payMethods(METHODS, takeCard, form.method).map(([v, l]) => <option key={v} value={v}>{l}</option>)}
             </select>
           </div>
           <div className="field">

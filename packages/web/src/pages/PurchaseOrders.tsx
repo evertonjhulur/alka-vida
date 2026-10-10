@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { api, download } from '../lib/api';
 import { money, toCents, when, day, todayInJamaica } from '../lib/format';
 import { ask } from '../components/Dialog';
@@ -37,6 +38,11 @@ interface DraftLine {
 }
 const BLANK_LINE: DraftLine = { rawMaterialId: '', qty: '', unitCost: '', autoPriced: false, gct: true, env: true };
 
+interface Pickup {
+  id: string; sheet_date: string; sheet_zone: string; collected_by_name: string | null; description: string | null;
+  lines: Array<{ poLineId?: string; name: string; unit?: string; quantity?: number }>;
+}
+
 export default function PurchaseOrders() {
   const [orders, setOrders] = useState<PO[]>([]);
   const [suppliers, setSuppliers] = useState<Supplier[]>([]);
@@ -49,6 +55,9 @@ export default function PurchaseOrders() {
   const [error, setError] = useState<string | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  /** Goods the driver picked up from the supplier on a round (10 Oct 2026, point 3). */
+  const [pickups, setPickups] = useState<Pickup[]>([]);
+  const [params] = useSearchParams();
 
   const [form, setForm] = useState<'new' | string | null>(null); // 'new' or the PO id being changed
   const [supplierId, setSupplierId] = useState('');
@@ -62,6 +71,9 @@ export default function PurchaseOrders() {
   }
   useEffect(() => {
     load().catch((e) => setError(e.message));
+    // Opened from a round's pick-up: show that PO straight away.
+    const po = params.get('po');
+    if (po) openPO(po).catch(() => {});
     api.get<{ ratePercent: number }>('/api/settings/env-tax').then((r) => setEnvRate(r.ratePercent)).catch(() => {});
   }, []);
 
@@ -138,6 +150,16 @@ export default function PurchaseOrders() {
     setReceipts(Object.fromEntries(detail.lines.map((l) => [
       l.id, String(Math.max(Number(l.quantity_ordered) - Number(l.quantity_received), 0)),
     ])));
+    // Picked up on a round: receiving is prefilled with what the driver
+    // collected, and the day it came in.
+    const picked = await api.get<Pickup[]>(`/api/purchase-orders/${id}/pickups`).catch(() => [] as Pickup[]);
+    setPickups(picked);
+    if (picked.length) {
+      const sums: Record<string, number> = {};
+      for (const p of picked) for (const l of p.lines ?? []) if (l.poLineId) sums[l.poLineId] = (sums[l.poLineId] ?? 0) + Number(l.quantity || 0);
+      setReceipts(Object.fromEntries(detail.lines.map((l) => [l.id, String(sums[l.id] ?? 0)])));
+      setArrivedOn(picked[picked.length - 1].sheet_date ?? '');
+    }
   }
 
   async function act(what: () => Promise<string>, fallback: string, reopen = true) {
@@ -387,6 +409,17 @@ export default function PurchaseOrders() {
             {open.sent_to && <div className="field muted small">Last sent to {open.sent_to}</div>}
           </div>
 
+          {pickups.length > 0 && !ENDED.includes(open.status) && (
+            <div className="notice info">
+              {pickups.map((p) => (
+                <div key={p.id}>
+                  Picked up on the {p.sheet_zone} round of {day(p.sheet_date)}{p.collected_by_name ? ` by ${p.collected_by_name}` : ''}:{' '}
+                  {[...(p.lines ?? []).map((l) => `${l.quantity} ${l.unit ?? ''} ${l.name}`), p.description].filter(Boolean).join(', ')}.
+                </div>
+              ))}
+              <div className="small">Receiving below is filled in from the pick-up. Check it against what is in the store, then record it.</div>
+            </div>
+          )}
           <table>
             <thead>
               <tr><th>Material</th><th className="num">Ordered</th><th className="num">Already received</th>

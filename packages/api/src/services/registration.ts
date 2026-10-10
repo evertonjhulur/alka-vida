@@ -60,6 +60,15 @@ export function applicantName(a: {
  * Submit an application. PUBLIC - the applicant has no account yet, which is
  * the entire point.
  */
+/** The fourteen parishes, as the sign-up form offers them. */
+export const PARISHES = [
+  'Kingston', 'St Andrew', 'St Thomas', 'Portland', 'St Mary', 'St Ann',
+  'Trelawny', 'St James', 'Hanover', 'Westmoreland', 'St Elizabeth',
+  'Manchester', 'Clarendon', 'St Catherine',
+];
+/** Longest each sign-up field may be; the form says the same with maxLength. */
+export const MAX = { name: 120, email: 254, phone: 30, line: 160, town: 80, notes: 500 } as const;
+
 export async function submitApplication(
   db: Db, input: ApplicationInput,
 ): Promise<{ id: string; name: string }> {
@@ -86,6 +95,27 @@ export async function submitApplication(
     if (!lastName) throw new RuleViolation('a last name is needed');
   }
 
+  // Where to deliver is required (tester's findings, 10 Oct 2026, point 15):
+  // street, town and parish. Every field has a sensible maximum.
+  const address = {
+    addressLine1: clean(input.addressLine1),
+    addressLine2: clean(input.addressLine2),
+    city: clean(input.city),
+    parish: clean(input.parish),
+  };
+  if (!address.addressLine1) throw new RuleViolation('the street address for deliveries is needed');
+  if (!address.city) throw new RuleViolation('the town for deliveries is needed');
+  if (!address.parish) throw new RuleViolation('choose the parish for deliveries');
+  if (!PARISHES.includes(address.parish)) throw new RuleViolation('choose the parish from the list');
+  const tooLong = ([
+    ['business name', businessName, MAX.name], ['contact person', contactPerson, MAX.name],
+    ['first name', firstName, MAX.name], ['last name', lastName, MAX.name],
+    ['email address', email, MAX.email], ['phone number', phone, MAX.phone],
+    ['street address', address.addressLine1, MAX.line], ['building or landmark', address.addressLine2, MAX.line],
+    ['town', address.city, MAX.town], ['note', clean(input.notes), MAX.notes],
+  ] as Array<[string, string | null, number]>).find(([, v, max]) => (v ?? '').length > max);
+  if (tooLong) throw new RuleViolation(`the ${tooLong[0]} is too long (${tooLong[2]} characters at most)`);
+
   const name = applicantName({ accountType, businessName, firstName, lastName });
 
   // An address that is already trading, or already waiting, must not be able
@@ -104,13 +134,6 @@ export async function submitApplication(
       + 'If you are waiting to hear from us, we have your details.',
     );
   }
-
-  const address = {
-    addressLine1: clean(input.addressLine1),
-    addressLine2: clean(input.addressLine2),
-    city: clean(input.city),
-    parish: clean(input.parish),
-  };
 
   const row = await db.one<{ id: string }>(
     `INSERT INTO customer_applications

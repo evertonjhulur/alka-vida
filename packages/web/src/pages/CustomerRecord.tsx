@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link, useParams, useSearchParams } from 'react-router-dom';
 import { api, downloadPost, type Session } from '../lib/api';
+import { payMethods, useTakeCard } from '../lib/payments';
 import { money, date, statusTone, toCents, todayInJamaica, when } from '../lib/format';
 import { StatementView } from './Statement';
 import CustomerForm, { customerToForm, formToPayload, BLANK_CUSTOMER, type CustomerFormValues } from '../components/CustomerForm';
@@ -78,6 +79,7 @@ type Tab = (typeof TABS)[number][0];
  * address (?tab=orders), so a link can open straight onto one.
  */
 export default function CustomerRecord({ session }: { session: Session }) {
+  const takeCard = useTakeCard();
   const { customerId } = useParams();
   const [params, setParams] = useSearchParams();
   const tabParam = params.get('tab');
@@ -577,7 +579,7 @@ export default function CustomerRecord({ session }: { session: Session }) {
                 <label htmlFor="pm">How</label>
                 <select id="pm" value={pay.method}
                         onChange={(e) => setPay({ ...pay, method: e.target.value })}>
-                  {METHODS.map((m) => <option key={m} value={m}>{m}</option>)}
+                  {payMethods(METHODS, takeCard, pay.method).map((m) => <option key={m} value={m}>{m}</option>)}
                 </select>
               </div>
               <div className="field">
@@ -663,7 +665,7 @@ export default function CustomerRecord({ session }: { session: Session }) {
               <div className="field">
                 <label htmlFor="ch-m">How</label>
                 <select id="ch-m" value={change.method} onChange={(e) => setChange({ ...change, method: e.target.value })}>
-                  {METHODS.map((m) => <option key={m} value={m}>{m}</option>)}
+                  {payMethods(METHODS, takeCard, change.method).map((m) => <option key={m} value={m}>{m}</option>)}
                 </select>
               </div>
               <div className="field">

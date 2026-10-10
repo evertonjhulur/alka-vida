@@ -12,7 +12,7 @@
 
 import type { Db, Queryable } from '../db/index.ts';
 import type { Actor } from './core.ts';
-import { requireRole, withIdempotency, num } from './core.ts';
+import { assertMethodAllowed, requireRole, withIdempotency, num } from './core.ts';
 import type { Cents, PaymentMethod } from '@alka/shared';
 import { RuleViolation, computeTotals } from '@alka/shared';
 import { createOrder, resolveLines, withBottleShortfall, type OrderLineInput } from './orders.ts';
@@ -129,6 +129,7 @@ export async function counterSale(
   // (as the API always meant). The screen sends the figure either way.
   const paying = input.amountPaidCents == null || (input.amountPaidCents as unknown) === ''
     ? (who.is_walk_in ? total : 0) : Math.max(0, Math.round(Number(input.amountPaidCents) || 0));
+  if (paying > 0) await assertMethodAllowed(db, input.method ?? 'Cash');
   if (who.is_walk_in && paying < total) {
     throw new RuleViolation(
       `a walk-in pays in full: ${cashText(total)}. To let them pay part, choose (or add) their customer account first.`,
@@ -309,6 +310,7 @@ export async function collectOrder(
     if (order.status === 'Delivered') {
       throw new RuleViolation(`${order.order_number} has already been collected`);
     }
+    if ((input.amountPaidCents ?? 0) > 0) await assertMethodAllowed(t, input.method ?? 'Cash');
 
     // Billed weekly or monthly: the collection goes on the account and waits
     // for the cycle invoice. Anything paid now simply sits on the account and

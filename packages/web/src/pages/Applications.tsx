@@ -1,5 +1,6 @@
 import { Fragment, useEffect, useState } from 'react';
 import { api, type Session } from '../lib/api';
+import { askText } from '../components/Dialog';
 import { date } from '../lib/format';
 
 interface Application {
@@ -89,7 +90,7 @@ export default function Applications({ session }: { session: Session }) {
   }
 
   async function decline(a: Application) {
-    const reason = window.prompt(`Why are you turning down ${nameOf(a)}? (optional)`);
+    const reason = await askText(`Turn down ${nameOf(a)}?`, { label: 'Why (optional)', confirmLabel: 'Turn down' });
     if (reason === null) return;
     setBusy(true); setError(null);
     try {

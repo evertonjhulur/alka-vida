@@ -14,7 +14,7 @@
 
 import type { Db, Queryable } from '../db/index.ts';
 import type { Actor } from './core.ts';
-import { audit, num, requireRole } from './core.ts';
+import { assertMethodAllowed, audit, num, requireRole } from './core.ts';
 import type { Cents, PaymentMethod, StopOutcome } from '@alka/shared';
 import { RuleViolation, validateAllocation, assertQuantityShape, totalBottles } from '@alka/shared';
 import { createInvoice, openInvoicesForCustomer } from './invoices.ts';
@@ -24,6 +24,8 @@ import {
 } from './orders.ts';
 import { applyDeliveryMovement, bottleAccount, recordBottlesSold } from './bottles.ts';
 import { takeFinishedGoods, stopBottles } from './stockmoves.ts';
+import { deliversFromTruck, truckPosition } from './trucks.ts';
+import { listCollections } from './collections.ts';
 import { computeTotals, computeLineTotal } from '@alka/shared';
 import { businessToday } from './core.ts';
 
@@ -188,8 +190,13 @@ export async function markStop(
       const ref = await t.one<{ order_number: string }>(
         `SELECT order_number FROM customer_orders WHERE id = $1`, [stop.order_id],
       );
-      await takeFinishedGoods(t, await stopBottles(t, input.stopId), ref.order_number,
-        `Delivered on the ${sheet.delivery_date} round`);
+      // A loaded round's goods already left the warehouse when the truck was
+      // loaded (trucks.ts, 10 Oct 2026); they come off the truck now, which
+      // the round page reads from the stop lines. Otherwise, off the shelf.
+      if (!(await deliversFromTruck(t, stop.delivery_sheet_id))) {
+        await takeFinishedGoods(t, await stopBottles(t, input.stopId), ref.order_number,
+          `Delivered on the ${sheet.delivery_date} round`);
+      }
 
       // Bottles bought here are the customer's from now on.
       const bottle = await bottleChargeProduct(t);
@@ -534,13 +541,23 @@ export async function remainingValue(t: Queryable, orderId: string): Promise<Cen
  */
 export async function addPaymentStop(
   db: Db, actor: Actor, sheetId: string,
-  input: { customerId: string; method?: PaymentMethod | null; amountCents: Cents; notes?: string | null },
+  input: {
+    customerId: string; method?: PaymentMethod | null; amountCents?: Cents; notes?: string | null;
+    /**
+     * The office planning a "Collect payment" stop for the driver (10 Oct
+     * 2026, point 3): nothing taken yet, so it waits as a stop to do, and the
+     * driver records what they were given (markStop, outcome Payment Only).
+     */
+    planned?: boolean;
+  },
 ): Promise<{ stopId: string }> {
   requireRole(actor, 'admin', 'user', 'driver');
   const amount = Math.round(Number(input.amountCents) || 0);
-  if (!(amount > 0)) throw new RuleViolation('enter how much they paid');
+  const planned = !!input.planned && actor.role !== 'driver';
+  if (!planned && !(amount > 0)) throw new RuleViolation('enter how much they paid');
   const method = (input.method || 'Cash') as PaymentMethod;
   return db.tx(async (t) => {
+    if (!planned) await assertMethodAllowed(t, method);
     const sheet = await t.maybeOne<{ status: string; assigned_driver_id: string | null }>(
       `SELECT status, assigned_driver_id FROM delivery_sheets WHERE id = $1`, [sheetId],
     );
@@ -553,6 +570,18 @@ export async function addPaymentStop(
       `SELECT name, phone, delivery_address, route_sequence, active FROM customers WHERE id = $1`, [input.customerId],
     );
     if (!c || !c.active) throw new RuleViolation('choose the customer who paid');
+    if (planned) {
+      const due = await t.one<{ id: string }>(
+        `INSERT INTO delivery_stops
+           (delivery_sheet_id, customer_id, order_id, delivery_address, contact_phone, order_ref,
+            line_items_summary, sequence_no, stop_outcome, driver_notes, payment_only)
+         VALUES ($1,$2,NULL,$3,$4,NULL,'Collect payment',$5,'Pending',$6,true)
+         RETURNING id`,
+        [sheetId, input.customerId, c.delivery_address, c.phone, num(c.route_sequence), input.notes?.trim() || null],
+      );
+      await audit(t, actor, 'update', 'DeliverySheet', sheetId, c.name, { collectPaymentStop: due.id, planned: true });
+      return { stopId: due.id };
+    }
     const stop = await t.one<{ id: string }>(
       `INSERT INTO delivery_stops
          (delivery_sheet_id, customer_id, order_id, delivery_address, contact_phone, order_ref,
@@ -567,6 +596,82 @@ export async function addPaymentStop(
       paymentOnlyStop: stop.id, amountCents: amount, method, waitsForSettlement: true,
     });
     return { stopId: stop.id };
+  });
+}
+
+/**
+ * A payment taken on a stop that is ALREADY recorded as delivered (Everton,
+ * 10 Oct 2026, point 2): the customer paid after the drop, or the driver
+ * forgot to put it in. Amount and method only - the order, its lines and its
+ * invoice are not touched.
+ *
+ * Recorded like any driver money: only a record until the office settles
+ * the round, where settleStop / planPayments turn it into a Payment
+ * (invariant 2 - nothing here creates one). If the stop has no payment on it
+ * yet, it goes on the stop itself; if it already has one (say cash at the
+ * door, then a cheque for an old invoice), it goes on a "Payment only" stop
+ * of its own beside it, linked back by after_stop_id, so each amount keeps
+ * its own method at settlement.
+ */
+export async function addPaymentToDeliveredStop(
+  db: Db, actor: Actor, stopId: string,
+  input: { method?: PaymentMethod | null; amountCents: Cents },
+): Promise<{ stopId: string; separate: boolean }> {
+  requireRole(actor, 'admin', 'user', 'driver');
+  const amount = Math.round(Number(input.amountCents) || 0);
+  if (!(amount > 0)) throw new RuleViolation('enter how much they paid');
+  const method = (input.method || 'Cash') as PaymentMethod;
+  return db.tx(async (t) => {
+    await assertMethodAllowed(t, method);
+    const stop = await t.maybeOne<{
+      id: string; customer_id: string; delivery_sheet_id: string; stop_outcome: string;
+      payment_amount_cents: number; settled_at: string | null; sequence_no: number;
+      order_ref: string | null; delivery_address: string | null; contact_phone: string | null;
+      sheet_status: string; assigned_driver_id: string | null;
+    }>(
+      `SELECT s.id, s.customer_id, s.delivery_sheet_id, s.stop_outcome, s.payment_amount_cents,
+              s.settled_at, s.sequence_no, s.order_ref, s.delivery_address, s.contact_phone,
+              d.status AS sheet_status, d.assigned_driver_id
+       FROM delivery_stops s JOIN delivery_sheets d ON d.id = s.delivery_sheet_id
+       WHERE s.id = $1 FOR UPDATE OF s`, [stopId],
+    );
+    if (!stop) throw new RuleViolation('that stop no longer exists');
+    if (stop.stop_outcome !== 'Delivered') {
+      throw new RuleViolation('this stop is not delivered yet: record the payment with the delivery');
+    }
+    if (stop.sheet_status !== 'Open' || stop.settled_at) {
+      throw new RuleViolation('this round is settled; take the payment in the office instead');
+    }
+    if (actor.role === 'driver' && stop.assigned_driver_id && stop.assigned_driver_id !== actor.id) {
+      throw new RuleViolation('this is not your round');
+    }
+
+    if (num(stop.payment_amount_cents) === 0) {
+      await t.query(
+        `UPDATE delivery_stops SET payment_received = true, payment_method = $2, payment_amount_cents = $3
+         WHERE id = $1`, [stopId, method, amount],
+      );
+      await audit(t, actor, 'update', 'DeliveryStop', stopId, stop.order_ref ?? stopId, {
+        paymentAfterDelivery: true, amountCents: amount, method, waitsForSettlement: true,
+      });
+      return { stopId, separate: false };
+    }
+
+    const extra = await t.one<{ id: string }>(
+      `INSERT INTO delivery_stops
+         (delivery_sheet_id, customer_id, order_id, delivery_address, contact_phone, order_ref,
+          line_items_summary, sequence_no, stop_outcome, payment_received,
+          payment_method, payment_amount_cents, payment_only, after_stop_id)
+       VALUES ($1,$2,NULL,$3,$4,NULL,$5,$6,'Payment Only',true,$7,$8,true,$9)
+       RETURNING id`,
+      [stop.delivery_sheet_id, stop.customer_id, stop.delivery_address, stop.contact_phone,
+       `Payment after delivery${stop.order_ref ? ` of ${stop.order_ref}` : ''}`,
+       num(stop.sequence_no), method, amount, stopId],
+    );
+    await audit(t, actor, 'update', 'DeliveryStop', stopId, stop.order_ref ?? stopId, {
+      paymentAfterDelivery: true, paymentStop: extra.id, amountCents: amount, method, waitsForSettlement: true,
+    });
+    return { stopId: extra.id, separate: true };
   });
 }
 
@@ -625,7 +730,7 @@ export async function getStopForDriver(db: Db, stopId: string) {
             COALESCE(ca.delivery_instructions, c.delivery_instructions) AS delivery_instructions,
             o.notes AS order_notes, o.customer_po, o.requested_delivery_date::text AS order_date_wanted,
             o.empties_expected, o.status AS order_status,
-            d.zone AS sheet_zone, d.delivery_date::text AS sheet_date,
+            d.zone AS sheet_zone, d.delivery_date::text AS sheet_date, d.status AS sheet_status,
             (SELECT COUNT(*) FROM delivery_stops x
               WHERE x.delivery_sheet_id = s.delivery_sheet_id)::int AS stop_count,
             (SELECT COUNT(*) FROM delivery_stops x JOIN customers xc ON xc.id = x.customer_id
@@ -692,8 +797,15 @@ export async function getStopForDriver(db: Db, stopId: string) {
     [stop.customer_id],
   );
 
+  // Payments added after the delivery on stops of their own (10 Oct 2026).
+  const laterPayments = await db.query(
+    `SELECT id, payment_method, payment_amount_cents, settled_at FROM delivery_stops
+     WHERE after_stop_id = $1 ORDER BY id`, [stopId],
+  );
+
   return {
     ...stop,
+    laterPayments,
     // Tax-inclusive, always.
     amountOwedCents,
     lines,
@@ -805,5 +917,10 @@ export async function getSheet(db: Db, sheetId: string) {
      ORDER BY s.sequence_no, c.name`,
     [sheetId],
   );
-  return { ...sheet, stops };
+  // Collection stops and the truck (10 Oct 2026, points 3 and 4).
+  return {
+    ...sheet, stops,
+    collections: await listCollections(db, sheetId),
+    truck: await truckPosition(db, sheetId),
+  };
 }

@@ -54,7 +54,7 @@ describe('Point 1: approving a customer emails them a link to set a password', (
   test('the approval email goes out with the set-password link', async () => {
     const appl = await submitApplication(f.db, {
       accountType: 'Individual', firstName: 'Petra', lastName: 'Gayle',
-      email: 'petra@example.jm', phone: '876-555-0101', addressLine1: '4 Lady Musgrave Rd', parish: 'St Andrew',
+      email: 'petra@example.jm', phone: '876-555-0101', addressLine1: '4 Lady Musgrave Rd', city: 'Kingston 10', parish: 'St Andrew',
     });
     const r = await approveApplication(f.db, f.admin, appl.id, { deliveryZone: null });
     assert.equal(r.emailed, true);
@@ -399,9 +399,20 @@ describe('Tomorrow\'s round: remind customers to order', () => {
       customerId: f.otherCustomerId, deliveryMode: 'Delivery', requestedDeliveryDate: day,
       lines: [{ productId: f.casedProductId, cases: 1 }],
     });
+    // Changed on purpose (tester's findings, 10 Oct 2026, point 3): an order
+    // still to come is not their "last order"; only a delivered one is.
+    const pending = (await remindersFor(f.db, { date: day })).rows.find((r) => r.customerId === f.customerId)!;
+    assert.ok(!pending.lastOrderOn || pending.lastOrderOn <= today, 'a future order is not their last order');
+    await f.db.query(
+      `UPDATE customer_orders SET status = 'Delivered', fulfilled_on = $2::date
+       WHERE customer_id = $1 AND requested_delivery_date = $3::date`, [f.customerId, addDays(today, -3), addDays(today, 29)]);
+    // Earlier tests delivered other orders today; make this the latest delivered one.
+    await f.db.query(`UPDATE customer_orders SET fulfilled_on = $2::date WHERE customer_id = $1 AND fulfilled_on > $2::date
+                        AND requested_delivery_date <> $3::date`, [f.customerId, addDays(today, -4), addDays(today, 29)]);
     const list = await remindersFor(f.db, { date: day });
     const me = list.rows.find((r) => r.customerId === f.customerId)!;
     assert.ok(me, 'on the list');
+    assert.equal(me.lastOrderOn, addDays(today, -3), 'last DELIVERED order');
     assert.ok(!list.rows.some((r) => r.customerId === f.otherCustomerId), 'already ordered: left off');
     assert.match(me.message, /your usual 3 cases of 500ml/);
     assert.match(me.message, /Kingston/);
@@ -415,5 +426,32 @@ describe('Tomorrow\'s round: remind customers to order', () => {
     assert.equal(r.sent, 1);
     assert.equal(sent.length, n + 1);
     assert.match(sent.at(-1)!.html!, /Unsubscribe/);
+  });
+
+  test('dates: impossible, unreadable or past days are refused with a clear message; the heading follows the day', async () => {
+    const { remindersFor, markReminded, setReminderTemplate } = await import('../src/services/reminders.ts');
+    await assert.rejects(remindersFor(f.db, { date: '2026-02-30' }), /not a date we can use/);
+    await assert.rejects(remindersFor(f.db, { date: 'tomorrow' }), /not a date we can use/);
+    await assert.rejects(remindersFor(f.db, { date: addDays(today, -1) }), /has gone/);
+    await assert.rejects(markReminded(f.db, f.office, f.customerId, addDays(today, -2)), /has gone/);
+    assert.equal((await remindersFor(f.db, {})).heading, 'Tomorrow');
+    assert.equal((await remindersFor(f.db, { date: today })).heading, 'Today');
+    assert.match((await remindersFor(f.db, { date: addDays(today, 5) })).heading, /^\w{3} \d{1,2} \w{3}$/);
+    await assert.rejects(setReminderTemplate(f.db, f.office, 'x'.repeat(501)), /500 characters/);
+    // A double tap ticks once.
+    const day = addDays(today, 3);
+    await markReminded(f.db, f.office, f.otherCustomerId, day);
+    await markReminded(f.db, f.office, f.otherCustomerId, day);
+    const n = await f.db.one<{ n: number }>(`SELECT COUNT(*)::int AS n FROM order_reminders WHERE customer_id = $1 AND for_date = $2`, [f.otherCustomerId, day]);
+    assert.equal(n.n, 1);
+  });
+
+  test('an impossible date over HTTP is a 400 with the message, not a 500', async () => {
+    const app = await buildServer(f.db);
+    const { signToken } = await import('../src/lib/auth.ts');
+    const tok = signToken({ id: f.office.id, name: f.office.name, role: 'user', customerId: null });
+    const res = await app.inject({ method: 'GET', url: '/api/reminders?date=2026-13-45', headers: { authorization: `Bearer ${tok}` } });
+    assert.equal(res.statusCode, 400);
+    assert.match(res.json().error, /not a date/);
   });
 });

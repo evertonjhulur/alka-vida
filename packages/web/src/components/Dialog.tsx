@@ -19,6 +19,11 @@ interface Request {
 }
 
 let show: ((r: Request) => void) | null = null;
+/**
+ * Asked before the host mounted (tester's findings, 10 Oct 2026, point 14):
+ * held until it does, never handed to the browser's own confirm()/prompt().
+ */
+const waiting: Request[] = [];
 
 function open(message: string, opts: Partial<Omit<Request, 'message' | 'resolve'>>) {
   return new Promise<{ ok: boolean; text: string }>((resolve) => {
@@ -30,14 +35,7 @@ function open(message: string, opts: Partial<Omit<Request, 'message' | 'resolve'
       input: opts.input,
       resolve,
     };
-    // No host mounted (should not happen): fall back to the browser.
-    if (!show) {
-      if (req.input) {
-        const t = window.prompt(message, req.input.value);
-        resolve({ ok: t !== null, text: t ?? '' });
-      } else resolve({ ok: window.confirm(message), text: '' });
-      return;
-    }
+    if (!show) { waiting.push(req); return; }
     show(req);
   });
 }
@@ -70,6 +68,8 @@ export function DialogHost() {
 
   useEffect(() => {
     show = (r) => { setText(r.input?.value ?? ''); setReq(r); };
+    const held = waiting.shift();
+    if (held) show(held);
     return () => { show = null; };
   }, []);
 
@@ -85,7 +85,8 @@ export function DialogHost() {
 
   function finish(ok: boolean) {
     req!.resolve({ ok, text });
-    setReq(null);
+    const held = waiting.shift();
+    if (held) { setText(held.input?.value ?? ''); setReq(held); } else setReq(null);
   }
 
   const [first, ...rest] = req.message.split('\n\n');

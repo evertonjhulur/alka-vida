@@ -4,8 +4,10 @@ State of the Alka Vida rebuild. Read `README.md` first for what the system
 does and the rules behind it; this file covers where things stand, what is
 left, and what will bite you.
 
-Last updated after Everton's round of 7 Oct 2026 (14 points: portal, emails, office, purchasing).
-See "Everton's round, 7 Oct 2026" at the end.
+Last updated after Everton's round of 10 Oct 2026 (7 points: rounds filter, driver payments,
+collection stops, truck loading and returns, invoice footer, card payments off, email wording)
+and Justin's testing findings the same day (reminders, tablet layout, sign-up address, logo,
+security). See "Everton's round, 10 Oct 2026" and "Tester's findings, 10 Oct 2026" at the end.
 
 ---
 
@@ -46,7 +48,7 @@ Working and verified end to end, in the browser as well as in tests:
 | Addresses | Line 1, line 2, town, parish. Composed into `delivery_address`, which stays what the stop and the invoice PDF read (migration 014). |
 | Employees & labour cost | Who works here, paid by the hour or by the trip, and the hours/trips recorded against them. Payroll totals for any date range. **Add from logins** creates a record per existing login — title from the role (`admin`→Manager, `user`→Employee, `driver`→Driver), rate left blank — and is safe to press twice. **Deliberately not wired into costing** (migration 015). A person is managed on their own record at `/employees/:id` — details, rate, and their own work history. |
 
-**Tests: 489 passing** (7 Oct 2026) — 68 pure domain (`packages/shared`), 421 API
+**Tests: 519 passing** (10 Oct 2026) — 68 pure domain (`packages/shared`), 451 API
 (`packages/api`, against real PostgreSQL via PGlite).
 
 ```bash
@@ -65,9 +67,9 @@ packages/
 ```
 
 **API services** (`packages/api/src/services/`): approvals, audits, bottles,
-catalog, core, counter, customers, delivery, documents, inventory, invoices,
+catalog, core, collections, counter, customers, delivery, documents, inventory, invoices,
 invitations, ledger, orders, payments, pricing, quotations, recurring,
-registration, reports, routing, settlement, users, zones.
+registration, reports, routing, settlement, trucks, users, zones.
 
 `packages/api/src/lib/`: `auth.ts`, `settings.ts`.
 
@@ -94,6 +96,9 @@ decision behind them:
 | 016 | Everton's revision list (30 Sep) |
 | 017 | the Florida team's round (1 Oct) |
 | 019 | order reminders: who was reminded to order for which delivery day, and the message wording |
+| 022 | 10 Oct follow-up: last-minute additions to a confirmed load, reconfirmed by the driver (`round_load_additions`, `round_load_lines.added_bottles`) |
+| 021 | 10 Oct follow-up: the driver confirms the load the office logged (`round_loads.driver_confirmed_*`) |
+| 020 | Everton's round of 10 Oct: payment after delivery (`after_stop_id`), truck loading and returns (`round_loads`, `round_load_lines`), collection stops (`round_collections`), stock-ledger types TruckLoad / TruckReturn / CustomerReturn, settings `document_footer` and `take_card_payments` |
 | 018 | Everton's round of 7 Oct: email ticks + unsubscribe token, walk-in flag, news pictures, "Payment Only" stops and partial deliveries, empties expected, the 5-gallon bottle product flag and bottles sold, PO "Partially Received - Closed" |
 
 ---
@@ -155,6 +160,15 @@ twice — once for columns, once for derived expressions.
 
 **PGlite is a single connection.** Nested `db.tx()` joins the outer transaction
 rather than opening a second one.
+
+**Signing in is an httpOnly cookie (`av_session`), not a token in
+localStorage** (10 Oct 2026). Every request from the web app sends
+`x-alka-request: 1`; a change (POST/PUT/PATCH/DELETE) made with the cookie is
+refused (403) without it or from another site. A `fetch` written outside
+`lib/api.ts` must send that header too. Tests and scripts can still use
+`Authorization: Bearer <token>` (read the token from the login response's
+cookie). The cookie is `Secure` only over https, so http://localhost still
+works.
 
 **Check for a concurrent session before editing.** Run `git log --oneline -3`
 first. Two agents editing this tree at once will conflict — it has already
@@ -246,6 +260,11 @@ Load-bearing. Each corresponds to a real bug and is pinned by a named test.
     from the employee when the work is recorded and never updated, so a pay
     rise applies to work done after it and never restates an earlier week.
     Same rule as invariant 8, same reason. Never "look up the current rate".
+19. **Stock leaves the warehouse once.** On a loaded round the goods left
+    when the truck was loaded; a delivery comes off the truck and must not
+    call `takeFinishedGoods` too (`trucks.deliversFromTruck`). Loading and
+    returns work to a target, so saving them again moves only the
+    difference. Pinned in `trucks.test.ts`, point 4.
 
 ---
 
@@ -849,3 +868,268 @@ routes in `routes/october.ts`, test at the end of `test/october.test.ts`.
 - **Email** to ticked customers (only those with an address who have not
   turned off Service announcements): branded email, Order now button,
   unsubscribe link (category `service`). Logged per customer, sent or failed.
+
+
+### Everton's round, 10 Oct 2026
+
+Seven points, his rulings final. Migration **020_trucks_and_collections**, routes in
+`routes/trucks.ts`, services `trucks.ts` (loading/returns/report) and
+`collections.ts` (collection stops), shared screen parts in
+`web/src/components/Truck.tsx`, tests in `test/trucks.test.ts` (15).
+**Tests: 436 API + 68 shared, all passing.** Walked in a real browser
+(driver on a phone-size screen, office on desktop): loading, start, deliver,
+add a payment after delivery, add a collection stop, office-planned returned
+goods, count back, settle with a credit note and restock, loadings report,
+invoice PDF footer.
+
+1. **Delivery rounds status filter.** Pills All · Not started · Out on the
+   road · Settled, each with a count, over whatever day is chosen; the Status
+   column says the same three words (`DeliverySheets.tsx`, `phaseOf`: Open +
+   no `started_at` / Open + `started_at` / Completed). The round page's own
+   chip says "Out on the road" too (it keeps "Back, ready to settle" once
+   every stop is worked).
+2. **Driver: payment on a stop already delivered.** The delivered stop's
+   screen shows "Payments on this stop" and an **Add a payment** box: method
+   + amount only (`delivery.addPaymentToDeliveredStop`,
+   `POST /api/stops/:id/add-payment`). No payment on the stop yet: it goes on
+   the stop. One already there: a **Payment only** stop of its own, linked by
+   `delivery_stops.after_stop_id`, so each amount keeps its own method at
+   settlement ("Payment after delivery of SO-…" on the round and the
+   settlement page). Only a record until the office settles: `settleStop` /
+   `planPayments` untouched (invariant 2). Refused once the round is settled.
+3. **Collection stops.** "+ Add a stop" on My route and on the round page,
+   four kinds:
+   - *Collect payment* = the existing Payment only stop. New: the office can
+     **plan** one with no amount (`addPaymentStop` `planned: true` → a
+     Pending stop "Collect payment"); the driver records what was taken
+     (Record the payment / Not home / Did not pay) through `markStop`.
+   - *Collect empties* (customer + count), *Collect returned goods*
+     (customer + products/qty + reason), *Pick up from supplier* (supplier,
+     optional PO with its lines, and/or what was collected in words) live in
+     **`round_collections`**, not `delivery_stops`: they have no order (a
+     supplier has no customer either), and every `delivery_stops` query joins
+     customers and carries money logic. Shown in the same visit-ordered list;
+     screen `/route/collection/:id` (`DriverCollection.tsx`).
+   - A **driver's** is recorded as done (Collected). The **office's** is
+     planned (Pending) for the driver to record, or "Not collected".
+     Anything still Pending at settlement closes as Not collected.
+   - On settling (`collections.settleCollections`, inside `settleRoute`):
+     empties go into the pool (filled → returned dirty) and off what the
+     customer holds (`customer_bottle_moves.returned`), and count towards the
+     bottle check; **returned goods block closing until the office decides**
+     on the settlement page — "Raise a credit note" (created at the
+     customer's own prices via `createCreditNote`; an office user's waits for
+     approval as usual) or "No credit note", plus "Put the goods back in
+     stock" (moved in at settlement, ledger type CustomerReturn). Once a
+     credit note is raised the decision is final (cancel it on Credit notes).
+   - Supplier pick-ups move no stock. Opening the PO (also from the
+     settlement page link, `/purchase-orders?po=`) prefills **Receiving now**
+     and **Arrived on** from the pick-up; receiving marks the pick-up used
+     (`markPickupsReceived`, in `receivePurchaseOrder`).
+4. **Truck loading and returns (moves stock).** **Dual accountability**
+   (his follow-up the same day, migration **021_driver_confirms_load**):
+   - The **office logs the loading** on the round page (step 2 "Log the
+     loading"): per product, what the round's orders still need
+     (undelivered stops, less earlier part deliveries; the 5-gallon *bottle*
+     product is never loaded), an **Extra** stepper per product, "add a
+     product not on the orders", and **Who loaded the truck?** (active
+     employees). "Confirm loaded: log it" (`trucks.loadRound`, office only)
+     records it in that office user's name (`loaded_by_name`, date/time
+     automatic) and moves the stock. The office can change it until the
+     driver confirms.
+   - The **driver only confirms**: My route shows "Confirm the load" - the
+     totals per product and in all, who logged it, who loaded it - and **"I
+     confirm this load: start route"** (`trucks.confirmLoad`,
+     `POST /api/delivery-sheets/:id/confirm-load`; records
+     `driver_confirmed_at/_by/_name`, then starts). No quantities to change;
+     a wrong count is the office's to correct first. Before the office has
+     logged it the driver sees "The office has not logged the loading for
+     this round yet" and cannot start. A driver's plain `/start` call goes
+     through `confirmLoad` too. Once confirmed, the loading is **locked**.
+   - The office can still "start without a loading" (no stock moves;
+     deliveries come off the warehouse as before) - only offered while no
+     loading is logged.
+   - **Last-minute additions** (migration **022_load_additions**): after
+     the driver has confirmed, the office can still **add** to the load
+     (round page › The truck › "+ Add to the load": products and
+     quantities, who loaded it, an optional reason; add only).
+     `trucks.addToLoad` moves that stock warehouse → truck at once, kept in
+     `round_load_lines.added_bottles` and `round_load_additions`. The driver
+     sees "The office added to your load" at the top of My route and presses
+     **"I confirm this was added"** (`confirmAddition`). The office can
+     **cancel** an addition the driver has not confirmed (stock goes back,
+     `cancelAddition`); a confirmed one stands. **Settling is refused while
+     an addition waits for the driver.** The truck table shows "incl. N
+     added later"; the loadings report credits each addition to its own
+     loaders and lists it as "(added later)" in the export.
+   - Loading moves finished goods warehouse → truck (ledger TruckLoad).
+     Deliveries on a loaded round then **do not** come off the warehouse
+     again (`markStop` asks `trucks.deliversFromTruck`). A round with no
+     loading behaves exactly as before.
+   - The office can save the loading again (only the difference moves)
+     until the driver confirms it; after that it is refused. A loading is
+     also refused on a round already under way without one (its deliveries
+     came off the warehouse).
+   - **Back at the yard**: when every stop is done the driver sees loaded /
+     delivered / on truck per product and **What came back on the truck**
+     (full cases per product, prefilled with what should be there, plus the
+     5-gallon empties count and a note). `trucks.confirmReturns` puts full
+     goods back on the warehouse (TruckReturn); it works to a target, so a
+     correction moves only the difference. Empties are a count: each stop
+     already moved its empties into the pool, collected empties move at
+     settlement; the count prefills the settlement's "Empty bottles
+     returned".
+   - The round page and the settlement page show **Loaded – Delivered –
+     Back – Difference**; a difference is red ("1 cs missing" / "over").
+     The office counts it back on the round page once the driver is done
+     (or "Count what came back now"), or on the settlement page.
+     **Settling a loaded round is refused until the returns are in.**
+   - Report: Reports › **Truck loadings** — by day and loader (each loader
+     credited with the whole load), and every loading with who logged it,
+     who confirmed it, loaded / delivered / back / difference; CSV export
+     (one row per loader per product).
+5. **Invoice and statement footer.** Settings › **Invoices & payments**
+   (`MoneySettings.tsx`, `/api/settings/money`, admin edits). Printed line
+   for line at the foot of every **invoice** PDF and every **statement** PDF
+   (`documents.drawPaymentFooter`), "Electronic Transfers:" and "Note to
+   customer" in bold. Not on quotes and **not on credit notes** (nothing to
+   pay). Default text is exactly Everton's (`core.DEFAULT_DOCUMENT_FOOTER`),
+   with a "put back the original wording" link.
+6. **Card payments off.** Setting "We take card payments", default **off**
+   (`take_card_payments`). Off: Card is left out of every list
+   (`web/src/lib/payments.ts` `payMethods`/`useTakeCard`: driver's stop, My
+   route / add a stop, counter sale, New order, Orders collect, Payments,
+   invoice, customer record, payment change). A list showing an existing
+   card payment keeps Card. The server also refuses a NEW card payment while
+   off (`core.assertMethodAllowed`: recordPayment, receivePayment,
+   counterSale, collectOrder, payment stops, add-payment, payment change) -
+   **never** in `markStop` (invariant 3) or settlement/reversal.
+   **Test changed on purpose:** sales.test "paying at collection" paid by
+   Card; now Cash.
+7. **Order email wording.** "You told us you will hand over N empty 5-gallon
+   bottles." → **"Empties to be returned: N"** (`messaging.sendOrderPlacedEmail`).
+   The sentence was nowhere else; the portal's "order is in" confirmation
+   now ends with the same line when 5-gallons were ordered.
+
+Not now (his ruling): customer delivery days from zones (to be worked out
+operationally first); Cash Walk-In's old balance (test data, will be wiped).
+
+Not done / to know:
+
+- Two of the driver's rounds not started both show their confirm-load
+  panel; each has its own button.
+- Returned goods sit outside the truck count (they are not stock until the
+  office decides to restock them at settlement).
+- The round page's "Stop N of M" on the stop screen counts payment-only
+  stops but not collection stops.
+
+
+### Tester's findings, 10 Oct 2026 (Justin, on the Railway site)
+
+Added to the 10 Oct round. Everton's rulings: logo into the app, address
+required on sign-up, both security items now. No migration. Tests in
+`test/security.test.ts` (12) and additions to `october.test.ts` (reminders)
+and `registration.test.ts`. **Tests: 451 API + 68 shared, all passing.**
+Walked in a browser as admin (desktop, tablet, phone widths), driver and portal
+customer (phone), and the public sign-up and invitation pages.
+
+**A. Tomorrow's reminders**
+
+1. Dates: `reminders.reminderDay` refuses an impossible or unreadable date
+   with a 400 and a plain message ("…is not a date we can use. Pick the day
+   from the calendar."), and a past day ("that day has gone"); blank means
+   tomorrow. Used by the list, ticking off and emailing (undo may name a past
+   day). The date box has `min` = today.
+2. The heading follows the day: "Tomorrow's round" / "Today's round" /
+   "Round on Tue 13 Oct" (server `heading`; `when` still fills messages).
+3. "Last order" is the last **delivered** order (`fulfilled_on`, never in the
+   future); the "usual" comes from it too. No delivered order: "no deliveries
+   yet". **Test changed on purpose:** october.test's reminders test used a
+   future pending order as the usual; it now delivers it first.
+4. Counter: "N left to remind · N done", counted against what is on the
+   screen, "(hidden)" when Hide the ones done is ticked.
+5. A customer who cannot be emailed says why under their name and on the
+   tick's tooltip: "No email address" / "Turned off service emails"
+   (`emailBlocked`).
+6. Changing the day with customers ticked asks first (in-app dialog: "Change
+   the day" / "Stay on this day").
+7. Phone: ticks and buttons on the rows at least 44 × 44px.
+8. Template: 500 characters at most (`MAX_TEMPLATE`, checked on the server),
+   with a "n / 500 characters" counter.
+9. "Send on WhatsApp" is locked while its tick saves (a double tap opens one
+   chat and ticks once; the server also ignores the same tick within 30
+   seconds). Each load is numbered and only the newest answer is used, so a
+   new day cancels an earlier request. Every action clears the last notice.
+
+**B. App-wide**
+
+10. Tablet: below 900px the navigation is the phone's (top strip / Menu
+    drawer) and the page gets the full width; the top bar keeps just the
+    search box, so office search works on a phone too. Up to 1100px a panel
+    holding a wide table scrolls sideways inside itself (panels with row menus
+    are left alone, as a scrolling box would clip the menu); filter rows wrap.
+    Checked at 375, 790, 905, 1000 and 1100px on 30 office screens: no page
+    scrolls sideways. Phone touch sizes and card tables still start at 760px.
+11. Unknown addresses inside the app show "Page not found" with a way back
+    (`NotFound` in App.tsx). Signing in from `#/login` goes to the start.
+12. When the session runs out, the page they were on is remembered
+    (sessionStorage) and signing in again goes back to it
+    (`takeReturnPath`). The app now also switches to the sign-in page at once
+    (`alkavida:signed-out` event) instead of staying on a dead screen.
+13. A non-JSON error (Railway's 502 page while restarting) reads "Alka Vida is
+    not answering just now (error 502). It may be restarting: wait a minute
+    and try again." A dropped connection says so too.
+14. `<DialogHost />` is mounted at the root, signed in or not; a question
+    asked before it mounts waits for it. No `window.confirm/prompt` anywhere
+    (Applications' decline reason now uses `askText`).
+
+**C. Sign-up**
+
+15. Delivery address required: street, town and parish, on the form and on
+    the server (`registration.submitApplication`; parish must be one of the
+    14). Every field has `autocomplete` and a maximum length, the same
+    maximums the server checks (`registration.MAX`).
+
+**D. Logo**
+
+16. The logo is in the app: `packages/api/assets/alka-vida-logo.png` (from
+    Everton's folder). `documents.logoPath()` still prefers the owner's file
+    beside the launcher, then this one, so /api/logo, emails and PDFs always
+    have it and the /api/logo 404 is gone. Favicon (`web/public/favicon.png`,
+    64px) and an Apple touch icon made from it; `/favicon.ico` answers too.
+    `.gitignore` now ignores only the logo at the folder root.
+
+**E. Security**
+
+17. Every response: `X-Frame-Options: DENY`, `X-Content-Type-Options:
+    nosniff`, `Referrer-Policy: strict-origin-when-cross-origin`;
+    `Strict-Transport-Security` when reached over https
+    (`x-forwarded-proto`). Pages and API answers carry a
+    Content-Security-Policy: self only, Google Fonts, `data:`/`blob:`
+    images, `frame-ancestors 'none'`, no inline script (`style-src` allows
+    inline styles, which React's style attributes and the unsubscribe page
+    use). PDFs and pictures carry no policy, so the browser's PDF viewer is
+    never blocked; "Print" now opens the PDF's own address in a new tab.
+18. Sign-in: `POST /api/auth/login` sets `av_session` (httpOnly,
+    SameSite=Strict, Path=/, 12 hours, Secure over https) and returns only
+    the session (who it is) - the token never reaches page scripts; an old
+    token left in localStorage is removed. Changes made with the cookie need
+    the `x-alka-request` header and, when the browser says where the request
+    came from, this site. `POST /api/auth/logout` clears it (Sign out calls
+    it). An expired or forged cookie is cleared and answered 401. CORS is off
+    by default (`CORS_ORIGIN` can name an origin). Checked: admin, office,
+    driver and portal customer all work on the cookie alone; invitation and
+    password links unchanged.
+19. `GET /api/health` without signing in; unknown `/api` addresses are 404
+    for everyone (previously 401 before signing in); an unknown invitation
+    token is 404 (one answer for unknown, used or expired); `robots.txt`
+    disallows everything; unknown files (anything with an extension) are
+    404 rather than the app shell.
+
+Not done / to know:
+
+- After this goes live everyone is signed out once (the old token is no
+  longer accepted from the browser) and simply signs in again.
+- The "Alka Vida has been updated since it was started" banner appears if the
+  web app is rebuilt while the server keeps running; restarting fixes it.
+

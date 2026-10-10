@@ -1,6 +1,7 @@
 import { useEffect, useState, type ReactNode } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { api, download, type Session } from '../lib/api';
+import { payMethods, useTakeCard } from '../lib/payments';
 import { money, toCents, date, day, time, statusTone } from '../lib/format';
 import Logo from '../components/Logo';
 
@@ -78,6 +79,7 @@ function daysUntil(iso: string | null): number | null {
 }
 
 export default function InvoiceDetail({ session }: { session: Session }) {
+  const takeCard = useTakeCard();
   const { invoiceId } = useParams();
   const isAdmin = session.role === 'admin';
   const [inv, setInv] = useState<Invoice | null>(null);
@@ -336,7 +338,7 @@ export default function InvoiceDetail({ session }: { session: Session }) {
                      onChange={(e) => setPay({ ...pay, amount: e.target.value })} /></div>
             <div className="field"><label htmlFor="p-how">Method</label>
               <select id="p-how" value={pay.method} onChange={(e) => setPay({ ...pay, method: e.target.value })}>
-                {METHODS.map((m) => <option key={m}>{m}</option>)}
+                {payMethods(METHODS, takeCard, pay.method).map((m) => <option key={m}>{m}</option>)}
               </select></div>
             <div className="field"><label htmlFor="p-ref">Reference</label>
               <input id="p-ref" value={pay.reference} placeholder="bank ref, cheque no."

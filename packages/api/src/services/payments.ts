@@ -9,7 +9,7 @@
 
 import type { Db, Queryable } from '../db/index.ts';
 import type { Actor } from './core.ts';
-import { audit, requireRole, withIdempotency, num } from './core.ts';
+import { assertMethodAllowed, audit, requireRole, withIdempotency, num } from './core.ts';
 import type { Cents, PaymentMethod } from '@alka/shared';
 import { RuleViolation, planPayments, validateAllocation } from '@alka/shared';
 
@@ -79,6 +79,7 @@ export async function recordPayment(
 ): Promise<{ id: string | null; replayed: boolean }> {
   requireRole(actor, 'admin', 'user');
   return db.tx(async (t) => {
+    await assertMethodAllowed(t, input.method);
     const outcome = await withIdempotency(
       t, input.idempotencyKey, 'recordPayment',
       () => insertPayment(t, actor, { ...input, status: 'Confirmed' }),
@@ -261,6 +262,7 @@ export async function receivePayment(
 ): Promise<{ paymentIds: string[]; allocatedCents: Cents; unappliedCents: Cents }> {
   requireRole(actor, 'admin', 'user');
   if (!(input.amountCents > 0)) throw new RuleViolation('a payment must be more than zero');
+  await assertMethodAllowed(db, input.method);
 
   const check = validateAllocation(input.amountCents, input.allocations ?? []);
   if (!check.ok) throw new RuleViolation(check.error);
@@ -496,6 +498,7 @@ export async function requestPaymentChange(
 
     const clean = cleanChange(changes);
     if (Object.keys(clean).length === 0) throw new RuleViolation('nothing was changed');
+    await assertMethodAllowed(t, (clean as { method?: string }).method);
     await checkChange(t, p.customer_id, clean);
 
     const label = p.receipt_number ?? p.reference ?? `payment of ${(num(p.amount_cents) / 100).toFixed(2)}`;
