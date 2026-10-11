@@ -17,16 +17,14 @@ interface Snapshot {
   finishedGoods: Array<{
     productId: string; name: string; size: string | null; bottlesPerCase: number; bottles: number;
     cases: number | null; loose: number; isReturnable: boolean; lastCounted: string | null;
+    /** Loaded on a round still out, less what its stops delivered. */
+    onTruckBottles?: number;
   }>;
   rawMaterials: Array<{
     id: string; name: string; unit: string; onHand: number; category: string | null;
     reorderPoint: number | null; lastCounted: string | null;
     makes: Array<{ productId: string; productName: string; perCase: number; cases: number; unit: string }>;
   }>;
-}
-interface Pool {
-  label: string; clean_ready: number; filled_with_customer: number;
-  returned_dirty: number; lost_damaged: number; in_circulation: number;
 }
 interface Txn {
   id: string; item_type: string; item_name: string; quantity: number;
@@ -40,16 +38,29 @@ const WHY: Record<string, string> = {
   Manual: 'Entered by hand',
 };
 
+/** How many movements show before "See all". */
+const LATEST = 10;
+
+/** Goods on the trucks, in cases and loose bottles the way the floor counts them. */
+function onTruck(g: Snapshot['finishedGoods'][number]) {
+  const n = g.onTruckBottles ?? 0;
+  if (n <= 0) return <span className="muted">—</span>;
+  if (g.bottlesPerCase <= 0) return n;
+  const cs = Math.floor(n / g.bottlesPerCase);
+  const loose = n % g.bottlesPerCase;
+  return <>{cs > 0 ? `${cs} cs` : ''}{cs > 0 && loose > 0 ? ' + ' : ''}{loose > 0 ? `${loose}` : ''}</>;
+}
+
 export default function Stock() {
   const [snap, setSnap] = useState<Snapshot | null>(null);
-  const [pool, setPool] = useState<Pool[]>([]);
   const [txns, setTxns] = useState<Txn[]>([]);
   const [filter, setFilter] = useState('');
+  /** The latest few movements unless asked for all (the page ran to 3,450px). */
+  const [allMoves, setAllMoves] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     api.get<Snapshot>('/api/stock/snapshot').then(setSnap).catch((e) => setError(e.message));
-    api.get<Pool[]>('/api/reports/bottle-pool').then(setPool).catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -63,8 +74,8 @@ export default function Stock() {
     if (!snap) return;
     downloadCsv(`stock-on-hand-${todayInJamaica()}`, [
       ['Finished goods'],
-      ['Product', 'Size', 'Bottles a case', 'Full cases', 'Loose bottles', 'Total bottles', 'Last counted'],
-      ...snap.finishedGoods.map((g) => [g.name, g.size ?? '', g.bottlesPerCase || '', g.cases ?? '', g.loose, g.bottles, g.lastCounted ?? '']),
+      ['Product', 'Size', 'Bottles a case', 'Full cases', 'Loose bottles', 'Total bottles', 'On trucks (bottles)', 'Last counted'],
+      ...snap.finishedGoods.map((g) => [g.name, g.size ?? '', g.bottlesPerCase || '', g.cases ?? '', g.loose, g.bottles, g.onTruckBottles ?? 0, g.lastCounted ?? '']),
       [],
       ['Raw materials'],
       ['Material', 'Category', 'Unit', 'On hand', 'Reorder at', 'Would make', 'Last counted'],
@@ -77,9 +88,9 @@ export default function Stock() {
     <>
       <div className="panel-head record-head">
         <div>
-          <h1>Stock on hand</h1>
+          <h1>Stock levels</h1>
           <p className="subtitle" style={{ marginBottom: 0 }}>
-            Finished goods in cases and loose bottles, raw materials in units, and every movement.
+            Finished goods in the warehouse and on the trucks, raw materials in units, and the latest movements.
           </p>
         </div>
         <div className="record-actions">
@@ -95,7 +106,7 @@ export default function Stock() {
           <thead>
             <tr>
               <th>Product</th><th className="num">Full cases</th><th className="num">Loose bottles</th>
-              <th className="num">In bottles</th><th>Last counted</th>
+              <th className="num">In bottles</th><th className="num">On trucks</th><th>Last counted</th>
             </tr>
           </thead>
           <tbody>
@@ -106,6 +117,7 @@ export default function Stock() {
                 <td className="num"><strong>{g.cases === null ? '—' : g.cases}</strong></td>
                 <td className="num">{g.bottlesPerCase > 0 ? (g.loose || '—') : <strong>{g.loose}</strong>}</td>
                 <td className="num muted">{g.bottles < 0 ? <span className="chip bad">{g.bottles}</span> : g.bottles}</td>
+                <td className="num">{onTruck(g)}</td>
                 <td className="small">{g.lastCounted ? when(g.lastCounted) : <span className="muted">never</span>}</td>
               </tr>
             ))}
@@ -115,6 +127,8 @@ export default function Stock() {
           Loose bottles are those left over from a production run; they go into the next case run.
           Production adds to these figures, and every delivery, collection and counter sale takes off what
           left. A figure below zero means more went out than was recorded as made: count it.
+          On trucks is what was loaded on a round still out, less what its stops have delivered; it comes
+          back on the warehouse when the returns are counted.
         </p>
       </div>
 
@@ -152,37 +166,8 @@ export default function Stock() {
       </div>
 
       <div className="panel">
-        <div className="panel-head">
-          <h2>5-gallon bottle pool</h2>
-          <Link className="small" to="/bottle-pool">Bottle pool, and how it is worked out</Link>
-        </div>
-        <table>
-          <thead>
-            <tr>
-              <th>Pool</th><th className="num">Clean, ready</th>
-              <th className="num">Out with customers</th><th className="num">Returned dirty</th>
-              <th className="num">Lost / damaged</th><th className="num">In circulation</th>
-            </tr>
-          </thead>
-          <tbody>
-            {pool.map((p) => (
-              <tr key={p.label}>
-                <td>{p.label}</td>
-                <td className="num">{Number(p.clean_ready)}</td>
-                <td className="num">{Number(p.filled_with_customer)}</td>
-                <td className="num">{Number(p.returned_dirty)}</td>
-                <td className="num"><span className="chip warn">{Number(p.lost_damaged)}</span></td>
-                <td className="num">{Number(p.in_circulation)}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-        {pool.length === 0 && <p className="muted">No bottle pool configured.</p>}
-      </div>
-
-      <div className="panel">
         <div className="row" style={{ justifyContent: 'space-between' }}>
-          <h2 style={{ marginTop: 0 }}>Stock movements</h2>
+          <h2 style={{ marginTop: 0 }}>{allMoves ? 'Stock movements' : 'Latest stock movements'}</h2>
           <div className="row" style={{ gap: 8 }}>
             <select value={filter} onChange={(e) => setFilter(e.target.value)} aria-label="Which items">
               <option value="">All items</option>
@@ -195,7 +180,7 @@ export default function Stock() {
               [['Date', 'Item', 'Kind', 'In / out', 'Quantity', 'Why', 'Reference', 'Note', 'Value'],
                 ...txns.map((t) => [t.txn_day, t.item_name, t.item_type, t.direction, Number(t.quantity),
                   WHY[t.reference_type] ?? t.reference_type, t.reference ?? '', t.notes ?? '', dollars(t.total_cost_cents)])],
-            )}>Export</button>
+            )}>Export to Excel</button>
           </div>
         </div>
         <table>
@@ -207,7 +192,7 @@ export default function Stock() {
             </tr>
           </thead>
           <tbody>
-            {txns.map((t) => (
+            {(allMoves ? txns : txns.slice(0, LATEST)).map((t) => (
               <tr key={t.id}>
                 <td>{when(t.txn_day)}</td>
                 <td>
@@ -234,6 +219,13 @@ export default function Stock() {
           </tbody>
         </table>
         {txns.length === 0 && <p className="muted">No stock movements recorded yet.</p>}
+        {txns.length > LATEST && (
+          <p style={{ marginBottom: 0 }}>
+            <button type="button" className="secondary" onClick={() => setAllMoves(!allMoves)}>
+              {allMoves ? `Show the latest ${LATEST} only` : `See all movements (${txns.length}${txns.length >= 300 ? ', the latest 300' : ''})`}
+            </button>
+          </p>
+        )}
       </div>
     </>
   );

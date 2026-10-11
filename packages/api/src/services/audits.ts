@@ -18,6 +18,7 @@ import type { Db, Queryable } from '../db/index.ts';
 import type { Actor } from './core.ts';
 import { audit as writeAudit, requireRole, num } from './core.ts';
 import { RuleViolation, drawFifo, blendedAverageCost, type Batch } from '@alka/shared';
+import { goodsOnTrucks } from './trucks.ts';
 
 export interface CountInput {
   itemType: 'RawMaterial' | 'FinishedGoods';
@@ -414,8 +415,11 @@ export async function stockSnapshot(db: Db) {
             (SELECT MAX(audit_date)::text FROM inventory_audits a
               WHERE a.item_type = 'FinishedGoods' AND a.item_id = p.id) AS last_counted
      FROM products p LEFT JOIN finished_goods_stock f ON f.product_id = p.id
-     WHERE p.active ORDER BY p.name`,
+     WHERE p.active AND NOT p.is_bottle_charge ORDER BY p.name`,
   );
+  // The 5-gallon bottle charge is a price for a bottle not handed back, not
+  // goods on the floor, so it is left out above (UX review, 11 Oct 2026).
+  const onTrucks = await goodsOnTrucks(db);
   const materials = await db.query<{
     id: string; name: string; unit_of_measure: string; quantity_on_hand: number;
     reorder_point: number | null; category: string | null; last_counted: string | null;
@@ -443,6 +447,7 @@ export async function stockSnapshot(db: Db) {
         cases: bpc > 0 ? Math.floor(Math.max(bottles, 0) / bpc) : null,
         loose: bpc > 0 ? Math.max(bottles, 0) % bpc : bottles,
         lastCounted: g.last_counted,
+        onTruckBottles: onTrucks.get(g.product_id) ?? 0,
       };
     }),
     rawMaterials: materials.map((m) => {

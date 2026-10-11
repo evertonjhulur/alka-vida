@@ -165,7 +165,7 @@ export function StatementView(
           </div>
           <div className="field">
             <button className="secondary" disabled={!data} onClick={exportCsv}>
-              Export for accountant
+              Export to Excel
             </button>
           </div>
           <div className="field">
@@ -173,7 +173,7 @@ export function StatementView(
                 print is kept beside it because it costs nothing and someone
                 always wants the screen exactly as it looks. */}
             <button disabled={!data || busy} onClick={downloadPdf}>
-              {busy ? 'Building…' : 'Statement PDF'}
+              {busy ? 'Building…' : 'Download PDF'}
             </button>
           </div>
           <div className="field">

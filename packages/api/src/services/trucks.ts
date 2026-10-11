@@ -529,6 +529,30 @@ export async function truckPosition(db: Queryable, sheetId: string) {
 }
 
 /**
+ * Goods out on the trucks right now, per product, in bottles (UX review,
+ * 11 Oct 2026: the Stock page showed nothing for them). A round counts while
+ * it is open, has a loading, and its returns are not yet in: what was loaded
+ * (with any additions) less what its stops recorded as delivered. Once the
+ * returns are confirmed the goods are back on the warehouse or written off.
+ */
+export async function goodsOnTrucks(db: Queryable): Promise<Map<string, number>> {
+  const sheets = await db.query<{ id: string }>(
+    `SELECT rl.delivery_sheet_id AS id FROM round_loads rl
+     JOIN delivery_sheets s ON s.id = rl.delivery_sheet_id
+     WHERE s.status = 'Open' AND rl.returned_at IS NULL`,
+  );
+  const out = new Map<string, number>();
+  for (const s of sheets) {
+    const pos = await truckPosition(db, s.id);
+    for (const l of pos?.lines ?? []) {
+      const n = Math.max(l.expectedBackBottles, 0);
+      if (n > 0) out.set(l.productId, (out.get(l.productId) ?? 0) + n);
+    }
+  }
+  return out;
+}
+
+/**
  * What came back on the truck: full goods per product, and the 5-gallon
  * empties counted off it. Full goods go back on the warehouse. Empties are a
  * count against what the stops recorded: each stop already moved its empties

@@ -669,7 +669,7 @@ export default function Reports() {
               </select>
             </>
           )}
-          <button className="secondary" onClick={exportTab}>Export for accountant</button>
+          <button className="secondary" onClick={exportTab}>Export to Excel</button>
           <button className="secondary" onClick={() => window.print()}>Print</button>
         </div>
       </div>

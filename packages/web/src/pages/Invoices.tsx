@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom';
 import { api } from '../lib/api';
 import { money, date, statusTone, when } from '../lib/format';
 import { downloadCsv, dollars } from '../lib/csv';
+import StatementDialog from '../components/StatementDialog';
 
 interface Row {
   invoice_id: string; invoice_number: string; invoice_date: string;
@@ -42,6 +43,7 @@ export default function Invoices() {
   const [from, setFrom] = useState('');
   const [to, setTo] = useState('');
   const [error, setError] = useState<string | null>(null);
+  const [statementOpen, setStatementOpen] = useState(false);
 
   useEffect(() => {
     const q = status ? `?status=${encodeURIComponent(status)}` : '';
@@ -68,11 +70,24 @@ export default function Invoices() {
 
   return (
     <>
-      <h1>Invoices</h1>
-      <p className="subtitle">
-        An invoice is raised at the moment of delivery, from the quantities actually delivered, or
-        once a week or month for customers billed that way.
-      </p>
+      <div className="panel-head record-head">
+        <div>
+          <h1>Invoices</h1>
+          <p className="subtitle" style={{ marginBottom: 0 }}>
+            An invoice is raised at the moment of delivery, from the quantities actually delivered, or
+            once a week or month for customers billed that way.
+          </p>
+        </div>
+        {/* A customer's statement without opening their page first: the
+            Statements menu item this replaces (UX review, 11 Oct 2026). */}
+        <div className="record-actions">
+          <button type="button" className="secondary" onClick={() => setStatementOpen(true)}>Statement…</button>
+        </div>
+      </div>
+      {statementOpen && (
+        <StatementDialog onClose={() => setStatementOpen(false)}
+                         onDone={(m) => { setError(null); setMsg(m); }} />
+      )}
       {error && <div className="notice error">{error}</div>}
       {msg && <div className="notice ok">{msg}</div>}
 

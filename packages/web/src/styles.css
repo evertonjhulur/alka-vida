@@ -1326,3 +1326,52 @@ a.button-link.is-busy { opacity: .6; pointer-events: none; }
   .main input, .main select, .main textarea { max-width: 100%; }
   .main .field { min-width: 0; max-width: 100%; }
 }
+
+/* ---------- The shorter menu (UX review, 11 Oct 2026) ---------- */
+/*
+ * The menu stays on the screen while the page scrolls, with its own scroll
+ * if a short window cannot show all of it. Before, it was 1,183px tall and
+ * scrolled away with the page, so Reports and Settings needed a scroll to
+ * reach and every page was at least that tall.
+ */
+.sidebar {
+  position: sticky; top: 0; align-self: flex-start;
+  height: 100vh; overflow-y: auto; box-sizing: border-box;
+}
+.sidebar nav a.nav-action { margin-top: 0; }
+.nav-rule { height: 1px; background: var(--nav-rule); margin: 10px 18px; }
+.tabs .nav-badge { float: none; }
+
+/* The way back from a settings page to the Settings hub. */
+.back-link { margin: 0 0 6px; font-size: 14px; }
+.back-link a { text-decoration: none; }
+.back-link a:hover { text-decoration: underline; }
+
+/* Settings hub: one card per area. */
+.settings-grid {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 14px;
+}
+.settings-card {
+  display: flex; flex-direction: column; gap: 6px;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+  padding: 16px 18px; text-decoration: none; color: var(--ink);
+  box-shadow: 0 1px 2px rgba(16, 24, 40, .06);
+}
+.settings-card:hover { border-color: var(--brand); }
+.settings-card-title { font-weight: 700; font-size: 16px; color: var(--brand); }
+.settings-card-text { color: var(--muted); font-size: 14px; line-height: 1.45; }
+.row-actions { white-space: nowrap; }
+button.pop-item.pop-button.pop-danger { color: var(--bad); }
+
+/* Statement… (customer page and Invoices), 11 Oct 2026. */
+.statement-dialog { width: 520px; }
+.st-periods { border: 0; padding: 0; margin: 4px 0 0; min-width: 0; }
+.st-periods legend { font-size: 13px; color: var(--muted); padding: 0; margin-bottom: 6px; }
+.st-more { margin-top: 10px; font-size: 14px; }
+.st-more summary { cursor: pointer; color: var(--brand); }
+.st-preview { margin: 12px 0 0; padding: 8px 12px; background: var(--bg); border-radius: 6px; font-size: 14px; }
+.statement-dialog .field { margin-top: 8px; }
+
+/* Details tab of a customer: its four parts (11 Oct 2026). */
+.sub-tabs { margin-top: -4px; }
+.sub-tabs .tab { font-size: 13.5px; padding: 7px 12px; }

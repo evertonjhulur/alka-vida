@@ -283,7 +283,10 @@ export default function NewOrder() {
   }));
   const addProduct = (id: string) => setLines((cur) => [...cur, { productId: id, qty: 1, price: null }]);
   const removeLine = (id: string) => setLines((cur) => cur.filter((l) => l.productId !== id));
-  const notYet = products.filter((p) => !lines.some((l) => l.productId === p.id));
+  // The 5-gallon bottle charge is not offered as a product to add (UX
+  // review, 11 Oct 2026): it comes from the empties box below, for the
+  // bottles not handed back. One already on an order still shows.
+  const notYet = products.filter((p) => !p.is_bottle_charge && !lines.some((l) => l.productId === p.id));
 
   const address = addresses.find((a) => a.id === addressId) ?? null;
   const zone = address?.delivery_zone ?? history?.customer.delivery_zone ?? customer?.delivery_zone ?? null;

@@ -15,7 +15,6 @@ import RouteDetail from './pages/RouteDetail';
 import Settlement from './pages/Settlement';
 import Invoices from './pages/Invoices';
 import InvoiceDetail from './pages/InvoiceDetail';
-import Statement from './pages/Statement';
 import Reports from './pages/Reports';
 import DriverRoute from './pages/DriverRoute';
 import DriverStop from './pages/DriverStop';
@@ -28,7 +27,8 @@ import Payments from './pages/Payments';
 import ErrorBoundary from './components/ErrorBoundary';
 import StaleServerNotice from './components/StaleServerNotice';
 import TopBar from './components/TopBar';
-import SectionTabs from './components/SectionTabs';
+import SectionTabs, { BackToSettings, type Tab } from './components/SectionTabs';
+import SettingsHub from './pages/SettingsHub';
 import { DialogHost } from './components/Dialog';
 import PurchaseOrders from './pages/PurchaseOrders';
 import Production from './pages/Production';
@@ -73,6 +73,11 @@ interface NavItem {
   badge?: 'decisions' | 'quotes';
 }
 
+/** A section that prints a rule instead of a heading. */
+const RULE = '—';
+/** The pages the Settings hub leads to; Settings stays lit on all of them. */
+const SETTINGS_PAGES = ['/settings/', '/pricing', '/products/', '/zones', '/auto-emails', '/employees', '/users'];
+
 interface PendingCounts { applications: number; approvals: number; acceptedQuotes?: number }
 
 /**
@@ -90,36 +95,29 @@ const NAV: NavItem[] = [
 
   { to: '/', label: 'Today', roles: ['admin', 'user'] },
 
-  { to: '/orders', label: 'Orders', roles: ['admin', 'user'], section: 'Sales' },
-  { to: '/quotes', label: 'Quotes', roles: ['admin', 'user'], section: 'Sales', badge: 'quotes' },
-  { to: '/recurring', label: 'Standing orders', roles: ['admin', 'user'], section: 'Sales' },
-  { to: '/customers', label: 'Customers', roles: ['admin', 'user'], section: 'Sales' },
-  { to: '/messages', label: 'Messages & news', roles: ['admin', 'user'], section: 'Sales' },
+  /*
+   * The shorter menu (UX review, 10-11 Oct 2026): 13 links instead of 23.
+   * Screens that belong together are tabs on one page (option A in the
+   * mockups); each tab keeps its own address, so old links still land, and
+   * `also` keeps the menu item lit on every one of them.
+   */
+  { to: '/orders', label: 'Orders', roles: ['admin', 'user'], section: 'Sales', also: ['/recurring', '/quotes'], badge: 'quotes' },
+  { to: '/customers', label: 'Customers', roles: ['admin', 'user'], section: 'Sales', also: ['/messages'] },
 
   { to: '/delivery', label: 'Delivery rounds', roles: ['admin', 'user'], section: 'Deliveries' },
   { to: '/reminders', label: "Tomorrow's reminders", roles: ['admin', 'user'], section: 'Deliveries' },
-  { to: '/bottle-pool', label: 'Bottle pool', roles: ['admin', 'user'], section: 'Deliveries' },
 
-  { to: '/invoices', label: 'Invoices', roles: ['admin', 'user'], section: 'Money' },
+  { to: '/invoices', label: 'Invoices', roles: ['admin', 'user'], section: 'Money', also: ['/credit-notes'] },
   { to: '/payments', label: 'Payments', roles: ['admin', 'user'], section: 'Money' },
-  { to: '/credit-notes', label: 'Credit notes', roles: ['admin', 'user'], section: 'Money' },
-  { to: '/statement', label: 'Statements', roles: ['admin', 'user'], section: 'Money' },
 
-  { to: '/production', label: 'Production', roles: ['admin', 'user'], section: 'Production & stock' },
-  { to: '/stock', label: 'Stock and counts', roles: ['admin', 'user'], section: 'Production & stock', also: ['/stock-count'] },
-  { to: '/materials', label: 'Raw materials', roles: ['admin', 'user'], section: 'Production & stock' },
-  { to: '/purchase-orders', label: 'Purchasing', roles: ['admin', 'user'], section: 'Production & stock', also: ['/suppliers'] },
+  { to: '/production', label: 'Production', roles: ['admin', 'user'], section: 'Stock' },
+  { to: '/stock', label: 'Stock', roles: ['admin', 'user'], section: 'Stock', also: ['/stock-count', '/bottle-pool'] },
+  { to: '/purchase-orders', label: 'Purchasing', roles: ['admin', 'user'], section: 'Stock', also: ['/suppliers', '/materials'] },
 
-  { to: '/reports', label: 'Reports', roles: ['admin', 'user'], section: 'Reports' },
-
-  // Set up once, changed rarely. Logins are the administrator's alone.
-  { to: '/pricing', label: 'Products & pricing', roles: ['admin', 'user'], section: 'Settings' },
-  { to: '/zones', label: 'Delivery zones', roles: ['admin', 'user'], section: 'Settings' },
-  { to: '/auto-emails', label: 'Emails & ordering', roles: ['admin', 'user'], section: 'Settings' },
-  { to: '/settings/money', label: 'Invoices & payments', roles: ['admin', 'user'], section: 'Settings' },
-  // Logins are the administrator's alone, so office staff see just Employees.
-  { to: '/employees', label: 'People and logins', roles: ['admin'], section: 'Settings', also: ['/users'] },
-  { to: '/employees', label: 'Employees', roles: ['user'], section: 'Settings' },
+  // Below a rule rather than under a heading: one link each.
+  { to: '/reports', label: 'Reports', roles: ['admin', 'user'], section: RULE },
+  // Set up once, changed rarely: one page of cards (pages/SettingsHub.tsx).
+  { to: '/settings', label: 'Settings', roles: ['admin', 'user'], section: RULE, also: SETTINGS_PAGES },
 
   { to: '/route', label: 'My route', roles: ['driver'] },
   // The portal, as separate modules rather than tabs inside one screen.
@@ -135,10 +133,13 @@ const NAV: NavItem[] = [
   { to: '/my-account', label: 'My password', roles: ['admin', 'user', 'driver'], placement: 'account' },
 ];
 
-/** The tabs of the three screens that merge two menu items each. */
-const STOCK: Array<[string, string]> = [['/stock', 'Stock'], ['/stock-count', 'Stock count']];
-const PURCHASING: Array<[string, string]> = [['/purchase-orders', 'Purchase orders'], ['/suppliers', 'Suppliers']];
-const PEOPLE: Array<[string, string]> = [['/employees', 'Employees'], ['/users', 'Logins']];
+/** Tabs on the pages that bring several screens under one menu item. */
+const ORDERS: Tab[] = [['/orders', 'Orders'], ['/recurring', 'Standing orders'], ['/quotes', 'Quotes']];
+const CUSTOMERS: Tab[] = [['/customers', 'Customers'], ['/messages', 'Messages & news']];
+const INVOICES: Tab[] = [['/invoices', 'Invoices'], ['/credit-notes', 'Credit notes']];
+const STOCK: Tab[] = [['/stock', 'Stock levels'], ['/stock-count', 'Count'], ['/bottle-pool', 'Bottle pool']];
+const PURCHASING: Tab[] = [['/purchase-orders', 'Purchase orders'], ['/suppliers', 'Suppliers'], ['/materials', 'Raw materials']];
+const PEOPLE: Tab[] = [['/employees', 'Employees'], ['/users', 'Logins']];
 
 /**
  * Whether a menu link lights up only on its own address.
@@ -183,6 +184,8 @@ function Shell({ session }: { session: Session }) {
   const signOut = () => { api.logout().finally(() => { navigate('/login'); location.reload(); }); };
 
   const waiting = pending.applications + pending.approvals;
+  /** Accepted quotes waiting to become orders, on the Quotes tab. */
+  const tabBadges: Record<string, number> = { '/quotes': pending.acceptedQuotes ?? 0 };
   const badgeFor = (n: NavItem) => {
     if (n.badge === 'decisions' && waiting > 0) {
       return <span className="nav-badge" title={`${waiting} waiting for you`}>{waiting}</span>;
@@ -207,9 +210,9 @@ function Shell({ session }: { session: Session }) {
   const compactNav = items.length <= 5 || session.role === 'customer';
 
   /** The grouped list, shared by the desktop sidebar and the phone drawer. */
-  const groupedLinks = (withActions: boolean) => (
+  const groupedLinks = (withActions: boolean, withNewOrder = withActions) => (
     <>
-      {withActions && actions.map((n) => (
+      {withNewOrder && actions.map((n) => (
         <NavLink key={n.to} to={n.to} end={exactMatch(n.to)} className="nav-action">
           + {n.label}
         </NavLink>
@@ -223,7 +226,9 @@ function Shell({ session }: { session: Session }) {
         <div key={n.to}>
           {/* Print a heading the first time a section appears. */}
           {n.section && n.section !== listed[i - 1]?.section && (
-            <div className="nav-section">{n.section}</div>
+            n.section === RULE
+              ? <div className="nav-rule" role="separator" />
+              : <div className="nav-section">{n.section}</div>
           )}
           <NavLink to={n.to} end={exactMatch(n.to)}
                    className={({ isActive }) => (isActive || n.also?.some((a) => pathname.startsWith(a)) ? 'active' : '')}>
@@ -287,7 +292,9 @@ function Shell({ session }: { session: Session }) {
           way round the business. */}
       <aside className="sidebar">
         <div className="brand">Alka Vida</div>
-        <nav>{groupedLinks(false)}</nav>
+        {/* New order is the office's most frequent job, so it heads the menu
+            as well as sitting under "+ New" in the top bar. */}
+        <nav aria-label="Main menu">{groupedLinks(false, true)}</nav>
       </aside>
 
       <div className="content-col">
@@ -298,38 +305,41 @@ function Shell({ session }: { session: Session }) {
         <Routes>
           <Route path="/" element={<HomeFor session={session} />} />
           <Route path="/orders/new" element={<Keyed><NewOrder /></Keyed>} />
-          <Route path="/orders" element={<Orders />} />
-          <Route path="/recurring" element={<Recurring />} />
-          <Route path="/customers" element={<Keyed><Customers session={session} /></Keyed>} />
+          <Route path="/orders" element={<><SectionTabs tabs={ORDERS} badges={tabBadges} /><Orders /></>} />
+          <Route path="/recurring" element={<><SectionTabs tabs={ORDERS} badges={tabBadges} /><Recurring /></>} />
+          <Route path="/customers" element={<><SectionTabs tabs={CUSTOMERS} /><Keyed><Customers session={session} /></Keyed></>} />
           <Route path="/customers/:customerId" element={<CustomerRecord session={session} />} />
-          <Route path="/pricing" element={<Pricing session={session} />} />
+          <Route path="/pricing" element={<><BackToSettings /><Pricing session={session} /></>} />
           <Route path="/products/:productId/bom" element={<Bom />} />
           <Route path="/delivery" element={<DeliverySheets />} />
           <Route path="/delivery/:sheetId" element={<RouteDetail session={session} />} />
           <Route path="/delivery/:sheetId/settlement" element={<Settlement session={session} />} />
-          <Route path="/invoices" element={<Invoices />} />
-          <Route path="/quotes" element={<Quotes />} />
+          <Route path="/invoices" element={<><SectionTabs tabs={INVOICES} /><Invoices /></>} />
+          <Route path="/quotes" element={<><SectionTabs tabs={ORDERS} badges={tabBadges} /><Quotes /></>} />
           <Route path="/quotes/:quoteId" element={<Quotes />} />
           <Route path="/quotes/:quoteId/:mode" element={<Quotes />} />
-          <Route path="/credit-notes" element={<Keyed><CreditNotes session={session} /></Keyed>} />
-          <Route path="/auto-emails" element={<AutoEmails session={session} />} />
-          <Route path="/settings/money" element={<MoneySettings session={session} />} />
-          <Route path="/messages" element={<Messages session={session} />} />
+          <Route path="/credit-notes" element={<><SectionTabs tabs={INVOICES} /><Keyed><CreditNotes session={session} /></Keyed></>} />
+          <Route path="/auto-emails" element={<><BackToSettings /><AutoEmails session={session} /></>} />
+          <Route path="/settings" element={<SettingsHub session={session} pending={pending} />} />
+          <Route path="/settings/money" element={<><BackToSettings /><MoneySettings session={session} /></>} />
+          <Route path="/messages" element={<><SectionTabs tabs={CUSTOMERS} /><Messages session={session} /></>} />
           <Route path="/reminders" element={<Reminders />} />
           <Route path="/payments" element={<Payments />} />
           <Route path="/invoices/:invoiceId" element={<InvoiceDetail session={session} />} />
-          <Route path="/statement" element={<Statement />} />
+          {/* Statements are on the customer page, and Statement… on Invoices
+              (UX review, 11 Oct 2026); an old link lands on Invoices. */}
+          <Route path="/statement" element={<Navigate to="/invoices" replace />} />
           <Route path="/decisions" element={<Decisions session={session} />} />
           {/* The two screens it replaced; old links and bookmarks still land. */}
           <Route path="/approvals" element={<Navigate to="/decisions" replace />} />
           <Route path="/applications" element={<Navigate to="/decisions?show=accounts" replace />} />
-          <Route path="/materials" element={<RawMaterials session={session} />} />
+          <Route path="/materials" element={<><SectionTabs tabs={PURCHASING} /><RawMaterials session={session} /></>} />
           <Route path="/suppliers" element={<><SectionTabs tabs={PURCHASING} /><Suppliers /></>} />
           <Route path="/purchase-orders" element={<><SectionTabs tabs={PURCHASING} /><PurchaseOrders /></>} />
           <Route path="/production" element={<Production />} />
           <Route path="/stock" element={<><SectionTabs tabs={STOCK} /><Stock /></>} />
           <Route path="/stock-count" element={<><SectionTabs tabs={STOCK} /><StockCount session={session} /></>} />
-          <Route path="/bottle-pool" element={<BottlePool session={session} />} />
+          <Route path="/bottle-pool" element={<><SectionTabs tabs={STOCK} /><BottlePool session={session} /></>} />
           <Route path="/reports" element={<Reports />} />
           <Route path="/route" element={<DriverRoute session={session} />} />
           <Route path="/route/stop/:stopId" element={<DriverStop />} />
@@ -338,9 +348,9 @@ function Shell({ session }: { session: Session }) {
           <Route path="/portal" element={<Navigate to="/portal/home" replace />} />
           <Route path="/portal/invoices/:invoiceId" element={<PortalInvoice />} />
           <Route path="/portal/:tab" element={<Portal session={session} />} />
-          <Route path="/users" element={<>{session.role === 'admin' && <SectionTabs tabs={PEOPLE} />}<Users session={session} /></>} />
-          <Route path="/zones" element={<Zones session={session} />} />
-          <Route path="/employees" element={<>{session.role === 'admin' && <SectionTabs tabs={PEOPLE} />}<Employees session={session} /></>} />
+          <Route path="/users" element={<><BackToSettings />{session.role === 'admin' && <SectionTabs tabs={PEOPLE} />}<Users session={session} /></>} />
+          <Route path="/zones" element={<><BackToSettings /><Zones session={session} /></>} />
+          <Route path="/employees" element={<><BackToSettings />{session.role === 'admin' && <SectionTabs tabs={PEOPLE} />}<Employees session={session} /></>} />
           <Route path="/employees/:employeeId" element={<EmployeeRecord session={session} />} />
           <Route path="/my-account" element={<MyAccount session={session} />} />
           {/* Signing in from #/login lands on the start, not on "not found". */}

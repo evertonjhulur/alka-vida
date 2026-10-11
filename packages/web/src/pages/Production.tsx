@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { api } from '../lib/api';
 import { money, date, when, todayInJamaica } from '../lib/format';
 
-interface Product { id: string; name: string; bottles_per_case: number }
+interface Product { id: string; name: string; bottles_per_case: number; is_bottle_charge?: boolean }
 
 interface Feasibility {
   canProduce: boolean;
@@ -40,7 +40,8 @@ export default function Production() {
     : (Number(loose) || 0);
 
   async function load() {
-    setProducts(await api.get<Product[]>('/api/products'));
+    // The bottle charge is a price, not something the plant makes.
+    setProducts((await api.get<Product[]>('/api/products')).filter((p) => !p.is_bottle_charge));
     setRuns(await api.get<Run[]>('/api/production'));
   }
   useEffect(() => { load().catch((e) => setError(e.message)); }, []);

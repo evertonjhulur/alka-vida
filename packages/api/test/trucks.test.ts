@@ -14,7 +14,9 @@ import { recordPayment } from '../src/services/payments.ts';
 import { counterSale } from '../src/services/counter.ts';
 import { createEmployee } from '../src/services/labour.ts';
 import { bottleAccount, listPools } from '../src/services/bottles.ts';
-import { loadRound, confirmLoad, addToLoad, confirmAddition, cancelAddition, confirmReturns, truckPosition, loadingsReport, loadingSummary } from '../src/services/trucks.ts';
+import { loadRound, confirmLoad, addToLoad, confirmAddition, cancelAddition, confirmReturns, truckPosition, loadingsReport, loadingSummary, goodsOnTrucks } from '../src/services/trucks.ts';
+import { stockSnapshot } from '../src/services/audits.ts';
+import { bottleChargeProduct } from '../src/services/orders.ts';
 import {
   addCollection, recordCollection, decideReturn, listCollections, pickupsForPo, stopOptions,
 } from '../src/services/collections.ts';
@@ -307,6 +309,29 @@ describe('Point 4: truck loading and returns', () => {
     await markStop(f.db, f.driver, { stopId: r.stopId, outcome: 'Delivered' });
     assert.equal(await stock(f.casedProductId), before - 24);
     await assert.rejects(loadRound(f.db, f.office, r.sheetId, { loaderIds: [loaderA] }), /without a loading/);
+  });
+});
+
+describe('UX review, 11 Oct 2026: the Stock page', () => {
+  test('shows goods on the trucks until the returns are in, and leaves out the bottle charge', async () => {
+    await f.db.query(`UPDATE finished_goods_stock SET quantity_on_hand = 2400 WHERE product_id = $1`, [f.casedProductId]);
+    const onTruck = async () => (await stockSnapshot(f.db)).finishedGoods
+      .find((g) => g.productId === f.casedProductId)!.onTruckBottles;
+    const before = await onTruck();
+    assert.equal(before, (await goodsOnTrucks(f.db)).get(f.casedProductId) ?? 0);
+
+    const r = await roundWith([{ productId: f.casedProductId, cases: 2 }]);
+    await loadRound(f.db, f.office, r.sheetId, { extras: [{ productId: f.casedProductId, extraUnits: 1 }], loaderIds: [loaderA] });
+    assert.equal(await onTruck(), before + 72, 'loaded: two cases ordered and one extra');
+    await confirmLoad(f.db, f.driver, r.sheetId);
+    await markStop(f.db, f.driver, { stopId: r.stopId, outcome: 'Delivered' });
+    assert.equal(await onTruck(), before + 24, 'the delivered cases are off the truck');
+    await confirmReturns(f.db, f.driver, r.sheetId, { lines: [{ productId: f.casedProductId, returnedUnits: 1 }], emptiesBack: 0 });
+    assert.equal(await onTruck(), before, 'back on the warehouse once counted back');
+
+    const charge = await bottleChargeProduct(f.db);
+    const snap = await stockSnapshot(f.db);
+    assert.ok(!snap.finishedGoods.some((g) => g.productId === charge.id), 'the bottle charge is not stock');
   });
 });
 

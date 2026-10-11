@@ -112,8 +112,16 @@ export function formToPayload(f: CustomerFormValues) {
   };
 }
 
+/**
+ * One part of the form, for the tabs on a customer's Details (UX review,
+ * 11 Oct 2026: the whole form was one 2,100px page). Each part saves the
+ * whole record, with the other parts as they were last saved. Adding a
+ * customer shows every part on one page.
+ */
+export type CustomerFormPart = 'contact' | 'billing' | 'emails';
+
 export default function CustomerForm({
-  initial, isNew, busy, onSubmit, onCancel, submitLabel,
+  initial, isNew, busy, onSubmit, onCancel, submitLabel, part,
 }: {
   initial: CustomerFormValues;
   isNew: boolean;
@@ -121,7 +129,9 @@ export default function CustomerForm({
   onSubmit: (v: CustomerFormValues) => void;
   onCancel?: () => void;
   submitLabel?: string;
+  part?: CustomerFormPart;
 }) {
+  const shows = (k: CustomerFormPart) => !part || part === k;
   const [f, setF] = useState<CustomerFormValues>(initial);
   const [zones, setZones] = useState<Zone[]>([]);
   const [tiers, setTiers] = useState<Tier[]>([]);
@@ -158,6 +168,7 @@ export default function CustomerForm({
 
   return (
     <form onSubmit={submit} className="customer-form">
+      {shows('contact') && (
       <div className="field">
         <span className="label">What kind of customer?</span>
         <div className="seg" role="group" aria-label="Customer type">
@@ -169,11 +180,13 @@ export default function CustomerForm({
           ))}
         </div>
       </div>
+      )}
 
       {isNew && !f.accountType ? (
         <p className="muted small">Choose one to carry on.</p>
       ) : (
         <>
+          {shows('contact') && (<>
           <fieldset className="form-block">
             <legend>{business ? 'The business' : 'The person'}</legend>
             <div className="row">
@@ -283,8 +296,23 @@ export default function CustomerForm({
                 Leave it blank only for customers who collect or walk in.
               </div>
             )}
+            <div className="field" style={{ marginTop: 12 }}>
+              <label htmlFor="cf-di">Delivery notes for the driver</label>
+              <input id="cf-di" style={{ width: '100%' }} value={f.deliveryInstructions}
+                     placeholder="Gate code, where to leave it, who to ask for"
+                     onChange={(e) => set('deliveryInstructions', e.target.value)} />
+              <div className="muted small">Shown on the delivery round under their order. The customer can change it in their portal profile.</div>
+            </div>
           </fieldset>
 
+          <div className="field">
+            <label htmlFor="cf-notes">Notes</label>
+            <input id="cf-notes" style={{ width: '100%' }} value={f.notes}
+                   onChange={(e) => set('notes', e.target.value)} />
+          </div>
+          </>)}
+
+          {shows('billing') && (<>
           <fieldset className="form-block">
             <legend>Prices and billing</legend>
             <div className="row">
@@ -335,16 +363,14 @@ export default function CustomerForm({
                 </div>
               )}
             </div>
+            <label className="check" style={{ marginTop: 8 }}>
+              <input type="checkbox" checked={f.isWalkIn} onChange={(e) => set('isWalkIn', e.target.checked)} />
+              Walk-in: pays in full at the counter (no part payment, no account)
+            </label>
           </fieldset>
+          </>)}
 
-          <div className="field">
-            <label htmlFor="cf-di">Delivery notes for the driver</label>
-            <input id="cf-di" style={{ width: '100%' }} value={f.deliveryInstructions}
-                   placeholder="Gate code, where to leave it, who to ask for"
-                   onChange={(e) => set('deliveryInstructions', e.target.value)} />
-            <div className="muted small">Shown on the delivery round under their order. The customer can change it in their portal profile.</div>
-          </div>
-
+          {shows('emails') && (
           <fieldset className="form-block">
             <legend>Emails we send them on our own</legend>
             <label className="check">
@@ -381,17 +407,7 @@ export default function CustomerForm({
               Statements and reminders only go when switched on under Settings › Emails &amp; ordering.
             </p>
           </fieldset>
-
-          <label className="check">
-            <input type="checkbox" checked={f.isWalkIn} onChange={(e) => set('isWalkIn', e.target.checked)} />
-            Walk-in: pays in full at the counter (no part payment, no account)
-          </label>
-
-          <div className="field">
-            <label htmlFor="cf-notes">Notes</label>
-            <input id="cf-notes" style={{ width: '100%' }} value={f.notes}
-                   onChange={(e) => set('notes', e.target.value)} />
-          </div>
+          )}
 
           <div className="row">
             <button disabled={busy || !f.accountType}>

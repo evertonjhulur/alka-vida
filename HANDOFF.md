@@ -7,7 +7,8 @@ left, and what will bite you.
 Last updated after Everton's round of 10 Oct 2026 (7 points: rounds filter, driver payments,
 collection stops, truck loading and returns, invoice footer, card payments off, email wording)
 and Justin's testing findings the same day (reminders, tablet layout, sign-up address, logo,
-security). See "Everton's round, 10 Oct 2026" and "Tester's findings, 10 Oct 2026" at the end.
+security), then the UX review build of 11 Oct 2026 (shorter pinned menu with tabs, Statement…
+dialog, tidy-ups, customer Details in four parts). See the last three entries at the end.
 
 ---
 
@@ -48,7 +49,7 @@ Working and verified end to end, in the browser as well as in tests:
 | Addresses | Line 1, line 2, town, parish. Composed into `delivery_address`, which stays what the stop and the invoice PDF read (migration 014). |
 | Employees & labour cost | Who works here, paid by the hour or by the trip, and the hours/trips recorded against them. Payroll totals for any date range. **Add from logins** creates a record per existing login — title from the role (`admin`→Manager, `user`→Employee, `driver`→Driver), rate left blank — and is safe to press twice. **Deliberately not wired into costing** (migration 015). A person is managed on their own record at `/employees/:id` — details, rate, and their own work history. |
 
-**Tests: 519 passing** (10 Oct 2026) — 68 pure domain (`packages/shared`), 451 API
+**Tests: 520 passing** (11 Oct 2026) — 68 pure domain (`packages/shared`), 452 API
 (`packages/api`, against real PostgreSQL via PGlite).
 
 ```bash
@@ -1132,4 +1133,88 @@ Not done / to know:
   longer accepted from the browser) and simply signs in again.
 - The "Alka Vida has been updated since it was started" banner appears if the
   web app is rebuilt while the server keeps running; restarting fixes it.
+
+### UX review build, 11 Oct 2026
+
+From the UX review of 10 Oct (project doc `claude/ux-review-oct-2026.md`) and
+the shorter-menu mockups. Everton chose **option A: tabs on the page** (not a
+menu that expands in place), then said build the menu, the tidy-ups and the
+customer Details split. No migration. **Tests: 452 API + 68 shared, all
+passing** (new: "UX review, 11 Oct 2026: the Stock page" in `trucks.test.ts`).
+Walked in a browser as admin (laptop and phone), office user, driver and
+portal customer.
+
+**Menu (App.tsx).** 13 links instead of 23: + New order, Today; Sales: Orders,
+Customers; Deliveries: Delivery rounds, Tomorrow's reminders; Money: Invoices,
+Payments; Stock: Production, Stock, Purchasing; a rule; Reports, Settings.
+A section named `RULE` prints a line instead of a heading. The sidebar is
+`position: sticky`, full height with its own scroll, so it never scrolls
+away (it fits a 768px laptop screen exactly). The rest became tabs
+(`components/SectionTabs.tsx`, each tab still its own address, `also` keeps
+the menu item lit):
+
+- Orders: Orders · Standing orders · Quotes (the accepted-quotes count moved
+  to the Quotes tab, and the Orders menu item).
+- Customers: Customers · Messages & news.
+- Invoices: Invoices · Credit notes.
+- Stock: Stock levels · Count · Bottle pool.
+- Purchasing: Purchase orders · Suppliers · Raw materials.
+- Settings: one page of cards, `/settings` (`pages/SettingsHub.tsx`):
+  Products & pricing, Delivery zones, Emails & ordering, Invoices & payments,
+  People & logins (admin) / Employees (office). Each of those pages has a
+  "← Settings" link (`BackToSettings`).
+- Statements is no longer a menu item or page: `/statement` redirects to
+  Invoices. The dashboard's links that went there now go to Invoices, or to
+  the customer's Invoices & statement tab.
+
+**Statement… (`components/StatementDialog.tsx`).** Everton: the customer
+screen did not ask for dates. The customer page's top "Statement PDF" (an
+all-time statement, no questions) and "Send statement by email" under More
+are replaced by one **Statement…** button: quick choices (This month, Last
+month, Last 3 months, This year, Everything, Choose dates), From/To boxes,
+"More choices" (show, invoice state), a line saying what the period comes to
+("N entries … Balance due $X"), then **Download PDF** or **Email it…** (send
+to, blank = the record's address). Same dialog on the Invoices page, where it
+first asks which customer. The Invoices & statement tab's on-screen statement
+is unchanged; its button now reads "Download PDF".
+
+**Tidy-ups.**
+
+- Today: the low-stock panel is **Running low**. "Needs a decision" on the
+  dashboard now shows only what the top bar counts (applications and
+  approvals), and only when there is something, so the two never disagree.
+- Stock levels: the 5-gallon bottle charge product is no longer listed as
+  stock (`audits.stockSnapshot` leaves out `is_bottle_charge`; also the stock
+  count). New **On trucks** column from `trucks.goodsOnTrucks`: for each
+  open round with a loading whose returns are not in, loaded (with
+  additions) less delivered. The bottle-pool table moved to its own tab.
+  Movements show the latest 10 with "See all movements (n)". Page height
+  3,450px → about 2,600px (the raw materials table is the rest).
+- Raw materials: each row has Edit and a **More ▾** menu (Batches, Record
+  usage, Add a supplier, Delete) instead of five buttons; 78 buttons → 33.
+- New order and Production no longer offer the 5-gallon bottle charge as a
+  product; on an order it still comes from the empties box.
+- Export buttons all read "Export to Excel".
+- Page language is `en-JM`. Note: Chrome and Edge draw date boxes in the
+  browser's own language, not the page's, so a browser set to English
+  (United States) still shows mm/dd/yyyy. Setting the browser's language to
+  English (United Kingdom) or (Jamaica) shows dd/mm/yyyy.
+
+**Customer Details in four parts (CustomerForm `part`, CustomerRecord
+`PARTS`).** Contact & delivery (customer type, the business/person, where we
+deliver, driver notes, notes) · Billing (price list, terms, invoice cycle,
+GCT, walk-in) · Emails (the automatic emails) · Addresses & prices (other
+addresses, special prices). Each part has its own "Save …" button and saves
+the whole record with the other parts as last saved, so an unsaved change on
+one part is never saved by another. The part is in the address
+(`?tab=details&part=billing`). Add customer still shows everything on one
+page.
+
+Not done / to know:
+
+- Not built from the review: the Stock page's "on waiting orders / free to
+  sell" figures shown in the mockup, and per-row tidy-ups beyond Raw
+  materials.
+- Tabs sit above the page title (the existing pattern), not under it as in
+  the mockup.
 

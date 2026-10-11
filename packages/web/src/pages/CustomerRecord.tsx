@@ -4,6 +4,7 @@ import { api, downloadPost, type Session } from '../lib/api';
 import { payMethods, useTakeCard } from '../lib/payments';
 import { money, date, statusTone, toCents, todayInJamaica, when } from '../lib/format';
 import { StatementView } from './Statement';
+import StatementDialog from '../components/StatementDialog';
 import CustomerForm, { customerToForm, formToPayload, BLANK_CUSTOMER, type CustomerFormValues } from '../components/CustomerForm';
 import { AddressesPanel, SpecialPricesPanel } from '../components/CustomerExtras';
 
@@ -67,6 +68,15 @@ const TABS = [
 ] as const;
 type Tab = (typeof TABS)[number][0];
 
+/** The parts of the Details tab. */
+const PARTS = [
+  ['contact', 'Contact & delivery'],
+  ['billing', 'Billing'],
+  ['emails', 'Emails'],
+  ['addresses', 'Addresses & prices'],
+] as const;
+type Part = (typeof PARTS)[number][0];
+
 
 /**
  * One customer, everything about them, on one page.
@@ -87,6 +97,16 @@ export default function CustomerRecord({ session }: { session: Session }) {
   const setTab = (t: Tab) => {
     const next = new URLSearchParams(params);
     if (t === 'overview') next.delete('tab'); else next.set('tab', t);
+    if (t !== 'details') next.delete('part');
+    setParams(next, { replace: true });
+  };
+
+  const partParam = params.get('part');
+  const part: Part = PARTS.some(([k]) => k === partParam) ? partParam as Part : 'contact';
+  const setPart = (p: Part) => {
+    const next = new URLSearchParams(params);
+    next.set('tab', 'details');
+    if (p === 'contact') next.delete('part'); else next.set('part', p);
     setParams(next, { replace: true });
   };
 
@@ -111,8 +131,8 @@ export default function CustomerRecord({ session }: { session: Session }) {
   const [targetInvoices, setTargetInvoices] = useState<Invoice[]>([]);
   const [picked, setPicked] = useState<string[]>([]);
   const [waiting, setWaiting] = useState<Waiting[]>([]);
-  const [sendOpen, setSendOpen] = useState(false);
-  const [sendTo, setSendTo] = useState('');
+  /** Statement… asks for the period first (UX review, 11 Oct 2026). */
+  const [statementOpen, setStatementOpen] = useState(false);
   const [moreOpen, setMoreOpen] = useState(false);
   const moreRef = useRef<HTMLDivElement>(null);
 
@@ -245,34 +265,6 @@ export default function CustomerRecord({ session }: { session: Session }) {
       setMsg(r.applied ? 'Payment changed.' : 'Change sent to an administrator for approval. Nothing moves until it is approved.');
       setChange(null);
     }, 'Could not change the payment');
-  }
-
-  async function downloadStatement() {
-    if (!h) return;
-    setBusy(true); setError(null);
-    try {
-      const blob = await api.getBlob(`/api/customers/${customerId}/statement.pdf`);
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `statement-${h.customer.name.replace(/\W+/g, '-')}.pdf`;
-      a.click();
-      URL.revokeObjectURL(url);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'Could not build the statement');
-    } finally { setBusy(false); }
-  }
-
-  async function emailStatement(e: React.FormEvent) {
-    e.preventDefault();
-    await run(async () => {
-      const r = await api.post<{ sentTo: string }>(
-        `/api/customers/${customerId}/statement/email`,
-        { sendTo: sendTo || undefined },
-      );
-      setMsg(`Statement emailed to ${r.sentTo}.`);
-      setSendOpen(false); setSendTo('');
-    }, 'Could not send the statement');
   }
 
   async function saveDetails(v: CustomerFormValues) {
@@ -486,14 +478,15 @@ export default function CustomerRecord({ session }: { session: Session }) {
           </p>
         </div>
         <div className="record-actions">
-          <button className="secondary" disabled={busy} onClick={downloadStatement}>
-            Statement PDF
+          <button type="button" className="secondary" disabled={busy}
+                  onClick={() => { setStatementOpen(true); setPayOpen(false); }}>
+            Statement…
           </button>
           <Link to={`/orders/new?customer=${c.id}`}>
             <button type="button" className="secondary">New order</button>
           </Link>
           <button disabled={busy}
-                  onClick={() => { setPayOpen(!payOpen); setSendOpen(false); }}>
+                  onClick={() => setPayOpen(!payOpen)}>
             {payOpen ? 'Close payment' : 'Take a payment'}
           </button>
           <div className="deskbar-menu" ref={moreRef}>
@@ -503,10 +496,6 @@ export default function CustomerRecord({ session }: { session: Session }) {
             </button>
             {moreOpen && (
               <div className="deskbar-pop deskbar-pop-right" role="menu">
-                <button type="button" role="menuitem" className="pop-item pop-button"
-                        onClick={() => { setSendOpen(true); setPayOpen(false); setMoreOpen(false); }}>
-                  <span>Send statement by email</span>
-                </button>
                 <button type="button" role="menuitem" className="pop-item pop-button"
                         onClick={() => { setTab('details'); setMoreOpen(false); }}>
                   <span>Edit details</span>
@@ -532,30 +521,10 @@ export default function CustomerRecord({ session }: { session: Session }) {
       {error && <div className="notice error">{error}</div>}
       {msg && <div className="notice ok">{msg}</div>}
 
-      {sendOpen && (
-        <div className="panel">
-          <h2 style={{ marginTop: 0 }}>Send this statement</h2>
-          <p className="muted small">
-            Emails the same PDF the Statement PDF button downloads. Leave the address
-            blank to use the one on the customer record.
-          </p>
-          <form onSubmit={emailStatement}>
-            <div className="row">
-              <div className="field" style={{ flex: '1 1 300px' }}>
-                <label htmlFor="sendto">Send to</label>
-                <input id="sendto" type="email" style={{ width: '100%' }} value={sendTo}
-                       placeholder={c.email || 'no address on file'}
-                       onChange={(e) => setSendTo(e.target.value)} />
-              </div>
-              <div className="field">
-                <button disabled={busy}>{busy ? 'Sending…' : 'Send'}</button>{' '}
-                <button type="button" className="secondary" onClick={() => setSendOpen(false)}>
-                  Close
-                </button>
-              </div>
-            </div>
-          </form>
-        </div>
+      {statementOpen && (
+        <StatementDialog customerId={c.id} customerName={c.name} customerEmail={c.email}
+                         onClose={() => setStatementOpen(false)}
+                         onDone={(m) => { setError(null); setMsg(m); }} />
       )}
 
       {payOpen && (
@@ -977,14 +946,30 @@ export default function CustomerRecord({ session }: { session: Session }) {
 
       {tab === 'details' && (
         <>
-          <div className="panel">
-            <h2 style={{ marginTop: 0 }}>Details</h2>
-            {!formLoaded ? <p className="muted">Loading…</p> : (
-              <CustomerForm initial={form} isNew={false} busy={busy} onSubmit={saveDetails} />
-            )}
-          </div>
-          <AddressesPanel customerId={c.id} />
-          <SpecialPricesPanel customerId={c.id} priceList={c.price_tier_name} />
+          {/* Four short tabs instead of one 2,100px form (UX review,
+              11 Oct 2026). Each has its own Save; the part is in the address
+              (?tab=details&part=billing) so a link can open straight onto it. */}
+          <nav className="tabs sub-tabs" aria-label="Details">
+            {PARTS.map(([k, label]) => (
+              <button key={k} type="button" className={`tab${part === k ? ' active' : ''}`}
+                      aria-current={part === k ? 'page' : undefined} onClick={() => setPart(k)}>
+                {label}
+              </button>
+            ))}
+          </nav>
+          {part === 'addresses' ? (
+            <>
+              <AddressesPanel customerId={c.id} />
+              <SpecialPricesPanel customerId={c.id} priceList={c.price_tier_name} />
+            </>
+          ) : (
+            <div className="panel">
+              {!formLoaded ? <p className="muted">Loading…</p> : (
+                <CustomerForm key={part} initial={form} isNew={false} busy={busy} onSubmit={saveDetails}
+                              part={part} submitLabel={`Save ${PARTS.find(([k]) => k === part)![1].toLowerCase()}`} />
+              )}
+            </div>
+          )}
         </>
       )}
     </>

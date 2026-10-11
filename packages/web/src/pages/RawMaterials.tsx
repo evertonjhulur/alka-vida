@@ -80,6 +80,20 @@ export default function RawMaterials({ session }: { session: Session }) {
 
   // Supplier link form, per material.
   const [linkFor, setLinkFor] = useState<string | null>(null);
+  /**
+   * The row whose "More" menu is open (UX review, 11 Oct 2026): one Edit
+   * button and a More menu per row, instead of five buttons - the page had
+   * 78 of them.
+   */
+  const [menuFor, setMenuFor] = useState<string | null>(null);
+  useEffect(() => {
+    if (!menuFor) return;
+    const onDown = (e: MouseEvent) => {
+      if (!(e.target as HTMLElement).closest?.('[data-row-menu]')) setMenuFor(null);
+    };
+    document.addEventListener('mousedown', onDown);
+    return () => document.removeEventListener('mousedown', onDown);
+  }, [menuFor]);
   const [link, setLink] = useState({ supplierId: '', cost: '', breaks: [{ minQty: '', cost: '' }] });
 
   // Categories and sizes, admin only.
@@ -342,27 +356,23 @@ export default function RawMaterials({ session }: { session: Session }) {
               : m.suppliers.map((s) => (
                   <div key={s.id}>{s.name} — {money(s.unitCostCents)}</div>
                 ))}
-            {!m.retired_at && (
-              <button className="secondary" style={{ marginTop: 4, padding: '3px 8px' }}
-                      onClick={() => setLinkFor(linkFor === m.id ? null : m.id)}>
-                {linkFor === m.id ? 'Cancel' : 'Add supplier'}
-              </button>
-            )}
           </td>
-          <td className="num">
-            <button className="secondary" onClick={() => openBatches(m.id)}>
-              {expanded === m.id ? 'Hide' : `Batches (${Number(m.open_batches)})`}
-            </button>{' '}
+          <td className="num row-actions">
             {m.retired_at ? (
-              isAdmin && (
-                <button className="secondary" disabled={busy}
-                        onClick={() => run('Could not bring it back', async () => {
-                          await api.post(`/api/raw-materials/${m.id}/restore`);
-                          return `${m.name} is back in use.`;
-                        })}>
-                  Bring back
-                </button>
-              )
+              <>
+                <button className="secondary" onClick={() => openBatches(m.id)}>
+                  {expanded === m.id ? 'Hide batches' : `Batches (${Number(m.open_batches)})`}
+                </button>{' '}
+                {isAdmin && (
+                  <button className="secondary" disabled={busy}
+                          onClick={() => run('Could not bring it back', async () => {
+                            await api.post(`/api/raw-materials/${m.id}/restore`);
+                            return `${m.name} is back in use.`;
+                          })}>
+                    Bring back
+                  </button>
+                )}
+              </>
             ) : (
               <>
                 <button className="secondary"
@@ -373,19 +383,42 @@ export default function RawMaterials({ session }: { session: Session }) {
                         }}>
                   {editFor === m.id ? 'Cancel' : 'Edit'}
                 </button>{' '}
-                <button className="secondary"
-                        onClick={() => {
-                          setUseFor(useFor === m.id ? null : m.id);
-                          setUsage({ quantity: '', reason: '' });
-                        }}>
-                  {useFor === m.id ? 'Cancel' : 'Record usage'}
-                </button>{' '}
-                {isAdmin && (
-                  <button className="danger-soft" disabled={busy}
-                          onClick={() => removeMaterial(m)}>
-                    Delete
+                <span className="deskbar-menu" data-row-menu style={{ display: 'inline-block' }}>
+                  <button type="button" className="secondary" aria-haspopup="true"
+                          aria-expanded={menuFor === m.id}
+                          aria-label={`More for ${m.name}`}
+                          onClick={() => setMenuFor(menuFor === m.id ? null : m.id)}>
+                    More ▾
                   </button>
-                )}
+                  {menuFor === m.id && (
+                    <span className="deskbar-pop deskbar-pop-right row-menu" role="menu">
+                      <button type="button" role="menuitem" className="pop-item pop-button"
+                              onClick={() => { setMenuFor(null); openBatches(m.id); }}>
+                        <span>{expanded === m.id ? 'Hide batches' : 'Batches'}</span>
+                        <span className="pop-meta">{Number(m.open_batches)} open</span>
+                      </button>
+                      <button type="button" role="menuitem" className="pop-item pop-button"
+                              onClick={() => {
+                                setMenuFor(null);
+                                setUseFor(useFor === m.id ? null : m.id);
+                                setUsage({ quantity: '', reason: '' });
+                              }}>
+                        <span>{useFor === m.id ? 'Close usage' : 'Record usage'}</span>
+                      </button>
+                      <button type="button" role="menuitem" className="pop-item pop-button"
+                              onClick={() => { setMenuFor(null); setLinkFor(linkFor === m.id ? null : m.id); }}>
+                        <span>{linkFor === m.id ? 'Close supplier' : 'Add a supplier'}</span>
+                      </button>
+                      {isAdmin && (
+                        <button type="button" role="menuitem" className="pop-item pop-button pop-danger"
+                                disabled={busy}
+                                onClick={() => { setMenuFor(null); removeMaterial(m); }}>
+                          <span>Delete</span>
+                        </button>
+                      )}
+                    </span>
+                  )}
+                </span>
               </>
             )}
           </td>

@@ -161,7 +161,7 @@ export default function Dashboard({ session }: { session: Session }) {
       <p className="subtitle">{today()} — Alka Vida operations</p>
 
       <div className="figures">
-        {figure('/statement', 'Owed to you', money(d.aging.totalCents),
+        {figure('/invoices', 'Owed to you', money(d.aging.totalCents),
           overdue > 0 ? `${money(overdue)} past due` : 'all within terms',
           overdue > 0 ? 'bad' : 'plain')}
 
@@ -232,7 +232,7 @@ export default function Dashboard({ session }: { session: Session }) {
       <div className="panel phone-cards">
         <div className="panel-head">
           <h2>Money owed</h2>
-          <Link className="small" to="/statement">Statements</Link>
+          <Link className="small" to="/invoices">All invoices</Link>
         </div>
 
         {d.aging.totalCents === 0 ? (
@@ -282,7 +282,7 @@ export default function Dashboard({ session }: { session: Session }) {
                           {days == null || days <= 0 ? 'not due' : `${days} days`}
                         </span>
                       </td>
-                      <td className="num actions"><Link to="/statement">Statement</Link></td>
+                      <td className="num actions"><Link to={`/customers/${c.customer_id}?tab=invoices`}>Statement</Link></td>
                     </tr>
                   );
                 })}
@@ -296,11 +296,11 @@ export default function Dashboard({ session }: { session: Session }) {
         )}
       </div>
 
+      {/* Only the things the top bar's "Needs a decision" counts, so the two
+          never disagree (UX review, 11 Oct 2026). Low stock is its own panel. */}
+      {waiting > 0 && (
       <div className="panel">
         <h2 style={{ marginTop: 0 }}>Needs a decision</h2>
-        {waiting === 0 && d.lowStock.length === 0 ? (
-          <p className="muted">Nothing is waiting on you.</p>
-        ) : (
           <ul className="todo">
             {d.waiting.applicationDetail.map((a) => (
               <li key={a.id}>
@@ -332,6 +332,16 @@ export default function Dashboard({ session }: { session: Session }) {
               </li>
             ))}
 
+          </ul>
+      </div>
+      )}
+
+      <div className="panel">
+        <h2 style={{ marginTop: 0 }}>Running low</h2>
+        {d.lowStock.length === 0 ? (
+          <p className="muted">Nothing is below its reorder point.</p>
+        ) : (
+          <ul className="todo">
             {d.lowStock.slice(0, 4).map((m) => (
               <li key={m.id}>
                 <span>
@@ -344,6 +354,9 @@ export default function Dashboard({ session }: { session: Session }) {
                 <Link to="/purchase-orders">Raise a PO</Link>
               </li>
             ))}
+            {d.lowStock.length > 4 && (
+              <li><Link to="/materials">and {d.lowStock.length - 4} more on Raw materials</Link></li>
+            )}
           </ul>
         )}
       </div>
