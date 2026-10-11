@@ -21,11 +21,15 @@ if errorlevel 1 (
   )
 )
 
+REM Your repository's address is remembered: just press Enter. Spaces
+REM pasted with an address are removed (a leading space stopped it once).
+set "URL=https://github.com/evertonjhulur/alka-vida.git"
 echo.
-echo   Paste the address of your GitHub repository and press Enter.
-echo   It looks like:  https://github.com/yourname/alka-vida.git
+echo   Sending to:  %URL%
+echo   Press Enter to send there, or paste a different address and press Enter.
 echo.
 set /p "URL=  Address: "
+set "URL=%URL: =%"
 if "%URL%"=="" (
   echo   No address given. Nothing was sent.
   pause
@@ -36,7 +40,7 @@ REM 1. A checkpoint of everything, so what goes up is exactly what is here.
 "%GIT%" add -A
 "%GIT%" diff --cached --quiet
 if errorlevel 1 (
-  "%GIT%" commit -q -m "Everton's round of 10 Oct 2026: rounds filter, driver payments, collection stops, truck loading, footer, card off (7 points)" -m "Details in HANDOFF.md." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>" -m "Claude-Session: https://claude.ai/code/session_01LhQCzggo53ECGErhXsmPZP"
+  "%GIT%" commit -q -m "Checkpoint before sending to GitHub" -m "What changed is recorded in HANDOFF.md." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>" -m "Claude-Session: https://claude.ai/code/session_01LhQCzggo53ECGErhXsmPZP"
 )
 
 REM 2. Point at GitHub and send. The first time, a window opens asking you
