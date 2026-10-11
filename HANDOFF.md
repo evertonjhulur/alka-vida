@@ -49,7 +49,7 @@ Working and verified end to end, in the browser as well as in tests:
 | Addresses | Line 1, line 2, town, parish. Composed into `delivery_address`, which stays what the stop and the invoice PDF read (migration 014). |
 | Employees & labour cost | Who works here, paid by the hour or by the trip, and the hours/trips recorded against them. Payroll totals for any date range. **Add from logins** creates a record per existing login — title from the role (`admin`→Manager, `user`→Employee, `driver`→Driver), rate left blank — and is safe to press twice. **Deliberately not wired into costing** (migration 015). A person is managed on their own record at `/employees/:id` — details, rate, and their own work history. |
 
-**Tests: 520 passing** (11 Oct 2026) — 68 pure domain (`packages/shared`), 452 API
+**Tests: 521 passing** (11 Oct 2026) — 68 pure domain (`packages/shared`), 453 API
 (`packages/api`, against real PostgreSQL via PGlite).
 
 ```bash
@@ -1217,4 +1217,57 @@ Not done / to know:
   materials.
 - Tabs sit above the page title (the existing pattern), not under it as in
   the mockup.
+
+### Statement: order and bottle note, 11 Oct 2026
+
+- Same day: invoices (then credit notes) come before payments
+  (`ledger.getStatement` orders by date, then type, then time). A payment
+  keyed with just a date read as midnight and sat above its invoice, so the
+  running balance dipped below zero for a line.
+- The statement PDF's four-figure bottle box (held at start, delivered,
+  collected, held now) is replaced, at Everton's wording, by
+  **OUR 5-GALLON BOTTLES WITH YOU** and the count at the end of the period,
+  with a very small grey note: "These are to be returned or purchased at
+  $X each." X is this customer's price for the bottle charge product (price
+  list or special price, else standard), GCT included as every statement
+  amount is (GCT-exempt customers see it without). Printed only when they
+  hold some of ours; bottles they bought are not mentioned. The on-screen
+  statement is unchanged. Test: "Statement wording, 11 Oct 2026" in
+  `trucks.test.ts`. Bottle ownership decisions: project doc
+  `claude/bottle-charge-decisions.md`.
+
+### Invoice and statement layout, 11 Oct 2026
+
+Everton sent his QuickBooks invoice and statement as the model, asking for
+the logo on both, bank details on statements that carry a balance, and
+attention to type sizes, spacing, flow and readability. Mock-ups approved
+the same day. All in `documents.ts`; no data changes.
+
+- Shared header (`docHeader`): title in blue top left (INVOICE, CREDIT NOTE,
+  STATEMENT, INVOICES ENCLOSED), the company block under it (Alka Vida,
+  White Marl, Unit 7, St Catherine, GCT Registration No. 003-948-412 -
+  `COMPANY`, taken from the QuickBooks invoice), email / phone / website in
+  a second column, the logo top right.
+- A light blue band (`band`) for who it is for. Invoice: Bill to and Ship
+  to, a dashed line, then Invoice details in two columns (number, date, due
+  date; terms, order no., customer PO, period, GCT exemption).
+- Invoice lines: #, Date, Product or service (bold), Description, Qty,
+  Rate, Amount, Tax (GCT / Exempt). Totals on the right: Subtotal, "GCT @
+  15% on $X", Total and Balance due in large bold, "Paid in Full" in green
+  when settled. Bank details and the note to the customer on the left
+  (`paymentColumn`, from the same setting as before; "Electronic Transfers"
+  bold, "Note to customer" a size larger). Credit notes show plain amounts
+  under their own title, no bank details.
+- Statement: band with To on the left and statement date, period, terms
+  and **Total due (JMD)** on the right; the ledger under a blue heading
+  strip with "Balance forward" first and short descriptions ("Invoice
+  INV-001001", "Payment, INV-001000"); Balance due; our bottles with them;
+  the age strip Current / 1-30 / 31-60 / 61-90 / 90+ days past due / Amount
+  due (the query now splits 61-90 from over 90); bank details only when
+  something is owed.
+- Dates on documents are dd/mm/yyyy (`dmy`); emails keep "5 Oct 2026".
+- One small line pinned at the foot of each page (`smallPrint`).
+- The several-invoices PDF has a matching cover page.
+- Test changed on purpose: trucks.test Point 5 expects "Electronic
+  Transfers" without its colon (set as a heading).
 

@@ -19,7 +19,8 @@ import { fileURLToPath } from 'node:url';
 import type { Db, Queryable } from '../db/index.ts';
 import type { Actor } from './core.ts';
 import { audit, businessToday, contactEmail, documentFooter, requireRole, num, siteUrl } from './core.ts';
-import { RuleViolation } from '@alka/shared';
+import { RuleViolation, GCT_RATE } from '@alka/shared';
+import { resolveLines } from './orders.ts';
 import { getInvoiceDetail } from './invoices.ts';
 import { getStatement, invoicesInStatus, type StatementFilter, type StatementStatus } from './ledger.ts';
 import { customerEmail } from './emailkit.ts';
@@ -104,6 +105,133 @@ const cash = (cents: number) => {
   const whole = Math.floor(abs / 100).toLocaleString('en-JM');
   return `${neg ? '-' : ''}$${whole}.${String(abs % 100).padStart(2, '0')}`;
 };
+
+/* ------------------------------------------------------------------ */
+/* Invoice and statement layout (Everton, 11 Oct 2026, after the        */
+/* QuickBooks invoice and statement he sent): title and company block   */
+/* top left, logo top right, a light blue band for who it is for, then  */
+/* the lines, then totals beside the bank details.                       */
+/* ------------------------------------------------------------------ */
+
+/** The business as QuickBooks prints it. */
+const COMPANY = {
+  name: 'Alka Vida',
+  address: ['White Marl', 'Unit 7, St Catherine, Jamaica'],
+  gctReg: 'GCT Registration No. 003-948-412',
+  phone: '+1 876 528 6112',
+  web: 'www.alkavidaja.com',
+};
+const PAGE_L = 40;
+const PAGE_R = 572;
+const INK = '#1F2937';
+const SOFT = '#4B5563';
+const MUTED = '#6B7280';
+const RULE = '#DCE3EA';
+const BAND = '#EAF3FB';
+const GREEN = '#15803D';
+const R = 'Helvetica';
+const B = 'Helvetica-Bold';
+
+/** 21/09/2026, the way QuickBooks and the customers' own books write it. */
+const dmy = (d: unknown) => {
+  const iso = d instanceof Date ? d.toISOString().slice(0, 10) : String(d ?? '').slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(iso)) return iso;
+  const [y, m, day] = iso.split('-');
+  return `${day}/${m}/${y}`;
+};
+
+/**
+ * Title, company and contact details top left, the logo top right. Returns
+ * where the page carries on below it.
+ */
+async function docHeader(doc: PDFKit.PDFDocument, db: Queryable, title: string): Promise<number> {
+  const top = 38;
+  doc.font(B).fontSize(17).fillColor(COLOR_BLUE).text(title, PAGE_L, top, { characterSpacing: 0.6 });
+  const y = doc.y + 5;
+  doc.font(B).fontSize(9).fillColor(INK).text(COMPANY.name, PAGE_L, y);
+  doc.font(R).fontSize(8.5).fillColor(SOFT);
+  for (const line of COMPANY.address) doc.text(line, PAGE_L, doc.y + 1.5);
+  doc.text(COMPANY.gctReg, PAGE_L, doc.y + 1.5);
+  const leftBottom = doc.y;
+
+  doc.font(R).fontSize(8.5).fillColor(SOFT);
+  doc.text(await contactEmail(db), 215, y);
+  doc.text(COMPANY.phone, 215, doc.y + 1.5);
+  doc.text(COMPANY.web, 215, doc.y + 1.5);
+
+  let logoBottom = top;
+  const logo = logoPath();
+  if (logo) {
+    try {
+      const img = doc.openImage(logo);
+      const box: [number, number] = [150, 80];
+      const scale = Math.min(box[0] / img.width, box[1] / img.height);
+      const w = img.width * scale;
+      const h = img.height * scale;
+      doc.image(logo, PAGE_R - w, top - 4, { width: w, height: h });
+      logoBottom = top - 4 + h;
+    } catch { /* a bad image never stops a document going out */ }
+  }
+  return Math.max(leftBottom, logoBottom) + 22;
+}
+
+/** Light blue band across the page, behind the who-it-is-for block. */
+function band(doc: PDFKit.PDFDocument, y: number, h: number): void {
+  doc.save().rect(0, y, 612, h).fill(BAND).restore();
+}
+
+/** A small bold label over a block of lines. Returns the y below it. */
+function labelled(doc: PDFKit.PDFDocument, label: string, lines: string[], x: number, y: number, width: number): number {
+  doc.font(B).fontSize(8).fillColor(INK).text(label, x, y, { width });
+  let at = doc.y + 3;
+  lines.filter(Boolean).forEach((line, i) => {
+    doc.font(R).fontSize(i === 0 ? 10 : 9).fillColor(i === 0 ? INK : SOFT).text(line, x, at, { width });
+    at = doc.y + 1.5;
+  });
+  return at;
+}
+
+/**
+ * The bank details and note to the customer (the setting under Settings ›
+ * Invoices & payments), set in a column: "Electronic Transfers:" bold, "Note
+ * to customer" a little larger with space above, the rest as typed.
+ */
+async function paymentColumn(doc: PDFKit.PDFDocument, db: Queryable, x: number, y: number, width: number): Promise<number> {
+  const text = await documentFooter(db);
+  if (!text) return y;
+  doc.y = y;
+  for (const raw of text.split('\n')) {
+    const line = raw.trim();
+    if (/^note to customer:?$/i.test(line)) {
+      doc.font(R).fontSize(10.5).fillColor(INK).text('Note to customer', x, doc.y + 10, { width });
+      doc.y += 2;
+    } else if (/^electronic transfers:?$/i.test(line)) {
+      doc.font(B).fontSize(8.5).fillColor(INK).text('Electronic Transfers', x, doc.y + 7, { width });
+      doc.y += 1.5;
+    } else if (line === '') {
+      doc.y += 6;
+    } else {
+      doc.font(R).fontSize(8.5).fillColor(SOFT).text(line, x, doc.y + 1.5, { width });
+    }
+  }
+  return doc.y;
+}
+
+/** The small line at the very bottom of every invoice and statement. */
+async function smallPrint(doc: PDFKit.PDFDocument, db: Queryable, text: string): Promise<void> {
+  // Pinned near the foot of the page; onto a new page only if the content
+  // already reaches there.
+  let y = Math.max(doc.y + 18, 748);
+  if (y > 770) { doc.addPage(); y = 748; }
+  // Written inside the page's bottom margin, so pdfkit must not treat it as
+  // overflowing and start a blank page.
+  const bottom = doc.page.margins.bottom;
+  doc.page.margins.bottom = 0;
+  doc.font(R).fontSize(7.5).fillColor(MUTED)
+    .text(`${text}  Questions: ${await contactEmail(db)} or ${COMPANY.phone}.`,
+      PAGE_L, y, { width: PAGE_R - PAGE_L, align: 'center', lineBreak: false });
+  doc.page.margins.bottom = bottom;
+}
 
 export interface InvoiceDocument {
   filename: string;
@@ -215,133 +343,175 @@ async function drawInvoice(doc: PDFKit.PDFDocument, db: Db, invoiceId: string) {
   const lines = (detail as unknown as { lines?: Array<Record<string, unknown>> }).lines ?? [];
   const isCN = ledger.isCreditNote;
 
-  letterhead(doc, 50);
-  doc.moveDown(1.2);
+  const shipTo = await db.maybeOne<{ delivery_address: string | null }>(
+    `SELECT delivery_address FROM customers WHERE id = $1`, [ledger.customerId]);
 
-  doc.fillColor(COLOR_INDIGO).fontSize(16)
-    .text(isCN ? 'CREDIT NOTE' : 'INVOICE', 50, doc.y, { align: 'right', width: 510 });
-  doc.fontSize(10)
-    .text(ledger.invoiceNumber, { align: 'right', width: 510 });
-  // The order it came from, right under the invoice number (team feedback,
-  // 1 Oct 2026, point 6), and the customer's own PO when they gave one.
-  if (!ledger.cycle && orders.length > 0) {
-    doc.fontSize(9).fillColor('#444')
-      .text(`Order ${orders.map((o) => o.order_number).join(', ')}`, { align: 'right', width: 510 });
-  }
-  if (pos.length > 0) {
-    doc.fontSize(9).fillColor('#444').text(`Your PO ${pos.join(', ')}`, { align: 'right', width: 510 });
-  }
-  doc.fontSize(10).fillColor('#000')
-    .text(`Date: ${fmtDate(ledger.invoiceDate)}`, { align: 'right', width: 510 });
+  /* 1. Title, company, logo */
+  let y = await docHeader(doc, db, isCN ? 'CREDIT NOTE' : 'INVOICE');
+
+  /* 2. The band: who it is for, then the invoice's own details */
+  const billLines = [customer.name, customer.attention ? `Attn: ${customer.attention}` : '',
+    customer.address ?? '', customer.phone ?? '', customer.email ?? ''].filter(Boolean);
+  const shipLines = [customer.name, shipTo?.delivery_address ?? customer.address ?? ''].filter(Boolean);
+  const details: Array<[string, string]> = [
+    [isCN ? 'Credit note no.' : 'Invoice no.', ledger.invoiceNumber],
+    [isCN ? 'Date' : 'Invoice date', dmy(ledger.invoiceDate)],
+  ];
   if (!isCN) {
-    // A weekly or monthly invoice is due on receipt (Everton, 30 Sep 2026).
-    if (ledger.cycle || (ledger.dueDate && fmtDate(ledger.dueDate) === fmtDate(ledger.invoiceDate))) {
-      doc.text('Due: on receipt', { align: 'right', width: 510 });
-    } else if (ledger.dueDate) {
-      doc.text(`Due: ${fmtDate(ledger.dueDate)}`, { align: 'right', width: 510 });
-    }
+    const onReceipt = !!ledger.cycle || (!!ledger.dueDate && dmy(ledger.dueDate) === dmy(ledger.invoiceDate));
+    details.push(['Due date', onReceipt ? 'On receipt' : ledger.dueDate ? dmy(ledger.dueDate) : '-']);
   }
-  if (ledger.period_from && ledger.period_to) {
-    doc.text(`Deliveries ${fmtDate(ledger.period_from)} to ${fmtDate(ledger.period_to)}`,
-      { align: 'right', width: 510 });
-  }
-  doc.moveDown(1);
+  const details2: Array<[string, string]> = [];
+  if (!isCN && customer.payment_terms && !ledger.cycle) details2.push(['Terms', customer.payment_terms]);
+  if (!isCN && ledger.cycle) details2.push(['Terms', 'Due on receipt']);
+  if (!ledger.cycle && orders.length > 0) details2.push(['Order no.', orders.map((o) => o.order_number).join(', ')]);
+  if (pos.length > 0) details2.push(['Your PO', pos.join(', ')]);
+  if (ledger.period_from && ledger.period_to) details2.push(['Deliveries', `${dmy(ledger.period_from)} to ${dmy(ledger.period_to)}`]);
+  if (isCN && linked) details2.push(['Against invoice', linked.invoice_number]);
+  if (ledger.gct_exempt && customer.gct_exempt_ref) details2.push(['GCT exemption', customer.gct_exempt_ref]);
 
-  doc.fontSize(9).fillColor('#555').text(isCN ? 'CREDIT TO' : 'BILL TO', 50);
-  doc.fontSize(11).fillColor('#000').text(customer.name);
-  doc.fontSize(9).fillColor('#333');
-  if (customer.attention) doc.text(`Attn: ${customer.attention}`);
-  if (customer.address) doc.text(customer.address);
-  if (customer.phone) doc.text(customer.phone);
-  if (customer.email) doc.text(customer.email);
-  if (!isCN && customer.payment_terms && !ledger.cycle) doc.text(`Terms: ${customer.payment_terms}`);
-  if (ledger.gct_exempt && customer.gct_exempt_ref) doc.text(`GCT exemption: ${customer.gct_exempt_ref}`);
-  if (isCN && linked) doc.text(`Against invoice ${linked.invoice_number}`);
-  doc.moveDown(1.2);
-
-  const left = 50;
-  const cycleLayout = lines.some((l) => l.delivered_on);
-  const cols = cycleLayout
-    ? { date: left, ref: 118, desc: 180, qty: 340, unit: 400, total: 480 }
-    : { date: 0, ref: 0, desc: left, qty: 330, unit: 400, total: 480 };
-  const header = () => {
-    const y = doc.y;
-    doc.fillColor('#555').fontSize(8);
-    if (cycleLayout) {
-      doc.text('DELIVERED', cols.date, y).text('ORDER', cols.ref, y);
+  const topH = 22 + 14 + Math.max(billLines.length, shipLines.length) * 12.5;
+  const detH = 22 + 14 + Math.max(details.length, details2.length) * 13.5;
+  band(doc, y, topH + detH + 8);
+  labelled(doc, isCN ? 'Credit to' : 'Bill to', billLines, PAGE_L, y + 18, 280);
+  labelled(doc, 'Ship to', shipLines, 360, y + 18, 212);
+  const dash = y + topH;
+  doc.save().moveTo(PAGE_L, dash).lineTo(PAGE_R, dash).dash(2, { space: 2 }).strokeColor('#B9CCE0').lineWidth(0.6).stroke().undash().restore();
+  doc.font(B).fontSize(9.5).fillColor(INK).text(isCN ? 'Credit note details' : 'Invoice details', PAGE_L, dash + 16);
+  const detTop = doc.y + 4;
+  const pairCol = (rows: Array<[string, string]>, x: number) => {
+    let at = detTop;
+    for (const [k, v] of rows) {
+      doc.font(R).fontSize(9).fillColor(SOFT).text(`${k}: `, x, at, { continued: true }).fillColor(INK).text(v);
+      at = doc.y + 2.5;
     }
-    doc.text('DESCRIPTION', cols.desc, y)
-      .text('QTY', cols.qty, y)
-      .text('UNIT PRICE', cols.unit, y, { width: 70, align: 'right' })
-      .text('AMOUNT', cols.total, y, { width: 80, align: 'right' });
-    doc.moveTo(left, doc.y + 2).lineTo(560, doc.y + 2).strokeColor(COLOR_BLUE).stroke();
-    doc.moveDown(0.6);
   };
-  header();
+  pairCol(details, PAGE_L);
+  pairCol(details2, 360);
+  y += topH + detH + 8 + 22;
 
-  if (lines.length === 0 && isCN) {
-    const y = doc.y;
-    doc.fontSize(9).fillColor('#000')
-      .text(ledger.notes || 'Credit', cols.desc, y, { width: 270 });
-    doc.moveDown(0.4);
-  }
-  for (const l of lines) {
-    const cases = num(l.cases as number);
-    const loose = num(l.loose_bottles as number);
-    const qty = cases > 0 ? `${cases} cs` : `${loose}`;
-    const unit = cases > 0
-      ? num(l.price_per_case_cents as number)
-      : num(l.price_per_bottle_cents as number);
-    if (doc.y > 680) { doc.addPage(); doc.y = 50; header(); }
-    const y = doc.y;
-    doc.fontSize(9).fillColor('#000');
-    if (cycleLayout) {
-      doc.text(l.delivered_on ? fmtDate(l.delivered_on) : '', cols.date, y, { width: 64 })
-        .text(String(l.reference ?? ''), cols.ref, y, { width: 60 });
-    }
-    doc.text(String(l.product_name ?? ''), cols.desc, y, { width: cols.qty - cols.desc - 8 })
-      .text(qty, cols.qty, y)
-      .text(cash(unit), cols.unit, y, { width: 70, align: 'right' })
-      .text(cash(num(l.line_total_cents as number)), cols.total, y, { width: 80, align: 'right' });
-    doc.y = Math.max(doc.y, y + 12);
-    doc.moveDown(0.3);
-  }
-
-  doc.moveDown(0.8);
-  const sign = isCN ? -1 : 1;
-  const row = (label: string, value: number, bold = false) => {
-    if (doc.y > 700) { doc.addPage(); doc.y = 50; }
-    const y = doc.y;
-    doc.fillColor('#000').fontSize(bold ? 11 : 9)
-      .text(label, cols.unit - 150, y, { width: 220, align: 'right' })
-      .text(cash(value), cols.total, y, { width: 80, align: 'right' });
-    doc.moveDown(0.35);
+  /* 3. The lines */
+  const col = {
+    n: { x: PAGE_L, w: 16 }, date: { x: 58, w: 60 }, prod: { x: 122, w: 132 },
+    desc: { x: 260, w: 112 }, qty: { x: 372, w: 34 }, rate: { x: 410, w: 58 },
+    amt: { x: 470, w: 62 }, tax: { x: 536, w: 36 },
   };
-  row('Subtotal', sign * num(ledger.subtotal_cents));
+  const head = () => {
+    doc.font(R).fontSize(8.5).fillColor(INK);
+    doc.text('#', col.n.x, y, { width: col.n.w });
+    doc.text('Date', col.date.x, y, { width: col.date.w });
+    doc.text('Product or service', col.prod.x, y, { width: col.prod.w });
+    doc.text('Description', col.desc.x, y, { width: col.desc.w });
+    doc.text('Qty', col.qty.x, y, { width: col.qty.w, align: 'right' });
+    doc.text('Rate', col.rate.x, y, { width: col.rate.w, align: 'right' });
+    doc.text('Amount', col.amt.x, y, { width: col.amt.w, align: 'right' });
+    doc.text('Tax', col.tax.x, y, { width: col.tax.w, align: 'right' });
+    y += 16;
+    doc.moveTo(col.date.x, y).lineTo(PAGE_R, y).strokeColor(RULE).lineWidth(0.7).stroke();
+    y += 9;
+  };
+  head();
+
+  const describe = (l: Record<string, unknown>) => {
+    const size = String(l.product_size ?? '').trim();
+    const bpc = num(l.bottles_per_case as number);
+    if (l.is_bottle_charge) return 'Bottle not returned (yours to keep)';
+    if (/^5\s*gal/i.test(size)) return '19 litres (5 Gallon)';
+    return [size, bpc > 0 ? `case of ${bpc}` : ''].filter(Boolean).join(', ');
+  };
+  const rows: Array<{ date: string; prod: string; desc: string; qty: string; rate: string; amt: string }> =
+    lines.map((l) => {
+      const cases = num(l.cases as number);
+      const loose = num(l.loose_bottles as number);
+      const unit = cases > 0 ? num(l.price_per_case_cents as number) : num(l.price_per_bottle_cents as number);
+      return {
+        date: dmy(l.delivered_on ?? ledger.invoiceDate),
+        prod: String(l.product_name ?? ''),
+        desc: describe(l) + (l.reference ? `\n${String(l.reference)}` : ''),
+        qty: cases > 0 ? `${cases} cs` : String(loose),
+        rate: cash(Math.abs(unit)), amt: cash(isCN ? Math.abs(num(l.line_total_cents as number)) : num(l.line_total_cents as number)),
+      };
+    });
+  if (rows.length === 0 && isCN) {
+    rows.push({ date: dmy(ledger.invoiceDate), prod: 'Credit', desc: ledger.notes ?? '', qty: '', rate: '', amt: cash(Math.abs(num(ledger.subtotal_cents))) });
+  }
+  rows.forEach((r, i) => {
+    doc.font(B).fontSize(9);
+    const h = Math.max(
+      doc.heightOfString(r.prod || ' ', { width: col.prod.w }),
+      doc.font(R).heightOfString(r.desc || ' ', { width: col.desc.w }),
+    );
+    if (y + h > 690) { doc.addPage(); y = 50; head(); }
+    doc.font(R).fontSize(9).fillColor(INK);
+    doc.text(`${i + 1}.`, col.n.x, y, { width: col.n.w });
+    doc.text(r.date, col.date.x, y, { width: col.date.w });
+    doc.font(B).text(r.prod, col.prod.x, y, { width: col.prod.w });
+    doc.font(R).fillColor(SOFT).text(r.desc, col.desc.x, y, { width: col.desc.w });
+    doc.fillColor(INK);
+    doc.text(r.qty, col.qty.x, y, { width: col.qty.w, align: 'right' });
+    doc.text(r.rate, col.rate.x, y, { width: col.rate.w, align: 'right' });
+    doc.text(r.amt, col.amt.x, y, { width: col.amt.w, align: 'right' });
+    doc.text(ledger.gct_exempt ? 'Exempt' : 'GCT', col.tax.x, y, { width: col.tax.w, align: 'right' });
+    y += h + 10;
+    doc.moveTo(PAGE_L, y - 4).lineTo(PAGE_R, y - 4).strokeColor(RULE).lineWidth(0.5).stroke();
+  });
+
+  /* 4. Totals on the right; bank details and the note on the left */
+  y += 8;
+  if (y > 560) { doc.addPage(); y = 50; }
+  // A credit note shows its figures as plain amounts under its own title.
+  const sign = 1;
+  const abs = (n: number) => (isCN ? Math.abs(n) : n);
+  const TX = 330;
+  const TW = PAGE_R - TX;
+  let ty = y;
+  const trow = (label: string, value: string, big = false) => {
+    if (big) {
+      doc.font(B).fontSize(9).fillColor(INK).text(label, TX, ty + 3, { width: 140 });
+      doc.font(B).fontSize(13).text(value, TX, ty, { width: TW, align: 'right' });
+      ty += 24;
+    } else {
+      doc.font(R).fontSize(9).fillColor(SOFT).text(label, TX + 14, ty, { width: 170 });
+      doc.fillColor(INK).text(value, TX, ty, { width: TW, align: 'right' });
+      ty += 20;
+    }
+  };
+  const rule = () => {
+    doc.moveTo(TX, ty - 6).lineTo(PAGE_R, ty - 6).strokeColor(RULE).lineWidth(0.7).stroke();
+    ty += 6;
+  };
+  const sub = num(ledger.subtotal_cents);
+  trow('Subtotal', cash(abs(sign * sub)));
   if (num(ledger.discount_amount_cents) > 0) {
-    const how = num(ledger.discount_fixed_cents) > 0 ? 'Discount'
-      : `Discount ${num(ledger.discount_percent)}%`;
-    row(how, -num(ledger.discount_amount_cents));
+    const how = num(ledger.discount_fixed_cents) > 0 ? 'Discount' : `Discount ${num(ledger.discount_percent)}%`;
+    trow(how, cash(-num(ledger.discount_amount_cents)));
   }
-  row(ledger.gct_exempt ? 'GCT (exempt)' : 'GCT 15%', sign * num(ledger.gct_cents));
+  const taxable = sub - num(ledger.discount_amount_cents);
+  trow(ledger.gct_exempt ? 'GCT (exempt)' : `GCT @ 15% on ${cash(abs(taxable))}`, cash(abs(sign * num(ledger.gct_cents))));
+  rule();
   if (isCN) {
-    row('Credit total', -ledger.grandTotalCents, true);
+    trow('Credit total', cash(Math.abs(ledger.grandTotalCents)), true);
     if (ledger.credit_status === 'Pending') {
-      doc.fontSize(8).fillColor('#8a5c00').text('Awaiting approval - not yet applied to the account.',
-        cols.desc, doc.y, { width: 510 - cols.desc + 50, align: 'right' });
+      doc.font(R).fontSize(8).fillColor('#8A5C00').text('Awaiting approval: not yet applied to the account.', TX, ty, { width: TW, align: 'right' });
+      ty = doc.y + 6;
     }
   } else {
-    row('Total', ledger.grandTotalCents, true);
-    row('Paid', ledger.amountPaidCents);
-    row('Balance due', ledger.balanceCents, true);
+    trow('Total', cash(ledger.grandTotalCents), true);
+    rule();
+    if (ledger.amountPaidCents > 0) { trow('Payment', cash(-ledger.amountPaidCents)); rule(); }
+    trow('Balance due', cash(ledger.balanceCents), true);
+    rule();
+    if (ledger.balanceCents <= 0 && ledger.grandTotalCents > 0) {
+      doc.font(B).fontSize(12).fillColor(GREEN).text('Paid in Full', TX, ty + 2, { width: TW, align: 'right' });
+      ty = doc.y + 4;
+    }
   }
 
-  if (!isCN) await drawPaymentFooter(doc, db, left, 510);
+  let ly = y + 12;
+  if (!isCN) ly = await paymentColumn(doc, db, 58, ly, 250);
+  doc.y = Math.max(ly, ty);
 
-  doc.moveDown(2).fontSize(8).fillColor('#777')
-    .text(`${BRAND.company}  ·  All amounts in Jamaican dollars${ledger.gct_exempt ? '' : ', GCT inclusive'}.`
-      + `\nContact ${await contactEmail(db)} for any orders or queries.`,
-      left, doc.y, { align: 'center', width: 510 });
+  await smallPrint(doc, db, `All amounts in Jamaican dollars${ledger.gct_exempt ? '' : ', GCT shown separately'}.`);
 
   return { invoiceNumber: ledger.invoiceNumber, customerName: customer.name, customerEmail: customer.email };
 }
@@ -380,37 +550,36 @@ export async function renderInvoicesPdf(
   const customer = await billTo(db, rows[0].customer_id);
 
   const { doc, finished } = newDoc();
-  letterhead(doc, 50);
-  doc.moveDown(1.2);
-  doc.fillColor(COLOR_INDIGO).fontSize(16).text('INVOICES ENCLOSED', 50, doc.y, { align: 'right', width: 510 });
-  doc.fontSize(10).text(fmtDate(businessToday()), { align: 'right', width: 510 });
-  doc.moveDown(1);
-  doc.fontSize(11).text(customer.name, 50);
-  doc.fontSize(9).fillColor('#333');
-  if (customer.address) doc.text(customer.address);
-  doc.moveDown(1.2);
-  const y0 = doc.y;
-  doc.fontSize(8).fillColor('#555')
-    .text('INVOICE', 50, y0).text('DATE', 160, y0).text('DUE', 260, y0)
-    .text('TOTAL', 360, y0, { width: 90, align: 'right' })
-    .text('STILL OWED', 460, y0, { width: 100, align: 'right' });
-  doc.moveTo(50, doc.y + 2).lineTo(560, doc.y + 2).strokeColor(COLOR_BLUE).stroke();
-  doc.moveDown(0.6);
   let due = 0;
+  for (const r of rows) due += num(r.balance_cents);
+  let y = await docHeader(doc, db, 'INVOICES ENCLOSED');
+  const toLines = [customer.name, customer.attention ? `Attn: ${customer.attention}` : '', customer.address ?? '', customer.email ?? ''].filter(Boolean);
+  const bandH = 30 + Math.max(toLines.length * 12.5 + 12, 64);
+  band(doc, y, bandH);
+  labelled(doc, 'To', toLines, PAGE_L, y + 18, 280);
+  doc.font(R).fontSize(9).fillColor(SOFT).text('Date', 360, y + 18, { width: 90 });
+  doc.fillColor(INK).text(dmy(businessToday()), 450, y + 18, { width: PAGE_R - 450, align: 'right' });
+  doc.moveTo(360, y + 40).lineTo(PAGE_R, y + 40).strokeColor('#B9CCE0').lineWidth(0.6).stroke();
+  doc.font(B).fontSize(9.5).fillColor(INK).text('Total still owed', 360, y + 50, { width: 100 });
+  doc.font(B).fontSize(13).text(`JMD ${cash(due).replace('$', '')}`, 430, y + 48, { width: PAGE_R - 430, align: 'right' });
+  y += bandH + 22;
+  const cc = { inv: PAGE_L + 10, date: 160, due: 260, total: 370, owed: 470 };
+  doc.save().rect(PAGE_L, y, PAGE_R - PAGE_L, 20).fill(BAND).restore();
+  doc.font(R).fontSize(8).fillColor(COLOR_BLUE)
+    .text('INVOICE', cc.inv, y + 6.5).text('DATE', cc.date, y + 6.5).text('DUE', cc.due, y + 6.5)
+    .text('TOTAL', cc.total, y + 6.5, { width: 90, align: 'right' })
+    .text('STILL OWED', cc.owed, y + 6.5, { width: 92, align: 'right' });
+  y += 30;
   for (const r of rows) {
-    const y = doc.y;
-    doc.fontSize(9).fillColor('#000')
-      .text(r.invoice_number, 50, y).text(fmtDate(r.invoice_date), 160, y)
-      .text(r.due_date ? fmtDate(r.due_date) : '-', 260, y)
-      .text(cash(num(r.grand_total_cents)), 360, y, { width: 90, align: 'right' })
-      .text(cash(num(r.balance_cents)), 460, y, { width: 100, align: 'right' });
-    doc.moveDown(0.4);
-    due += num(r.balance_cents);
+    doc.font(R).fontSize(9).fillColor(INK)
+      .text(r.invoice_number, cc.inv, y).text(dmy(r.invoice_date), cc.date, y)
+      .text(r.due_date ? dmy(r.due_date) : '-', cc.due, y)
+      .text(cash(num(r.grand_total_cents)), cc.total, y, { width: 90, align: 'right' })
+      .text(cash(num(r.balance_cents)), cc.owed, y, { width: 92, align: 'right' });
+    y += 19;
   }
-  doc.moveDown(0.6);
-  const yt = doc.y;
-  doc.fontSize(11).text('Total still owed', 300, yt, { width: 150, align: 'right' })
-    .text(cash(due), 460, yt, { width: 100, align: 'right' });
+  doc.moveTo(PAGE_L, y).lineTo(PAGE_R, y).strokeColor(RULE).lineWidth(0.7).stroke();
+  doc.font(R).fontSize(9).fillColor(SOFT).text('Each invoice follows on its own page.', PAGE_L, y + 12);
 
   for (const r of rows) {
     doc.addPage();
@@ -470,7 +639,7 @@ export async function renderStatementPdf(
    * date says it is.
    */
   const aging = await db.one<{
-    current: string; d30: string; d60: string; d90: string; total: string;
+    current: string; d30: string; d60: string; d90: string; d91: string; total: string;
   }>(
     `SELECT
        COALESCE(SUM(balance_cents) FILTER (
@@ -480,7 +649,9 @@ export async function renderStatementPdf(
        COALESCE(SUM(balance_cents) FILTER (
          WHERE business_today() - due_date BETWEEN 31 AND 60), 0)::text AS d60,
        COALESCE(SUM(balance_cents) FILTER (
-         WHERE business_today() - due_date > 60), 0)::text AS d90,
+         WHERE business_today() - due_date BETWEEN 61 AND 90), 0)::text AS d90,
+       COALESCE(SUM(balance_cents) FILTER (
+         WHERE business_today() - due_date > 90), 0)::text AS d91,
        COALESCE(SUM(balance_cents), 0)::text AS total
      FROM invoice_ledger
      WHERE customer_id = $1 AND balance_cents > 0
@@ -490,224 +661,151 @@ export async function renderStatementPdf(
 
   // Bottles they are holding, over the same window as the ledger.
   const bottles = await bottleAccount(db, customerId, { from: opts.from, to: opts.to });
-
-  const doc = new PDFDocument({ size: 'LETTER', margin: 50 });
-  const chunks: Buffer[] = [];
-  doc.on('data', (c: Buffer) => chunks.push(c));
-  const finished = new Promise<Buffer>((resolve) => {
-    doc.on('end', () => resolve(Buffer.concat(chunks)));
-  });
-
-  const left = 50;
-  const right = 560;
-
-  letterhead(doc, left);
-  doc.moveDown(1.2);
-
-  doc.fillColor(COLOR_INDIGO).fontSize(16).text('STATEMENT OF ACCOUNT', { align: 'right' });
-  doc.fontSize(10).fillColor('#333')
-    .text(
-      statement.from || statement.to
-        ? `${statement.from ?? 'the beginning'} to ${statement.to ?? 'today'}`
-        : 'All activity to date',
-      { align: 'right' },
+  // What one of our bottles costs THIS customer to buy, GCT included the way
+  // every amount on the statement is (the footer says so): their price list
+  // or special price for the bottle charge, else the standard price.
+  let bottlePriceCents: number | null = null;
+  if (bottles.closingHolding > 0) {
+    const charge = await db.maybeOne<{ id: string }>(
+      `SELECT id FROM products WHERE is_bottle_charge AND active ORDER BY created_at LIMIT 1`,
     );
-  if (statement.status) {
-    doc.fontSize(10).fillColor(COLOR_BLUE)
-      .text(`${statement.status} invoices only`, { align: 'right' });
-  }
-  doc.moveDown(1);
-
-  /* who it is for */
-  doc.fontSize(9).fillColor('#555').text('ACCOUNT', left, doc.y);
-  doc.fontSize(11).fillColor('#000').text(customer.name);
-  doc.fontSize(9).fillColor('#333');
-  if (customer.delivery_address) doc.text(customer.delivery_address);
-  if (customer.phone) doc.text(customer.phone);
-  if (customer.email) doc.text(customer.email);
-  if (customer.payment_terms) doc.text(`Terms: ${customer.payment_terms}`);
-  doc.moveDown(1.2);
-
-  /* the ledger */
-  const cols = { date: left, type: 118, desc: 196, ref: 350, amount: 420, balance: 490 };
-  const headerRow = () => {
-    const y = doc.y;
-    doc.fontSize(8).fillColor('#555')
-      .text('DATE', cols.date, y)
-      .text('TYPE', cols.type, y)
-      .text('DESCRIPTION', cols.desc, y)
-      .text('REFERENCE', cols.ref, y)
-      .text('AMOUNT', cols.amount, y, { width: 62, align: 'right' })
-      .text('BALANCE', cols.balance, y, { width: 70, align: 'right' });
-    doc.moveTo(left, doc.y + 3).lineTo(right, doc.y + 3).strokeColor(COLOR_BLUE).stroke();
-    doc.moveDown(0.7);
-  };
-  headerRow();
-
-  /**
-   * One line of the ledger.
-   *
-   * The row advances by its TALLEST cell, not by whatever the last one
-   * happened to be. Six cells are drawn at the same y; pdfkit leaves the
-   * cursor wherever the final call finished, so a description that wrapped to
-   * two lines was written over by the row beneath it - which put figures
-   * against the wrong line and made an invoice number look like it did not
-   * match its payment.
-   */
-  const row = (
-    date: string, type: string, desc: string, ref: string,
-    amount: string, balance: string, muted = false,
-  ) => {
-    const cells: Array<{ text: string; x: number; w: number; right?: boolean }> = [
-      { text: date, x: cols.date, w: 64 },
-      { text: type, x: cols.type, w: 74 },
-      { text: desc, x: cols.desc, w: 150 },
-      { text: ref, x: cols.ref, w: 66 },
-      { text: amount, x: cols.amount, w: 62, right: true },
-      { text: balance, x: cols.balance, w: 70, right: true },
-    ];
-
-    doc.fontSize(8.5).fillColor(muted ? '#666' : '#000');
-    const height = Math.max(
-      ...cells.map((c) => doc.heightOfString(c.text || ' ', { width: c.w })),
-    );
-
-    // Break before drawing, not after, so a row is never split across pages.
-    if (doc.y + height > 690) {
-      doc.addPage();
-      doc.y = 50;
-      headerRow();
-      doc.fontSize(8.5).fillColor(muted ? '#666' : '#000');
+    if (charge) {
+      const [line] = await resolveLines(db, customerId, [{ productId: charge.id, looseBottles: 1 }]);
+      const exempt = (await db.one<{ gct_exempt: boolean }>(
+        `SELECT gct_exempt FROM customers WHERE id = $1`, [customerId])).gct_exempt;
+      const net = num(line.pricePerBottleCents);
+      bottlePriceCents = exempt ? net : Math.round(net * (1 + GCT_RATE));
     }
-
-    const y = doc.y;
-    for (const c of cells) {
-      doc.text(c.text, c.x, y, { width: c.w, align: c.right ? 'right' : 'left' });
-    }
-    doc.y = y + height + 3;
-  };
-
-  row('', '', 'Opening balance', '', '', cash(statement.openingBalanceCents), true);
-  for (const e of statement.entries) {
-    row(
-      String(e.date).slice(0, 10), e.type, e.description, e.reference,
-      cash(e.amountCents), cash(e.runningBalanceCents),
-    );
-  }
-  if (statement.entries.length === 0) {
-    doc.fontSize(9).fillColor('#666')
-      .text('No activity in this period.', left, doc.y).moveDown(0.5);
   }
 
-  doc.moveTo(left, doc.y + 2).lineTo(right, doc.y + 2).strokeColor('#ccc').stroke();
-  doc.moveDown(0.8);
-
-  /*
-   * What they owe - or what they are up.
-   *
-   * A customer who paid more than the invoice is IN CREDIT, and "Balance due
-   * -$275.00" is a sentence nobody should have to decode. The figure is shown
-   * unsigned under the label that describes it.
-   */
+  const { doc, finished } = newDoc();
   const closing = statement.closingBalanceCents;
   const inCredit = closing < 0;
 
-  /*
-   * The figure sits in the SAME column as the running balance above it, and
-   * the label is right-aligned into the space to its left. Two separate
-   * placements, not one `continued` run: a continued string inherits the
-   * right-alignment of the piece before it, so the amount was laid out
-   * against the wrong box and pushed past the right margin.
-   */
-  const totalY = doc.y;
-  doc.fontSize(12).fillColor('#000')
-    .text(inCredit ? 'In credit' : 'Balance due',
-      cols.desc, totalY, { width: cols.balance - cols.desc - 10, align: 'right' })
-    .text(cash(Math.abs(closing)),
-      cols.balance, totalY, { width: 70, align: 'right' });
-  doc.y = totalY + 18;
+  /* 1. Title, company, logo */
+  let y = await docHeader(doc, db, 'STATEMENT');
 
+  /* 2. The band: who it is for on the left, the statement's figures on the right */
+  const toLines = [customer.name, customer.attention ? `Attn: ${customer.attention}` : '',
+    customer.delivery_address ?? '', customer.phone ?? '', customer.email ?? ''].filter(Boolean);
+  const facts: Array<[string, string]> = [
+    ['Statement date', dmy(businessToday())],
+    ['Period', statement.from || statement.to
+      ? `${statement.from ? dmy(statement.from) : 'Start'} to ${statement.to ? dmy(statement.to) : dmy(businessToday())}`
+      : 'All activity to date'],
+  ];
+  if (customer.payment_terms) facts.push(['Terms', customer.payment_terms]);
+  if (statement.status) facts.push(['Showing', `${statement.status} invoices only`]);
+  const bandH = 30 + Math.max(toLines.length * 12.5 + 12, facts.length * 15 + 34);
+  band(doc, y, bandH);
+  labelled(doc, 'To', toLines, PAGE_L, y + 18, 280);
+  let fy = y + 18;
+  for (const [k, v] of facts) {
+    doc.font(R).fontSize(9).fillColor(SOFT).text(k, 360, fy, { width: 90 });
+    doc.fillColor(INK).text(v, 450, fy, { width: PAGE_R - 450, align: 'right' });
+    fy += 15;
+  }
+  fy += 4;
+  doc.moveTo(360, fy).lineTo(PAGE_R, fy).strokeColor('#B9CCE0').lineWidth(0.6).stroke();
+  fy += 8;
+  doc.font(B).fontSize(9.5).fillColor(INK).text(inCredit ? 'In credit' : 'Total due', 360, fy + 2, { width: 90 });
+  doc.font(B).fontSize(13).text(`JMD ${cash(Math.abs(closing)).replace('$', '')}`, 430, fy, { width: PAGE_R - 430, align: 'right' });
+  y += bandH + 22;
+
+  /* 3. The ledger: date, description, amount, running balance */
+  const c = { date: { x: PAGE_L + 10, w: 70 }, desc: { x: 128, w: 250 }, amt: { x: 388, w: 84 }, bal: { x: 478, w: 84 } };
+  const head = () => {
+    doc.save().rect(PAGE_L, y, PAGE_R - PAGE_L, 20).fill(BAND).restore();
+    doc.font(R).fontSize(8).fillColor(COLOR_BLUE);
+    doc.text('DATE', c.date.x, y + 6.5, { width: c.date.w, characterSpacing: 0.4 });
+    doc.text('DESCRIPTION', c.desc.x, y + 6.5, { width: c.desc.w, characterSpacing: 0.4 });
+    doc.text('AMOUNT', c.amt.x, y + 6.5, { width: c.amt.w, align: 'right', characterSpacing: 0.4 });
+    doc.text('BALANCE', c.bal.x, y + 6.5, { width: c.bal.w, align: 'right', characterSpacing: 0.4 });
+    y += 30;
+  };
+  head();
+  const line = (date: string, desc: string, amount: string, balance: string, muted = false) => {
+    doc.font(R).fontSize(9);
+    const h = doc.heightOfString(desc || ' ', { width: c.desc.w });
+    if (y + h > 680) { doc.addPage(); y = 50; head(); }
+    doc.font(R).fontSize(9).fillColor(muted ? SOFT : INK);
+    doc.text(date, c.date.x, y, { width: c.date.w });
+    doc.text(desc, c.desc.x, y, { width: c.desc.w });
+    doc.text(amount, c.amt.x, y, { width: c.amt.w, align: 'right' });
+    doc.text(balance, c.bal.x, y, { width: c.bal.w, align: 'right' });
+    y += h + 7;
+  };
+  const dayBefore = (iso: string) => {
+    const d = new Date(`${iso.slice(0, 10)}T00:00:00Z`); d.setUTCDate(d.getUTCDate() - 1);
+    return d.toISOString().slice(0, 10);
+  };
+  const plain = (cents: number) => cash(cents).replace('$', '');
+  line(statement.from ? dmy(dayBefore(String(statement.from))) : '', 'Balance forward', '', plain(statement.openingBalanceCents), true);
+  y += 6;
+  const words = (e: (typeof statement.entries)[number]) => {
+    if (e.type === 'Invoice') return `Invoice ${e.reference}`;
+    if (e.type === 'Credit Note') return `Credit note ${e.reference}`;
+    if (e.type === 'Reversal') return `Payment reversed${e.reference ? `, ${e.reference}` : ''}`;
+    if (e.type === 'Reassignment') return 'Payment moved to another account';
+    return e.description.startsWith('Payment received, applied to ')
+      ? `Payment, ${e.reference}` : 'Payment, on account';
+  };
+  for (const e of statement.entries) {
+    line(dmy(e.date), words(e), plain(e.amountCents), plain(e.runningBalanceCents));
+  }
+  if (statement.entries.length === 0) line('', 'No activity in this period.', '', '', true);
+  doc.moveTo(PAGE_L, y + 2).lineTo(PAGE_R, y + 2).strokeColor(RULE).lineWidth(0.7).stroke();
+  y += 14;
+
+  /* 4. Our bottles with them (left) and what is due (right) */
+  if (y > 600) { doc.addPage(); y = 50; }
+  doc.font(B).fontSize(9.5).fillColor(INK).text(inCredit ? 'In credit' : 'Balance due', 330, y + 2, { width: 120 });
+  doc.font(B).fontSize(13).text(`JMD ${plain(Math.abs(closing))}`, 430, y, { width: PAGE_R - 430, align: 'right' });
   if (inCredit) {
-    doc.fontSize(8.5).fillColor('#555')
-      .text('Paid ahead. This comes off the next invoice.',
-        cols.desc, doc.y, { width: right - cols.desc, align: 'right' });
+    doc.font(R).fontSize(8).fillColor(SOFT).text('Paid ahead. This comes off the next invoice.', 330, y + 20, { width: PAGE_R - 330, align: 'right' });
   }
-  doc.moveDown(1.2);
-
-  /*
-   * The bottle account.
-   *
-   * A returnable 5-gallon bottle is a real asset out on loan. The ledger above
-   * says what the customer owes; this says how many bottles of yours they are
-   * holding. They belong on one piece of paper because the conversation about
-   * one is usually the conversation about the other.
-   *
-   * Printed only when this customer has ever had a returnable - a 500ml case
-   * buyer should not read a row of zeroes and wonder what it means.
-   */
-  const everHadBottles = bottles.delivered > 0 || bottles.openingHolding !== 0
-    || bottles.closingHolding !== 0;
-  if (everHadBottles) {
-    doc.fontSize(9).fillColor('#555').text('5-GALLON BOTTLES', left, doc.y);
-    doc.moveDown(0.4);
-    const top = doc.y;
-    const cell = (label: string, value: string, i: number, strong = false) => {
-      const x = left + i * 128;
-      doc.y = top;
-      doc.fontSize(8).fillColor('#555').text(label, x, doc.y, { width: 120 });
-      doc.fontSize(11).fillColor(strong ? '#000' : '#333')
-        .text(value, x, doc.y, { width: 120 });
-    };
-    cell('Held at start', String(bottles.openingHolding), 0);
-    cell('Delivered', `+${bottles.delivered}`, 1);
-    cell('Collected', `-${bottles.returned}`, 2);
-    cell('Held now', String(bottles.closingHolding), 3, true);
-    doc.y = top + 34;
-
-    if (bottles.sold > 0) {
-      doc.fontSize(8).fillColor('#777')
-        .text(`${bottles.sold} bought outright in this period: those are yours, not counted above.`, left, doc.y);
-      doc.moveDown(0.4);
+  if (bottles.closingHolding > 0) {
+    doc.font(R).fontSize(8).fillColor(SOFT).text('OUR 5-GALLON BOTTLES WITH YOU', PAGE_L, y, { characterSpacing: 0.3 });
+    doc.font(B).fontSize(12).fillColor(INK).text(String(bottles.closingHolding), PAGE_L, doc.y + 2);
+    if (bottlePriceCents !== null) {
+      doc.font(R).fontSize(6.5).fillColor(MUTED)
+        .text(`These are to be returned or purchased at ${cash(bottlePriceCents)} each.`, PAGE_L, doc.y + 2);
     }
-    if (bottles.lost > 0) {
-      doc.fontSize(8).fillColor('#777')
-        .text(`${bottles.lost} recorded lost or damaged and written off.`, left, doc.y);
-      doc.moveDown(0.8);
-    }
-    doc.moveDown(0.6);
   }
+  y = Math.max(doc.y, y + 22) + 16;
 
+  /* 5. Age of what is owed, across the page */
   const owed = Number(aging.total);
   if (owed > 0) {
-    doc.fontSize(9).fillColor('#555').text('AGE OF WHAT IS OWED', left, doc.y);
-    doc.moveDown(0.5);
-    const bucket = (label: string, value: number, x: number) => {
-      doc.fontSize(8).fillColor('#555').text(label, x, doc.y, { width: 118 });
-      doc.fontSize(11).fillColor(label === 'Over 60 days' && value > 0 ? '#b42318' : '#000')
-        .text(cash(value), x, doc.y, { width: 118 });
-    };
-    const top = doc.y;
-    [
-      ['Not yet due', Number(aging.current)],
-      ['1–30 days', Number(aging.d30)],
-      ['31–60 days', Number(aging.d60)],
-      ['Over 60 days', Number(aging.d90)],
-    ].forEach(([label, value], i) => {
-      doc.y = top;
-      bucket(label as string, value as number, left + i * 128);
+    if (y > 640) { doc.addPage(); y = 50; }
+    const cells: Array<[string, number]> = [
+      ['Current\ndue', Number(aging.current)], ['1-30 days\npast due', Number(aging.d30)],
+      ['31-60 days\npast due', Number(aging.d60)], ['61-90 days\npast due', Number(aging.d90)],
+      ['90+ days\npast due', Number(aging.d91)],
+    ];
+    const w = (PAGE_R - PAGE_L) / 6;
+    doc.save().rect(PAGE_L, y, PAGE_R - PAGE_L, 30).fill(BAND).restore();
+    cells.forEach(([label], i) => {
+      doc.font(R).fontSize(7.5).fillColor(COLOR_BLUE).text(label, PAGE_L + 10 + i * w, y + 5, { width: w - 12, lineGap: 1 });
     });
-    doc.y = top + 34;
+    doc.font(R).fontSize(7.5).fillColor(COLOR_BLUE).text('Amount\ndue', PAGE_L + 5 * w, y + 5, { width: w - 10, align: 'right', lineGap: 1 });
+    const vy = y + 40;
+    cells.forEach(([, v], i) => {
+      doc.font(R).fontSize(9).fillColor(i >= 3 && v > 0 ? '#B42318' : INK).text(plain(v), PAGE_L + 10 + i * w, vy, { width: w - 12 });
+    });
+    doc.font(B).fontSize(9.5).fillColor(INK).text(`JMD ${plain(owed)}`, PAGE_L + 5 * w - 10, vy, { width: w, align: 'right' });
+    y = vy + 30;
   }
 
-  await drawPaymentFooter(doc, db, left, right - left);
+  /* 6. How to pay: only when something is owed */
+  if (closing > 0) {
+    if (y > 600) { doc.addPage(); y = 50; }
+    doc.y = await paymentColumn(doc, db, 58, y, 300);
+  } else {
+    doc.y = y;
+  }
 
-  doc.moveDown(1.5).fontSize(8).fillColor('#777')
-    .text(
-      `${BRAND.company}  ·  All amounts in Jamaican dollars, GCT inclusive.  ·  `
-      + 'Please quote the invoice number with any payment.'
-      + `\nContact ${await contactEmail(db)} for any orders or queries.`,
-      left, doc.y, { align: 'center', width: right - left },
-    );
+  await smallPrint(doc, db, 'All amounts in Jamaican dollars, GCT inclusive. Please quote the invoice number with any payment.');
 
   doc.end();
   const pdf = await finished;

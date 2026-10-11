@@ -17,6 +17,7 @@ import { bottleAccount, listPools } from '../src/services/bottles.ts';
 import { loadRound, confirmLoad, addToLoad, confirmAddition, cancelAddition, confirmReturns, truckPosition, loadingsReport, loadingSummary, goodsOnTrucks } from '../src/services/trucks.ts';
 import { stockSnapshot } from '../src/services/audits.ts';
 import { bottleChargeProduct } from '../src/services/orders.ts';
+import { getStatement } from '../src/services/ledger.ts';
 import {
   addCollection, recordCollection, decideReturn, listCollections, pickupsForPo, stopOptions,
 } from '../src/services/collections.ts';
@@ -340,13 +341,45 @@ describe('Point 5: bank details and disclaimer on invoices and statements', () =
     const r = await roundWith([{ productId: f.casedProductId, cases: 1 }]);
     const done = await markStop(f.db, f.driver, { stopId: r.stopId, outcome: 'Delivered' });
     const inv = pdfText((await renderInvoicePdf(f.db, done.invoiceId!)).pdf);
-    for (const line of DEFAULT_DOCUMENT_FOOTER.split('\n')) assert.ok(inv.includes(line), `invoice has "${line}"`);
+    // Headings are set without their colon in the 11 Oct layout.
+    for (const line of DEFAULT_DOCUMENT_FOOTER.split('\n').map((l) => l.trim().replace(/^(Electronic Transfers):$/, '$1'))) {
+      assert.ok(inv.includes(line), `invoice has "${line}"`);
+    }
     const stmt = pdfText((await renderStatementPdf(f.db, f.customerId)).pdf);
     assert.ok(stmt.includes('Account: 000300249266'));
     assert.ok(stmt.includes('will not assume liability for goods damaged after receipt.'));
     await setSetting('document_footer', 'Pay by transfer to account 123');
     assert.ok(pdfText((await renderInvoicePdf(f.db, done.invoiceId!)).pdf).includes('Pay by transfer to account 123'));
     await setSetting('document_footer', DEFAULT_DOCUMENT_FOOTER);
+  });
+});
+
+describe('Statement wording, 11 Oct 2026', () => {
+  test('same-day invoice before its payment; our bottles with them and a small note', async () => {
+    const c = (await f.db.one<{ id: string }>(
+      `INSERT INTO customers (name, phone, email, delivery_address, delivery_zone)
+       VALUES ('Loan Bottles Ltd','8765550404','loan@example.com','1 Test Road','Kingston') RETURNING id`)).id;
+    await f.db.query(`INSERT INTO customer_bottle_moves (customer_id, moved_on, delivered, reference)
+                      VALUES ($1, $2, 4, 'Opening balance')`, [c, addDays(today, -40)]);
+    await bottleChargeProduct(f.db);
+    const r = await roundWith([{ productId: f.casedProductId, cases: 1 }], c);
+    const done = await markStop(f.db, f.driver, { stopId: r.stopId, outcome: 'Delivered' });
+    const inv = await f.db.one<{ grand_total_cents: number; invoice_date: string }>(
+      `SELECT grand_total_cents, invoice_date::text FROM invoices WHERE id = $1`, [done.invoiceId]);
+    await recordPayment(f.db, f.office, { customerId: c, invoiceId: done.invoiceId!, amountCents: Number(inv.grand_total_cents),
+      method: 'Cash', paymentDate: inv.invoice_date } as never);
+
+    const st = await getStatement(f.db, c, {});
+    assert.deepEqual(st.entries.map((e) => e.type), ['Invoice', 'Payment'], 'the invoice comes first on the day');
+    assert.ok(st.entries.every((e) => e.runningBalanceCents >= 0), 'the balance never dips below zero');
+
+    const text = pdfText((await renderStatementPdf(f.db, c)).pdf);
+    assert.ok(text.includes('OUR 5-GALLON BOTTLES WITH YOU'));
+    assert.match(text, /These are to be returned or purchased at \$[\d,]+\.\d\d each\./);
+    assert.ok(!text.includes('Held at start'), 'the old four-figure box is gone');
+    // A customer with none of ours sees nothing about bottles.
+    const none = pdfText((await renderStatementPdf(f.db, f.otherCustomerId)).pdf);
+    assert.ok(!none.includes('OUR 5-GALLON BOTTLES'));
   });
 });
 

@@ -179,7 +179,14 @@ export async function getStatement(
              OR a.details -> 'before' ->> 'customerId' = $1::text)
         AND (a.details ? 'before')
     )
-    SELECT * FROM entries ORDER BY sort_key
+    -- Within a day, invoices (and credit notes) come before the payments
+    -- against them (Everton, 11 Oct 2026). A payment keyed in with just a date
+    -- reads as midnight, so by time alone it landed above the invoice it paid
+    -- and the running balance dipped below zero for one line.
+    SELECT * FROM entries
+    ORDER BY entry_date,
+             CASE type WHEN 'Invoice' THEN 0 WHEN 'Credit Note' THEN 1 ELSE 2 END,
+             sort_key
     `,
     [customerId, BUSINESS_TIMEZONE],
   );
