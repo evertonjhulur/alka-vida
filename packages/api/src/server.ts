@@ -15,8 +15,8 @@ import { createDb, type Db } from './db/index.ts';
 import { migrate } from './db/migrate.ts';
 import { loadSigningKey, login, userAccess, verifyToken, SESSION_COOKIE, SESSION_TTL_SECONDS, type Session } from './lib/auth.ts';
 import { loadSettings } from './lib/settings.ts';
-import { ForbiddenError, RuleViolation, type RecurrencePattern } from '@alka/shared';
-import { BUSINESS_TIMEZONE, type Actor } from './services/core.ts';
+import { ForbiddenError, RuleViolation, type PaymentMethod, type RecurrencePattern } from '@alka/shared';
+import { BUSINESS_TIMEZONE, assertMethodAllowed, type Actor } from './services/core.ts';
 
 import * as orders from './services/orders.ts';
 import * as delivery from './services/delivery.ts';
@@ -660,6 +660,18 @@ export async function buildServer(db: Db) {
 
   /* ---------------- customers ---------------- */
 
+  /** Money handed over on the New order screen. */
+  interface OrderPayment {
+    amountCents: number;
+    method: PaymentMethod;
+    reference?: string | null;
+    paymentDate?: string | null;
+    allocations?: Array<{ invoiceId: string; amountCents: number }>;
+    idempotencyKey?: string | null;
+    sendReceipt?: boolean;
+    receiptTo?: string;
+  }
+
   app.get('/api/customers', { preHandler: allow('admin', 'user', 'driver') },
     async () => customers.listSelectableCustomers(db));
 
@@ -818,12 +830,56 @@ export async function buildServer(db: Db) {
             body.requestedDeliveryDate, body.addressId ?? null);
           if (check.needsReview) body.needsReview = true;
         }
-        created = await orders.createOrder(db, actorOf(req), body);
+        // Money taken on the New order screen (11 Oct 2026): checked first,
+        // so a refused method stops the order rather than half of it.
+        const pay = (req.body as { payment?: OrderPayment }).payment;
+        if (pay && pay.amountCents > 0) await assertMethodAllowed(db, pay.method);
+        const { payment: _p, ...orderBody } = body as orders.CreateOrderInput & { payment?: unknown };
+        void _p;
+        created = await orders.createOrder(db, actorOf(req), orderBody);
+        if (pay && pay.amountCents > 0) {
+          const paid = await takeOrderPayment(req, body.customerId, created.id,
+            created.orderNumber, pay);
+          // "Thank you for your order" - best effort, after the order is safe.
+          void messaging.sendOrderPlacedEmail(db, created.id).catch(() => {});
+          return { ...created, ...paid };
+        }
       }
       // "Thank you for your order" - best effort, after the order is safe.
       void messaging.sendOrderPlacedEmail(db, created.id).catch(() => {});
       return created;
     });
+
+  /**
+   * The payment half of the New order screen: one receipt, put against any
+   * older invoices ticked, the rest left on the account for this order's own
+   * invoice (payments.applyAccountCredit puts it there when it is raised).
+   * The order is already saved when this runs, so a payment that cannot be
+   * recorded is reported, never allowed to undo the order.
+   */
+  const takeOrderPayment = async (
+    req: { session?: Session }, customerId: string, orderId: string | null, orderNumber: string,
+    pay: OrderPayment,
+  ): Promise<{ paymentIds?: string[]; paidCents?: number; paymentError?: string;
+               receipt?: { sentTo: string; receiptNumber: string }; receiptError?: string }> => {
+    try {
+      const r = await payments.receivePayment(db, actorOf(req), {
+        customerId,
+        amountCents: Math.round(Number(pay.amountCents) || 0),
+        method: pay.method,
+        reference: pay.reference ?? null,
+        paymentDate: pay.paymentDate ?? null,
+        allocations: pay.allocations ?? [],
+        orderId,
+        notes: orderId ? `Paid with order ${orderNumber}` : `Paid at the counter (${orderNumber})`,
+        idempotencyKey: pay.idempotencyKey ?? null,
+      });
+      return { paymentIds: r.paymentIds, paidCents: Math.round(Number(pay.amountCents) || 0),
+               ...(await maybeReceipt(req, r.paymentIds, pay)) };
+    } catch (err) {
+      return { paymentError: (err as Error).message };
+    }
+  };
 
   app.get('/api/orders', { preHandler: allow('admin', 'user', 'customer') },
     async (req) => {
@@ -871,7 +927,27 @@ export async function buildServer(db: Db) {
     } as never));
 
   app.post('/api/counter-sale', { preHandler: allow('admin', 'user') },
-    async (req) => counterSale(db, actorOf(req), req.body as never));
+    async (req) => {
+      // Older invoices paid at the same time (New order screen, 11 Oct 2026):
+      // a second payment, after the sale has gone through.
+      const { olderPayment, ...sale } = req.body as Record<string, unknown> & { olderPayment?: OrderPayment };
+      if (olderPayment && olderPayment.amountCents > 0) await assertMethodAllowed(db, olderPayment.method);
+      const r = await counterSale(db, actorOf(req), sale as never);
+      // The payments on the sale's invoice, for the receipt (print or email).
+      const paymentIds = (await db.query<{ id: string }>(
+        `SELECT id FROM payments WHERE invoice_id = $1 AND status = 'Confirmed' AND NOT is_reversal
+         ORDER BY created_at`, [r.invoiceId],
+      )).map((p) => p.id);
+      const receiptOpts = sale as { sendReceipt?: boolean; receiptTo?: string };
+      const receipt = r.replayed ? {} : await maybeReceipt(req, paymentIds, receiptOpts);
+      if (!olderPayment || !(olderPayment.amountCents > 0) || r.replayed) return { ...r, paymentIds, ...receipt };
+      const customerId = (sale as { customerId?: string }).customerId;
+      if (!customerId) {
+        return { ...r, paymentIds, ...receipt, paymentError: 'older invoices can only be paid on a customer account' };
+      }
+      const older = await takeOrderPayment(req, customerId, null, r.invoiceNumber, olderPayment);
+      return { ...r, ...receipt, ...older, paymentIds: [...paymentIds, ...(older.paymentIds ?? [])] };
+    });
 
   /* ---------------- quotations ---------------- */
 

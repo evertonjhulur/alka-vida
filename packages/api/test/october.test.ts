@@ -262,17 +262,22 @@ describe('Point 10: a payment at a stop with no delivery', () => {
 
 describe('Point 11: statements filtered by invoice state', () => {
   test('Open / Paid / Partially paid / Overdue, with balances that follow', async () => {
+    // A customer of its own: money left on an account now goes against a new
+    // invoice (11 Oct 2026), and the earlier tests leave some on the others.
+    const who = (await f.db.one<{ id: string }>(
+      `INSERT INTO customers (name, phone, email) VALUES ('Statement Filters Ltd', '876-555-0199', '') RETURNING id`,
+    )).id;
     const mk = async (cases: number) => counterSale(f.db, f.office, {
-      customerId: f.otherCustomerId, lines: [{ productId: f.casedProductId, cases }], amountPaidCents: 0,
+      customerId: who, lines: [{ productId: f.casedProductId, cases }], amountPaidCents: 0,
     });
     const paid = await mk(1); const part = await mk(2); const open = await mk(3);
-    await receivePayment(f.db, f.office, { customerId: f.otherCustomerId, amountCents: paid.grandTotalCents, method: 'Cash',
+    await receivePayment(f.db, f.office, { customerId: who, amountCents: paid.grandTotalCents, method: 'Cash',
       allocations: [{ invoiceId: paid.invoiceId, amountCents: paid.grandTotalCents }] });
-    await receivePayment(f.db, f.office, { customerId: f.otherCustomerId, amountCents: 10_000, method: 'Cash',
+    await receivePayment(f.db, f.office, { customerId: who, amountCents: 10_000, method: 'Cash',
       allocations: [{ invoiceId: part.invoiceId, amountCents: 10_000 }] });
     await f.db.query(`UPDATE invoices SET due_date = $2::date WHERE id = $1`, [open.invoiceId, addDays(today, -5)]);
 
-    const refs = async (status: string) => (await getStatement(f.db, f.otherCustomerId, { status }))
+    const refs = async (status: string) => (await getStatement(f.db, who, { status }))
       .entries.filter((e) => e.type === 'Invoice').map((e) => e.reference);
     assert.ok((await refs('Paid')).includes(paid.invoiceNumber));
     assert.ok(!(await refs('Paid')).includes(open.invoiceNumber));
@@ -280,11 +285,11 @@ describe('Point 11: statements filtered by invoice state', () => {
     assert.ok((await refs('Overdue')).includes(open.invoiceNumber));
     assert.ok(!(await refs('Open')).includes(paid.invoiceNumber));
 
-    const paidOnly = await getStatement(f.db, f.otherCustomerId, { status: 'Paid' });
+    const paidOnly = await getStatement(f.db, who, { status: 'Paid' });
     assert.equal(paidOnly.closingBalanceCents, 0, 'paid invoices owe nothing');
-    const overdue = await getStatement(f.db, f.otherCustomerId, { status: 'Overdue' });
+    const overdue = await getStatement(f.db, who, { status: 'Overdue' });
     assert.equal(overdue.closingBalanceCents, open.grandTotalCents);
-    const pdf = await renderStatementPdf(f.db, f.otherCustomerId, { status: 'Overdue' });
+    const pdf = await renderStatementPdf(f.db, who, { status: 'Overdue' });
     assert.ok(pdf.pdf.length > 1000);
   });
 });

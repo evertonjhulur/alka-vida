@@ -208,7 +208,9 @@ export async function createCustomer(
   requireRole(actor, 'admin', 'user');
   if (!input.name?.trim()) throw new RuleViolation('a customer needs a name');
   if (!input.phone?.trim()) throw new RuleViolation('a customer needs a phone number');
-  if (!input.email?.trim()) throw new RuleViolation('a customer needs an email address');
+  // A walk-in put on file at the counter for a receipt (New order, 11 Oct
+  // 2026) may have no email address; every other customer needs one.
+  if (!input.email?.trim() && !input.isWalkIn) throw new RuleViolation('a customer needs an email address');
   if (input.deliveryZone) await assertZoneNotRetired(db, input.deliveryZone.trim());
 
   const cols = customerColumns(input);
@@ -458,7 +460,7 @@ export async function setSpecialPrice(
  */
 export async function customerPrices(db: Db | Queryable, customerId: string) {
   return db.query(
-    `SELECT p.id AS product_id, p.name, p.bottles_per_case, p.is_returnable, p.is_bottle_charge,
+    `SELECT p.id AS product_id, p.name, p.size, p.bottles_per_case, p.is_returnable, p.is_bottle_charge,
             COALESCE(cp.price_per_case_cents, pl.price_per_case_cents, p.price_per_case_cents)
               AS price_per_case_cents,
             COALESCE(cp.price_per_bottle_cents, pl.price_per_bottle_cents, p.price_per_bottle_cents)
@@ -487,7 +489,7 @@ export async function getCustomer(db: Db, customerId: string) {
 /** Only active customers may be selected for new orders. */
 export async function listSelectableCustomers(db: Db) {
   return db.query(
-    `SELECT c.id, c.name, c.phone, c.email, c.delivery_zone, c.route_sequence,
+    `SELECT c.id, c.name, c.phone, c.email, c.delivery_zone, c.route_sequence, c.is_walk_in,
             c.delivery_address, pt.name AS price_tier,
             b.balance_cents, c.account_type, c.delivery_days, c.invoice_cycle,
             c.gct_exempt, c.payment_terms, z.run_days AS zone_run_days
@@ -573,8 +575,17 @@ export async function customerHistory(db: Db, customerId: string) {
   );
 
   const position = await accountPosition(db, customerId);
+  // Paid with orders still to be delivered: kept for those orders' invoices,
+  // so not credit to spend on anything else (New order, 11 Oct 2026).
+  const kept = await db.one<{ c: string }>(
+    `SELECT COALESCE(SUM(p.amount_cents), 0)::text AS c FROM payments p
+     JOIN customer_orders o ON o.id = p.order_id
+     WHERE p.customer_id = $1 AND p.invoice_id IS NULL AND p.status = 'Confirmed'
+       AND NOT p.is_reversal AND o.status NOT IN ('Delivered', 'Cancelled')`, [customerId],
+  );
   return {
     customer, orders, invoices, payments, balanceCents: num(balance.balance_cents),
+    keptForOrdersCents: num(kept.c),
     overdueCents: position.overdueCents, overdueInvoices: position.overdueInvoices,
   };
 }

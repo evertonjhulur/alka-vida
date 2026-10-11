@@ -25,6 +25,8 @@ export interface RecordPaymentInput {
   deliverySheetId?: string | null;
   deliveryStopId?: string | null;
   kind?: string | null;
+  /** The order this money came in with (New order screen); a reference only. */
+  orderId?: string | null;
   /** Duplicate-submission guard for the office "Record Payment" button. */
   idempotencyKey?: string | null;
 }
@@ -51,14 +53,14 @@ export async function insertPayment(
   const row = await t.one<{ id: string }>(
     `INSERT INTO payments
        (customer_id, invoice_id, amount_cents, payment_date, method, reference,
-        notes, status, delivery_sheet_id, delivery_stop_id, kind, created_by_id)
-     VALUES ($1,$2,$3,COALESCE($4::timestamptz, now()),$5,$6,$7,$8,$9,$10,$11,$12)
+        notes, status, delivery_sheet_id, delivery_stop_id, kind, created_by_id, order_id)
+     VALUES ($1,$2,$3,COALESCE($4::timestamptz, now()),$5,$6,$7,$8,$9,$10,$11,$12,$13)
      RETURNING id`,
     [input.customerId, input.invoiceId ?? null, input.amountCents,
      paymentInstant(input.paymentDate), input.method, input.reference ?? null,
      input.notes ?? null, input.status ?? 'Confirmed',
      input.deliverySheetId ?? null, input.deliveryStopId ?? null,
-     input.kind ?? null, actor?.id ?? null],
+     input.kind ?? null, actor?.id ?? null, input.orderId ?? null],
   );
 
   await audit(t, actor, 'pay', 'Payment', row.id, input.reference ?? row.id, {
@@ -258,6 +260,11 @@ export async function receivePayment(
     /** Optional: which invoices this covers, in the order to apply them. */
     allocations?: ReadonlyArray<{ invoiceId: string; amountCents: Cents }>;
     idempotencyKey?: string | null;
+    /**
+     * Taken with this order (New order screen): what is not put against an
+     * invoice here goes against that order's invoice first when it is raised.
+     */
+    orderId?: string | null;
   },
 ): Promise<{ paymentIds: string[]; allocatedCents: Cents; unappliedCents: Cents }> {
   requireRole(actor, 'admin', 'user');
@@ -299,6 +306,7 @@ export async function receivePayment(
           paymentDate: input.paymentDate ?? null,
           reference: input.reference ?? null,
           notes: input.notes ?? null,
+          orderId: plan.invoiceId ? null : input.orderId ?? null,
           status: 'Confirmed',
         });
         ids.push(row.id);
@@ -383,68 +391,158 @@ export async function applyToInvoice(
 
     const owed = num(inv.balance_cents);
     if (owed <= 0) throw new RuleViolation(`${inv.invoice_number} is already paid`);
-    let remaining = Math.min(owed, args.amountCents && args.amountCents > 0 ? args.amountCents : owed);
+    const remaining = Math.min(owed, args.amountCents && args.amountCents > 0 ? args.amountCents : owed);
 
-    const pool = await t.query<{
-      id: string; amount_cents: number; payment_date: string; method: PaymentMethod;
-      reference: string | null; notes: string | null; delivery_sheet_id: string | null;
-      delivery_stop_id: string | null; kind: string | null;
-    }>(
-      `SELECT id, amount_cents, payment_date::text AS payment_date, method, reference, notes,
-              delivery_sheet_id, delivery_stop_id, kind
-       FROM payments
-       WHERE customer_id = $1 AND invoice_id IS NULL AND status = 'Confirmed'
-         AND NOT is_reversal AND amount_cents > 0
-         AND ($2::uuid IS NULL OR id = $2::uuid)
-       ORDER BY payment_date, created_at
-       FOR UPDATE`,
-      [inv.customer_id, args.paymentId ?? null],
-    );
+    const pool = await moneyOnAccount(t, inv.customer_id, args.invoiceId, args.paymentId ?? null);
     if (pool.length === 0) {
       throw new RuleViolation(args.paymentId
         ? 'that payment is already against an invoice, or belongs to another customer'
         : 'there is no money on their account to apply');
     }
-
-    let applied = 0;
-    const ids: string[] = [];
-    for (const p of pool) {
-      if (remaining <= 0) break;
-      const have = num(p.amount_cents);
-      const take = Math.min(have, remaining);
-      if (take === have) {
-        await t.query(`UPDATE payments SET invoice_id = $2 WHERE id = $1`, [p.id, args.invoiceId]);
-        await audit(t, actor, 'adjust', 'Payment', p.id, p.reference ?? p.id, {
-          applied: 'whole', invoiceId: args.invoiceId, invoiceNumber: inv.invoice_number,
-          amountCents: take,
-        });
-        ids.push(p.id);
-      } else {
-        await t.query(`UPDATE payments SET amount_cents = amount_cents - $2 WHERE id = $1`, [p.id, take]);
-        const part = await insertPayment(t, actor, {
-          customerId: inv.customer_id,
-          invoiceId: args.invoiceId,
-          amountCents: take,
-          method: p.method,
-          paymentDate: p.payment_date,
-          reference: p.reference,
-          notes: `Part of an earlier payment${p.reference ? ` (${p.reference})` : ''}, applied to ${inv.invoice_number}`,
-          deliverySheetId: p.delivery_sheet_id,
-          deliveryStopId: p.delivery_stop_id,
-          kind: p.kind,
-          status: 'Confirmed',
-        });
-        await audit(t, actor, 'adjust', 'Payment', p.id, p.reference ?? p.id, {
-          applied: 'split', invoiceId: args.invoiceId, invoiceNumber: inv.invoice_number,
-          amountCents: take, leftUnattachedCents: have - take, newPaymentId: part.id,
-        });
-        ids.push(part.id);
-      }
-      applied += take;
-      remaining -= take;
-    }
-    return { appliedCents: applied, paymentIds: ids };
+    return putAgainstInvoice(t, actor, inv, args.invoiceId, pool, remaining);
   });
+}
+
+interface OnAccountRow {
+  id: string; amount_cents: number; payment_date: string; method: PaymentMethod;
+  reference: string | null; notes: string | null; delivery_sheet_id: string | null;
+  delivery_stop_id: string | null; kind: string | null; order_id: string | null;
+  /** Taken with one of the orders this invoice bills. */
+  for_this: boolean;
+  /** Taken with ANOTHER order that is still to be delivered: kept for it. */
+  kept_for_other: boolean;
+}
+
+/**
+ * The customer's payments not against any invoice, the ones taken with an
+ * order this invoice bills first (New order, 11 Oct 2026), then oldest first.
+ */
+async function moneyOnAccount(
+  t: Queryable, customerId: string, invoiceId: string, paymentId: string | null,
+): Promise<OnAccountRow[]> {
+  return t.query<OnAccountRow>(
+    `SELECT p.id, p.amount_cents, p.payment_date::text AS payment_date, p.method, p.reference, p.notes,
+            p.delivery_sheet_id, p.delivery_stop_id, p.kind, p.order_id,
+            (p.order_id IS NOT NULL AND p.order_id IN
+               (SELECT io.order_id FROM invoice_orders io WHERE io.invoice_id = $3)) AS for_this,
+            COALESCE((SELECT o.status NOT IN ('Delivered', 'Cancelled')
+                        AND o.id NOT IN (SELECT io.order_id FROM invoice_orders io WHERE io.invoice_id = $3)
+                      FROM customer_orders o WHERE o.id = p.order_id), false) AS kept_for_other
+     FROM payments p
+     WHERE p.customer_id = $1 AND p.invoice_id IS NULL AND p.status = 'Confirmed'
+       AND NOT p.is_reversal AND p.amount_cents > 0
+       AND ($2::uuid IS NULL OR p.id = $2::uuid)
+     ORDER BY (p.order_id IS NOT NULL AND p.order_id IN
+                 (SELECT io.order_id FROM invoice_orders io WHERE io.invoice_id = $3)) DESC,
+              p.payment_date, p.created_at
+     FOR UPDATE OF p`,
+    [customerId, paymentId, invoiceId],
+  );
+}
+
+/** Attach payments from `pool` to the invoice, up to `upTo`, splitting the last if needed. */
+async function putAgainstInvoice(
+  t: Queryable, actor: Actor | null,
+  inv: { customer_id: string; invoice_number: string },
+  invoiceId: string, pool: readonly OnAccountRow[], upTo: Cents,
+): Promise<{ appliedCents: Cents; paymentIds: string[] }> {
+  let remaining = upTo;
+  let applied = 0;
+  const ids: string[] = [];
+  for (const p of pool) {
+    if (remaining <= 0) break;
+    const have = num(p.amount_cents);
+    const take = Math.min(have, remaining);
+    if (take === have) {
+      await t.query(`UPDATE payments SET invoice_id = $2 WHERE id = $1`, [p.id, invoiceId]);
+      await audit(t, actor, 'adjust', 'Payment', p.id, p.reference ?? p.id, {
+        applied: 'whole', invoiceId, invoiceNumber: inv.invoice_number,
+        amountCents: take,
+      });
+      ids.push(p.id);
+    } else {
+      await t.query(`UPDATE payments SET amount_cents = amount_cents - $2 WHERE id = $1`, [p.id, take]);
+      const part = await insertPayment(t, actor, {
+        customerId: inv.customer_id,
+        invoiceId,
+        amountCents: take,
+        method: p.method,
+        paymentDate: p.payment_date,
+        reference: p.reference,
+        notes: `Part of an earlier payment${p.reference ? ` (${p.reference})` : ''}, applied to ${inv.invoice_number}`,
+        deliverySheetId: p.delivery_sheet_id,
+        deliveryStopId: p.delivery_stop_id,
+        kind: p.kind,
+        orderId: p.order_id,
+        status: 'Confirmed',
+      });
+      await audit(t, actor, 'adjust', 'Payment', p.id, p.reference ?? p.id, {
+        applied: 'split', invoiceId, invoiceNumber: inv.invoice_number,
+        amountCents: take, leftUnattachedCents: have - take, newPaymentId: part.id,
+      });
+      ids.push(part.id);
+    }
+    applied += take;
+    remaining -= take;
+  }
+  return { appliedCents: applied, paymentIds: ids };
+}
+
+/**
+ * A newly raised invoice uses up money already on the customer's account
+ * (Everton, 11 Oct 2026: money taken before delivery sits as credit and goes
+ * against the invoice the moment it is raised; customers can prepay or
+ * overpay).
+ *
+ *  1. Money taken WITH one of the orders this invoice bills goes on first.
+ *  2. Other money on the account goes on only as far as it is more than what
+ *     their other open invoices still owe - that is, as far as they are
+ *     really in credit. Money that belongs against an older invoice is left
+ *     for the office to put there.
+ *
+ * Runs inside the caller's transaction. Nothing to apply is not an error: it
+ * returns 0. A walk-in record is never touched (its money is not one
+ * person's). Callers that must never fail (a delivery) run it after their own
+ * transaction has committed.
+ */
+export async function applyAccountCredit(
+  t: Queryable, actor: Actor | null, invoiceId: string,
+): Promise<Cents> {
+  const inv = await t.maybeOne<{
+    customer_id: string; invoice_number: string; balance_cents: number;
+    is_credit_note: boolean; status: string;
+  }>(
+    `SELECT customer_id, invoice_number, balance_cents, is_credit_note, status
+     FROM invoice_ledger WHERE invoice_id = $1`, [invoiceId],
+  );
+  if (!inv || inv.is_credit_note || inv.status === 'Cancelled') return 0;
+  let owed = num(inv.balance_cents);
+  if (owed <= 0) return 0;
+  const who = await t.one<{ is_walk_in: boolean }>(
+    `SELECT is_walk_in FROM customers WHERE id = $1`, [inv.customer_id],
+  );
+  if (who.is_walk_in) return 0;
+  await t.query(`SELECT id FROM invoices WHERE id = $1 FOR UPDATE`, [invoiceId]);
+
+  const pool = await moneyOnAccount(t, inv.customer_id, invoiceId, null);
+  if (pool.length === 0) return 0;
+
+  const mine = pool.filter((p) => p.for_this);
+  const first = mine.length ? await putAgainstInvoice(t, actor, inv, invoiceId, mine, owed) : { appliedCents: 0 };
+  owed -= first.appliedCents;
+
+  // Money taken with another order still to be delivered is kept for it.
+  const general = pool.filter((p) => !p.for_this && !p.kept_for_other);
+  if (owed <= 0 || general.length === 0) return first.appliedCents;
+  const other = await t.one<{ c: number }>(
+    `SELECT COALESCE(SUM(balance_cents), 0)::bigint AS c FROM invoice_ledger
+     WHERE customer_id = $1 AND invoice_id <> $2 AND NOT is_credit_note
+       AND status <> 'Cancelled' AND balance_cents > 0`, [inv.customer_id, invoiceId],
+  );
+  const spare = general.reduce((n, p) => n + num(p.amount_cents), 0) - num(other.c);
+  if (spare <= 0) return first.appliedCents;
+  const second = await putAgainstInvoice(t, actor, inv, invoiceId, general, Math.min(owed, spare));
+  return first.appliedCents + second.appliedCents;
 }
 
 /* ------------------------------------------------------------------ */

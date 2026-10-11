@@ -8,7 +8,8 @@ Last updated after Everton's round of 10 Oct 2026 (7 points: rounds filter, driv
 collection stops, truck loading and returns, invoice footer, card payments off, email wording)
 and Justin's testing findings the same day (reminders, tablet layout, sign-up address, logo,
 security), then the UX review build of 11 Oct 2026 (shorter pinned menu with tabs, Statement…
-dialog, tidy-ups, customer Details in four parts). See the last three entries at the end.
+dialog, tidy-ups, customer Details in four parts), then the New sale screen of 11 Oct 2026
+(one screen, product then size, payment at the end, credit used first). See the last entries at the end.
 
 ---
 
@@ -49,7 +50,7 @@ Working and verified end to end, in the browser as well as in tests:
 | Addresses | Line 1, line 2, town, parish. Composed into `delivery_address`, which stays what the stop and the invoice PDF read (migration 014). |
 | Employees & labour cost | Who works here, paid by the hour or by the trip, and the hours/trips recorded against them. Payroll totals for any date range. **Add from logins** creates a record per existing login — title from the role (`admin`→Manager, `user`→Employee, `driver`→Driver), rate left blank — and is safe to press twice. **Deliberately not wired into costing** (migration 015). A person is managed on their own record at `/employees/:id` — details, rate, and their own work history. |
 
-**Tests: 521 passing** (11 Oct 2026) — 68 pure domain (`packages/shared`), 453 API
+**Tests: 529 passing** (11 Oct 2026) — 68 pure domain (`packages/shared`), 461 API
 (`packages/api`, against real PostgreSQL via PGlite).
 
 ```bash
@@ -1271,3 +1272,69 @@ the same day. All in `documents.ts`; no data changes.
 - Test changed on purpose: trucks.test Point 5 expects "Electronic
   Transfers" without its colon (set as a heading).
 
+
+### New sale, one screen, 11 Oct 2026
+
+Everton's redesign of New order, worked through as mockups first (Design
+canvas "Alka Vida order screens", round 3 is what was built). His rulings:
+products from a **drop-down, product first then size** (several products
+will share a size); **one screen** for walk-ins and account customers, with
+a type-in customer search and a **Walk-in** button beside it; account
+customers' **payment at the end**, where collecting now or later is decided;
+money taken before delivery **sits as credit** and goes against the order's
+invoice when it is raised; customers can prepay or overpay; when a customer
+is chosen **their address shows**, with the other addresses to choose from;
+the finish button is **green like QuickBooks** (`--go: #108000`, 5.1:1).
+
+Screen (`pages/NewOrder.tsx`, styles under `.ns` at the end of styles.css):
+- Strip across the top: Customer (CustomerPicker + Walk-in, or the chosen
+  customer with price list / terms / balance chips and Change), How it goes
+  out (Taking it now = Counter, Collecting later = Pickup, We deliver =
+  Delivery), date, their PO. Under it: Deliver to (main + extra delivery
+  addresses, round note follows the address's zone) and Bill to (the billing
+  address, else the main one). Walk-in: name / phone / email inline; name +
+  phone puts them on file as a walk-in (found again by name + phone).
+- Products: a row per line, Product drop-down then Size drop-down. Product
+  and size come from the product NAME (`splitName`: the size at the end of
+  the name, e.g. "Alka Vida Purified 500ml" -> "Alka Vida Purified" /
+  "500ml"); a product with one size fills the size in. Qty selects on focus,
+  Enter goes to the next product. Rate stays editable per line. Empties box,
+  note (to the driver), Repeat as before.
+- Right: totals, then Payment. Account: Now / On delivery (only when we
+  deliver) / On account, defaulted from their terms. Now: method, amount for
+  this order (default = total less spare credit), reference, tick older open
+  invoices. Walk-in pays in full; cash received shows change. Receipt PDF
+  downloads after a counter sale; emailed if there is an address.
+
+Server:
+- Migration **023**: `payments.order_id` (the order money came in with, a
+  reference only) and `customer_orders.pay_when` ('Now' | 'On delivery' |
+  'On account').
+- `payments.applyAccountCredit(t, actor, invoiceId)`: a new invoice uses
+  money on the account - first what was paid with an order it bills, then
+  other money only as far as it is more than their other open invoices owe
+  (real credit). Money paid with ANOTHER order still to be delivered is kept
+  for it. Walk-in records are never touched. Called after `markStop` commits
+  (wrapped, never blocks a delivery - invariant 3) and inside
+  `invoiceAndTakePayment` (counter sale, collection). Cycle invoices keep
+  using `applyToInvoice`, which now also takes order-linked money first.
+- `delivery.owedAtStop`: what the driver collects = invoice total less money
+  on it from outside this round (or, before delivery, the order total less
+  what was paid with it / spare credit). The driver's stop shows "less $X
+  already paid or in credit" and what the office agreed (`pay_when`).
+- `POST /api/orders` takes `payment` {amountCents, method, reference,
+  allocations to older invoices, sendReceipt}: method checked before the
+  order is made; the rest kept for this order. `POST /api/counter-sale`
+  takes `olderPayment`, `reference`, `sendReceipt`, and returns `paymentIds`.
+- `customerHistory` returns `keptForOrdersCents`; `customerPrices` returns
+  `size`; the customer list returns `is_walk_in`; a walk-in may be put on
+  file without an email address.
+
+Tests: 529 passing (68 shared + 461 API). New `test/orderpayments.test.ts`
+(8). october.test "statements filtered by invoice state" now uses its own
+customer, because earlier tests leave money on the shared ones and that money
+is now (correctly) used by the next invoice.
+
+Not done: a separate "note on the invoice" (orders have one note, which the
+driver sees); a product line / size field on Products & pricing (the split
+comes from the name - name new products "<product> <size>").

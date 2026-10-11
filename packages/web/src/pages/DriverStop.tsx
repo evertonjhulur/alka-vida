@@ -64,6 +64,11 @@ interface Stop {
   accountBalanceCents?: number;
   /** Always tax-inclusive: the invoice total, or the order total before one exists. */
   amountOwedCents: number;
+  /** Paid with the order, or their credit, already off the figure (11 Oct 2026). */
+  alreadyPaidCents?: number;
+  grossCents?: number;
+  /** What the office agreed when taking the order. */
+  pay_when?: 'Now' | 'On delivery' | 'On account' | null;
   lines: StopLine[];
   openInvoices: OpenInvoice[];
 }
@@ -535,7 +540,9 @@ export default function DriverStop() {
           {(stop.laterPayments ?? []).map((p) => (
             <div key={p.id} className="total-line"><span>Added after · {(p.payment_method ?? 'Cash').toLowerCase()}</span><span>{money(Number(p.payment_amount_cents))}</span></div>
           ))}
-          <div className="small" style={{ margin: '6px 0 10px' }}>Invoice total <strong>{money(stop.amountOwedCents)}</strong> incl. GCT
+          <div className="small" style={{ margin: '6px 0 10px' }}>{(stop.alreadyPaidCents ?? 0) > 0
+              ? <>Left to pay <strong>{money(stop.amountOwedCents)}</strong> of {money(stop.grossCents ?? 0)} ({money(stop.alreadyPaidCents!)} paid ahead or credit)</>
+              : <>Invoice total <strong>{money(stop.amountOwedCents)}</strong></>} incl. GCT
             {(stop.accountBalanceCents ?? 0) > 0 && <> · on their account altogether <strong>{money(stop.accountBalanceCents!)}</strong></>}</div>
           {roundOpen ? (
             <div className="bottle-box">
@@ -566,6 +573,15 @@ export default function DriverStop() {
           <h2 className="side-h" style={{ margin: 0 }}>To collect</h2>
           <div className="owed">{money(stop.amountOwedCents)}</div>
         </div>
+        {(stop.alreadyPaidCents ?? 0) > 0 && (
+          <div className="small">Order {money(stop.grossCents ?? 0)}, less <strong>{money(stop.alreadyPaidCents!)}</strong> already paid or in credit.</div>
+        )}
+        {stop.pay_when === 'On account' && (
+          <div className="small"><strong>On account:</strong> the office agreed nothing is collected at the door.</div>
+        )}
+        {stop.pay_when === 'On delivery' && stop.amountOwedCents > 0 && (
+          <div className="small"><strong>Collect at the door:</strong> agreed when the order was taken.</div>
+        )}
         {(stop.accountBalanceCents ?? 0) > 0 && (
           <div className="small">On their account altogether: <strong>{money(stop.accountBalanceCents!)}</strong></div>
         )}

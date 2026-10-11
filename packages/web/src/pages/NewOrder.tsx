@@ -1,29 +1,38 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
-import { api, getSession, idempotencyKey } from '../lib/api';
+import { api, downloadPost, getSession, idempotencyKey } from '../lib/api';
 import { payMethods, useTakeCard } from '../lib/payments';
 import { money, day, date, todayInJamaica } from '../lib/format';
 import CustomerPicker from '../components/CustomerPicker';
 
 /**
- * New order, rebuilt from the approved mockup (29 Sep 2026).
+ * New sale, one screen (Everton, 11 Oct 2026; mockup "Alka Vida order
+ * screens", round 3).
  *
- * Left: who it is for (with what they owe and their terms, so nobody has to
- * look it up while on the phone), how it goes out, the date and which round
- * that puts it on, then what they want with − / + steppers and one-tap "Add"
- * buttons for the products not on the order yet. Right: "Repeat this order"
- * and the totals, GCT on the discounted figure exactly as the server does.
+ * One screen for a walk-in and for a customer with an account. Across the
+ * top: who it is for (type a name, or the Walk-in button), how it goes out
+ * and when, and - once a customer is chosen - the address it goes to, so the
+ * right one is seen before anything else. Below, the products on the left
+ * (product first, then its size, from drop-downs: several products share a
+ * size) and, on the right, the totals and then the payment, last.
+ *
+ * Payment: a walk-in pays in full now. A customer with an account is paid
+ * now, by the driver at the door, or on account. Money taken before delivery
+ * sits on their account and goes against this order's invoice the moment it
+ * is raised (server: payments.applyAccountCredit); credit they already hold
+ * is used first. Older invoices can be paid at the same time.
  */
 
 interface Product {
   id: string;
   name: string;
+  size?: string | null;
   bottles_per_case: number;
   price_per_case_cents: number;
   price_per_bottle_cents: number;
   is_returnable?: boolean;
   special_price?: boolean;
-  /** The 5-gallon bottle itself (7 Oct 2026, point 13). */
+  /** The 5-gallon bottle itself: only ever added for empties short. */
   is_bottle_charge?: boolean;
 }
 
@@ -31,54 +40,68 @@ interface Customer {
   id: string;
   name: string;
   phone: string | null;
+  email?: string | null;
   delivery_zone: string | null;
+  delivery_address?: string | null;
   price_tier: string | null;
   balance_cents: number | string | null;
   delivery_days?: string[] | null;
   zone_run_days?: string[] | null;
   invoice_cycle?: string | null;
   gct_exempt?: boolean;
-  /** A walk-in pays in full at the counter (point 12). */
+  payment_terms?: string | null;
   is_walk_in?: boolean;
 }
 
 interface Address {
-  id: string; label: string; is_delivery: boolean; delivery_zone: string | null;
-  address_line1: string | null; city: string | null;
+  id: string; label: string; is_delivery: boolean; is_billing?: boolean; delivery_zone: string | null;
+  address_line1: string | null; address_line2?: string | null; city: string | null; parish?: string | null;
 }
 
 interface History {
-  customer: { payment_terms: string | null; price_tier_name: string | null; delivery_zone: string | null };
-  invoices: Array<{ status: string; balance_cents: string }>;
+  customer: { payment_terms: string | null; price_tier_name: string | null; delivery_zone: string | null; delivery_address?: string | null };
+  invoices: Array<{
+    invoice_id: string; invoice_number: string; invoice_date: string; due_date: string | null;
+    status: string; balance_cents: string; is_credit_note: boolean;
+  }>;
   balanceCents: number;
+  /** Paid with orders still to be delivered: kept for them, not spare credit. */
+  keptForOrdersCents?: number;
 }
 
 interface Sheet {
   id: string; zone: string; delivery_date: string; status: string;
-  started_at: string | null; stop_count: number;
+  stop_count: number; started_at?: string | null;
 }
 
 interface Line {
+  key: number;
+  /** The product (its name without the size): the first drop-down. */
+  group: string;
+  /** The product in that size: the second drop-down. Blank until chosen. */
   productId: string;
-  qty: number;
+  qty: string;
   /** A price typed for this order only, in cents; null = their usual price. */
   price: number | null;
 }
 
-type Mode = 'Delivery' | 'Pickup' | 'Counter';
+type Who = 'none' | 'account' | 'walkin';
+type Mode = 'Counter' | 'Pickup' | 'Delivery';
+type PayWhen = 'Now' | 'On delivery' | 'On account';
 type Pattern = 'Weekly' | 'Biweekly' | 'Monthly';
 
 const GCT_RATE = 0.15;
 const MODES: Array<[Mode, string]> = [
+  ['Counter', 'Taking it now'],
+  ['Pickup', 'Collecting later'],
   ['Delivery', 'We deliver'],
-  ['Pickup', 'They collect'],
-  ['Counter', 'Counter sale, paid now'],
 ];
 const PATTERNS: Array<[Pattern, string]> = [
   ['Weekly', 'Every week'],
   ['Biweekly', 'Every 2 weeks'],
   ['Monthly', 'Every month'],
 ];
+const METHODS = [['Cash', 'Cash'], ['Bank Transfer', 'Transfer'], ['Cheque', 'Cheque'], ['Card', 'Card']] as const;
 
 const WEEK = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
 const WEEKDAY = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
@@ -99,16 +122,11 @@ const nextRunDate = (from: string, days: string[]) => {
   }
   return from;
 };
-
-/** "Alka Vida 500ml" reads as "500ml": every product is Alka Vida. */
-const shortName = (n: string) => n.replace(/^Alka Vida\s+/i, '');
-
 /** The same rule as the server's nextOccurrence: +7, +14, or +1 month clamped. */
 function nextAfter(iso: string, p: Pattern): string {
   const [y, m, d] = iso.split('-').map(Number);
   if (p !== 'Monthly') {
-    const t = new Date(Date.UTC(y, m - 1, d + (p === 'Weekly' ? 7 : 14)));
-    return t.toISOString().slice(0, 10);
+    return new Date(Date.UTC(y, m - 1, d + (p === 'Weekly' ? 7 : 14))).toISOString().slice(0, 10);
   }
   const ny = m === 12 ? y + 1 : y;
   const nm = m === 12 ? 1 : m + 1;
@@ -116,286 +134,451 @@ function nextAfter(iso: string, p: Pattern): string {
   return `${ny}-${String(nm).padStart(2, '0')}-${String(Math.min(d, last)).padStart(2, '0')}`;
 }
 
+/*
+ * Product, then size. A product's name carries its size at the end ("Alka
+ * Vida 500ml", "Alka Vida Purified 1.5L", "Alka Vida 5 Gallon"): what comes
+ * before it is the product in the first drop-down, the size the second.
+ */
+const SIZE_AT_END = /\s+(\d+(?:\.\d+)?\s*(?:ml|l|ltr|litres?|liters?|gal|gallons?|oz))$/i;
+function splitName(p: Product): { group: string; size: string } {
+  const m = p.name.match(SIZE_AT_END);
+  if (m && m.index !== undefined) return { group: p.name.slice(0, m.index).trim(), size: m[1] };
+  return { group: p.name, size: p.size?.trim() || 'Each' };
+}
+/** Sizes in order of volume, smallest first. */
+function sizeMl(size: string): number {
+  const m = size.match(/(\d+(?:\.\d+)?)\s*(ml|l|ltr|litres?|liters?|gal|gallons?|oz)?/i);
+  if (!m) return Number.MAX_SAFE_INTEGER;
+  const n = Number(m[1]);
+  const u = (m[2] ?? '').toLowerCase();
+  if (u.startsWith('gal')) return n * 3785;
+  if (u === 'oz') return n * 29.6;
+  if (u === 'ml') return n;
+  return n * 1000;
+}
+
+const listPriceOf = (p: Product) => (p.bottles_per_case > 0
+  ? Number(p.price_per_case_cents) : Number(p.price_per_bottle_cents));
+const priceOf = (p: Product, l?: Line) => (l?.price ?? listPriceOf(p));
+const unitOf = (p: Product) => (p.bottles_per_case > 0 ? 'cs' : 'btl');
+const packOf = (p: Product) => (p.bottles_per_case > 0 ? `${p.bottles_per_case}/case` : 'each');
+const centsOf = (typed: string) => Math.max(0, Math.round((Number(String(typed).replace(/[,$\s]/g, '')) || 0) * 100));
+
+let nextKey = 1;
+
 export default function NewOrder() {
   const takeCard = useTakeCard();
-  // Arriving from "+ New > Counter sale" (?mode=Counter) or from a customer's
-  // page (?customer=<id>) starts the form there instead of blank.
   const [params] = useSearchParams();
   const startMode = params.get('mode');
+  const startWho: Who = startMode === 'Counter' ? 'walkin' : 'none';
+  const isAdmin = getSession()?.role === 'admin';
+  const today = todayInJamaica();
+
+  const [listProducts, setListProducts] = useState<Product[]>([]);
   const [products, setProducts] = useState<Product[]>([]);
   const [customers, setCustomers] = useState<Customer[]>([]);
+
+  const [who, setWho] = useState<Who>(params.get('customer') ? 'account' : startWho);
   const [customerId, setCustomerId] = useState(params.get('customer') ?? '');
-  const [history, setHistory] = useState<History | null>(null);
-  const [deliveryMode, setDeliveryMode] =
-    useState<Mode>(startMode === 'Counter' || startMode === 'Pickup' ? startMode : 'Delivery');
-  const [method, setMethod] = useState('Cash');
-  // A walk-in is often not on file yet, and a receipt needs a name to carry.
-  const [quickAdd, setQuickAdd] = useState(false);
   const [walkIn, setWalkIn] = useState({ name: '', phone: '', email: '' });
-  // Jamaica's day, not UTC: after 7pm UTC is already tomorrow.
-  const [requestedDate, setRequestedDate] = useState(todayInJamaica());
+  const [history, setHistory] = useState<History | null>(null);
+  const [addresses, setAddresses] = useState<Address[]>([]);
+
+  const [mode, setMode] = useState<Mode>(startMode === 'Pickup' ? 'Pickup' : 'Delivery');
+  const [requestedDate, setRequestedDate] = useState(today);
+  const [customerPo, setCustomerPo] = useState('');
+  const [addressId, setAddressId] = useState('');
   const [sheets, setSheets] = useState<Sheet[] | null>(null);
+  const [cutoff, setCutoff] = useState('10:00');
+
+  const [lines, setLines] = useState<Line[]>([]);
+  const [emptiesBack, setEmptiesBack] = useState('');
   const [discount, setDiscount] = useState('0');
   const [discountAs, setDiscountAs] = useState<'%' | '$'>('%');
   const [chargeGct, setChargeGct] = useState(true);
-  const [addresses, setAddresses] = useState<Address[]>([]);
-  const [addressId, setAddressId] = useState('');
-  const [repeatDays, setRepeatDays] = useState<string[]>([]);
-  const [lines, setLines] = useState<Line[]>([]);
-  const [paidNow, setPaidNow] = useState('');
-  const [emptiesBack, setEmptiesBack] = useState('');
+  const [note, setNote] = useState('');
+  const [noteOpen, setNoteOpen] = useState(false);
   const [repeat, setRepeat] = useState(false);
   const [pattern, setPattern] = useState<Pattern>('Weekly');
-  const [result, setResult] = useState<{ text: string; customerId: string } | null>(null);
+  const [repeatDays, setRepeatDays] = useState<string[]>([]);
+
+  const [payWhen, setPayWhen] = useState<PayWhen>('Now');
+  const [method, setMethod] = useState('Cash');
+  const [amount, setAmount] = useState<string | null>(null);
+  const [reference, setReference] = useState('');
+  const [older, setOlder] = useState<string[]>([]);
+  const [emailReceipt, setEmailReceipt] = useState(true);
+
+  const [result, setResult] = useState<{
+    text: string; customerId: string | null; paymentIds: string[]; receiptName: string;
+  } | null>(null);
   const [warnings, setWarnings] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [customerPo, setCustomerPo] = useState('');
-  /** The same-day cut-off (team feedback, point 10.2). */
-  const [cutoff, setCutoff] = useState('10:00');
-  const isAdmin = getSession()?.role === 'admin';
+  const saleKey = useRef(idempotencyKey('sale'));
+
   const nowHm = new Intl.DateTimeFormat('en-GB', { timeZone: 'America/Jamaica', hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date());
   const pastCutoff = nowHm >= cutoff;
-  useEffect(() => {
-    api.get<{ sameDayCutoff: string }>('/api/settings/ordering').then((o) => {
-      setCutoff(o.sameDayCutoff || '10:00');
-      // After the cut-off, a new delivery starts on tomorrow rather than today.
-      const hm = new Intl.DateTimeFormat('en-GB', { timeZone: 'America/Jamaica', hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date());
-      if (hm >= (o.sameDayCutoff || '10:00') && startMode !== 'Counter' && startMode !== 'Pickup') {
-        setRequestedDate((d) => (d === todayInJamaica() ? addDays(d, 1) : d));
-      }
-    }).catch(() => {});
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
-    api.get<Product[]>('/api/products').then(setProducts).catch(() => {});
+    api.get<Product[]>('/api/products').then((p) => { setListProducts(p); setProducts(p); }).catch(() => {});
     api.get<Customer[]>('/api/customers').then(setCustomers).catch(() => {});
+    api.get<{ sameDayCutoff: string }>('/api/settings/ordering')
+      .then((o) => setCutoff(o.sameDayCutoff || '10:00')).catch(() => {});
   }, []);
 
-  const customer = customers.find((c) => c.id === customerId);
+  const customer = who === 'account' ? customers.find((c) => c.id === customerId) : undefined;
+  const isWalkIn = who === 'walkin';
+  const isAccount = who === 'account' && !!customer;
+  const outMode: Mode = isAccount ? mode : 'Counter';
 
-  // Re-price against the selected customer's tier, and read what they owe.
+  // Their prices, what they owe and their addresses, when a customer is chosen.
   useEffect(() => {
     setHistory(null);
-    if (!customerId) {
-      api.get<Product[]>('/api/products').then(setProducts).catch(() => {});
+    setAddresses([]);
+    setAddressId('');
+    setOlder([]);
+    if (who !== 'account' || !customerId) {
+      setProducts(listProducts);
       return;
     }
     api.get<Array<Product & { product_id: string }>>(`/api/customers/${customerId}/prices`)
-      .then((rows) => setProducts(rows.map((r) => ({ ...r, id: r.product_id }))))
-      .catch(() => {});
+      .then((rows) => setProducts(rows.map((r) => ({ ...r, id: r.product_id })))).catch(() => {});
     api.get<History>(`/api/customers/${customerId}/history`).then(setHistory).catch(() => {});
-    api.get<Address[]>(`/api/customers/${customerId}/addresses`)
-      .then((a) => setAddresses(a.filter((x) => x.is_delivery))).catch(() => setAddresses([]));
-    setAddressId('');
-  }, [customerId]);
+    api.get<Address[]>(`/api/customers/${customerId}/addresses`).then(setAddresses).catch(() => {});
+  }, [who, customerId, listProducts]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // A new customer brings their own GCT position, delivery days and the next
-  // day their round runs (Everton, 30 Sep 2026).
+  // A customer brings their GCT position, delivery days and next run day.
   useEffect(() => {
-    const c = customers.find((x) => x.id === customerId);
-    if (!c) return;
-    setChargeGct(!c.gct_exempt);
-    const days = (c.delivery_days?.length ? c.delivery_days : c.zone_run_days) ?? [];
+    if (!customer) { setChargeGct(true); return; }
+    setChargeGct(!customer.gct_exempt);
+    const days = (customer.delivery_days?.length ? customer.delivery_days : customer.zone_run_days) ?? [];
     setRepeatDays(days.length ? [...days] : []);
-    if (deliveryMode === 'Delivery' && days.length) {
-      setRequestedDate(nextRunDate(todayInJamaica(), days));
-    }
-  }, [customerId, customers.length]); // eslint-disable-line react-hooks/exhaustive-deps
+    const start = pastCutoff ? addDays(today, 1) : today;
+    setRequestedDate(days.length ? nextRunDate(start, days) : start);
+    // Their terms suggest when payment is collected; the office can change it.
+    const terms = customer.payment_terms ?? '';
+    setPayWhen(customer.invoice_cycle === 'Weekly' || customer.invoice_cycle === 'Monthly'
+      || /net|account|credit|\bdays?\b/i.test(terms) ? 'On account'
+      : /deliver|c\.?o\.?d/i.test(terms) ? 'On delivery' : 'Now');
+    setAmount(null);
+  }, [customer?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const deliveryAddresses = addresses.filter((a) => a.is_delivery);
+  const address = deliveryAddresses.find((a) => a.id === addressId) ?? null;
+  const zone = address?.delivery_zone ?? history?.customer.delivery_zone ?? customer?.delivery_zone ?? null;
 
   // Which round the date puts it on.
   useEffect(() => {
     setSheets(null);
-    if (deliveryMode !== 'Delivery' || !requestedDate) return;
+    if (outMode !== 'Delivery' || !requestedDate) return;
     api.get<Sheet[]>(`/api/delivery-sheets?date=${requestedDate}`).then(setSheets).catch(() => {});
-  }, [deliveryMode, requestedDate]);
+  }, [outMode, requestedDate]);
+
+  // A different delivery address can mean a different zone, so a different day.
+  useEffect(() => {
+    if (!address?.delivery_zone || outMode !== 'Delivery') return;
+    api.get<Array<{ name: string; run_days?: string[] }>>('/api/zones')
+      .then((zs) => {
+        const z = zs.find((x) => x.name === address.delivery_zone);
+        if (z?.run_days?.length) setRequestedDate(nextRunDate(pastCutoff ? addDays(today, 1) : today, z.run_days));
+      }).catch(() => {});
+  }, [addressId]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  /* ---------------- products ---------------- */
 
   const productOf = (id: string) => products.find((p) => p.id === id);
+  const groups = useMemo(() => {
+    const m = new Map<string, Array<Product & { sizeLabel: string }>>();
+    for (const p of products) {
+      if (p.is_bottle_charge) continue;
+      const { group, size } = splitName(p);
+      if (!m.has(group)) m.set(group, []);
+      m.get(group)!.push({ ...p, sizeLabel: size });
+    }
+    for (const list of m.values()) list.sort((a, b) => sizeMl(a.sizeLabel) - sizeMl(b.sizeLabel));
+    return [...m.entries()].sort((a, b) => a[0].localeCompare(b[0]));
+  }, [products]);
+  const sizesOf = (group: string) => groups.find(([g]) => g === group)?.[1] ?? [];
 
-  /** Put a walk-in on file: a receipt has to carry a name, phone and email. */
-  async function addWalkIn() {
-    setBusy(true); setError(null);
-    try {
-      const made = await api.post<{ id: string }>('/api/customers', {
-        name: walkIn.name, phone: walkIn.phone, email: walkIn.email,
-        // A walk-in pays in full (point 12); untick on their record to give them an account.
-        isWalkIn: true,
-      });
-      setCustomers(await api.get<Customer[]>('/api/customers'));
-      setCustomerId(made.id);
-      setQuickAdd(false);
-      setWalkIn({ name: '', phone: '', email: '' });
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Could not add the customer');
-    } finally { setBusy(false); }
+  const focusSoon = (id: string) => window.setTimeout(() => document.getElementById(id)?.focus(), 0);
+  function chooseGroup(key: number | null, group: string) {
+    if (!group) return;
+    const sizes = sizesOf(group);
+    // One size only: it is chosen too, and the cursor goes to the quantity.
+    const only = sizes.length === 1 ? sizes[0].id : '';
+    if (key === null) {
+      const k = nextKey++;
+      setLines((cur) => [...cur, { key: k, group, productId: only, qty: only ? '1' : '', price: null }]);
+      focusSoon(only ? `ns-qty-${k}` : `ns-size-${k}`);
+    } else {
+      setLines((cur) => cur.map((l) => (l.key === key && l.group !== group
+        ? { ...l, group, productId: only, qty: only ? (l.qty || '1') : l.qty, price: null } : l)));
+      focusSoon(only ? `ns-qty-${key}` : `ns-size-${key}`);
+    }
   }
+  const chooseSize = (key: number, productId: string) => {
+    setLines((cur) => cur.map((l) => (l.key === key ? { ...l, productId, qty: l.qty || '1', price: null } : l)));
+    if (productId) focusSoon(`ns-qty-${key}`);
+  };
+  const setQty = (key: number, typed: string) => setLines((cur) => cur.map((l) => (
+    l.key === key ? { ...l, qty: typed.replace(/[^0-9]/g, '').slice(0, 5) } : l)));
+  const setPrice = (key: number, typed: string) => setLines((cur) => cur.map((l) => {
+    if (l.key !== key) return l;
+    const p = productOf(l.productId);
+    if (typed.trim() === '') return { ...l, price: null };
+    const cents = centsOf(typed);
+    return { ...l, price: p && cents === listPriceOf(p) ? null : cents };
+  }));
+  const removeLine = (key: number) => setLines((cur) => cur.filter((l) => l.key !== key));
+  const qtyOf = (l: Line) => Math.max(0, Number(l.qty) || 0);
 
-  const listPriceOf = (p: Product) => (p.bottles_per_case > 0
-    ? Number(p.price_per_case_cents) : Number(p.price_per_bottle_cents));
-  /** The price on this line: typed for this order, else their usual. */
-  const priceOf = (p: Product, l?: Line) => (l?.price ?? listPriceOf(p));
+  /* ---------------- totals (the server's calculation, exactly) ---------------- */
 
-  /**
-   * Live totals, mirroring the server calculation exactly: GCT is charged on
-   * the POST-discount subtotal, so the figure shown is the real amount.
-   */
-  /*
-   * 5-gallon empties (point 13): full bottles on the order, against the
-   * empties they hand over. The shortfall is bought, as "5-gallon bottle" at
-   * its price on Products - unless the office has put the bottle on the
-   * order itself.
-   */
   const bottleProduct = products.find((p) => p.is_bottle_charge) ?? null;
   const fullFives = lines.reduce((n, l) => {
     const p = productOf(l.productId);
-    return p?.is_returnable ? n + l.qty * (p.bottles_per_case > 0 ? p.bottles_per_case : 1) : n;
+    return p?.is_returnable ? n + qtyOf(l) * (p.bottles_per_case > 0 ? p.bottles_per_case : 1) : n;
   }, 0);
   const bottleOnOrder = !!bottleProduct && lines.some((l) => l.productId === bottleProduct.id);
   const emptiesN = emptiesBack === '' ? null : Math.max(0, Math.round(Number(emptiesBack)) || 0);
   const shortfall = fullFives > 0 && emptiesN !== null && !bottleOnOrder && bottleProduct
     ? Math.max(0, fullFives - emptiesN) : 0;
-  const isWalkIn = deliveryMode === 'Counter' && (!customerId || !!customer?.is_walk_in);
 
   const totals = useMemo(() => {
     let subtotal = 0;
     for (const l of lines) {
       const p = productOf(l.productId);
-      if (!p || l.qty <= 0) continue;
-      subtotal += l.qty * priceOf(p, l);
+      if (!p || qtyOf(l) <= 0) continue;
+      subtotal += qtyOf(l) * priceOf(p, l);
     }
     if (shortfall > 0 && bottleProduct) subtotal += shortfall * priceOf(bottleProduct);
-    const fixed = discountAs === '$' ? Math.max(0, Math.round((Number(discount) || 0) * 100)) : 0;
+    const fixed = discountAs === '$' ? centsOf(discount) : 0;
     const pct = discountAs === '%' ? Math.min(Math.max(Number(discount) || 0, 0), 100) : 0;
     const discountAmount = fixed > 0 ? Math.min(fixed, subtotal) : Math.round(subtotal * (pct / 100));
     const net = subtotal - discountAmount;
     const gct = chargeGct ? Math.round(net * GCT_RATE) : 0;
     return { subtotal, discountAmount, gct, grandTotal: net + gct, fixed, pct };
-  }, [lines, discount, discountAs, chargeGct, products, shortfall]);
+  }, [lines, discount, discountAs, chargeGct, products, shortfall]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const setQty = (id: string, qty: number) => setLines((cur) => cur.map((l) => (
-    l.productId === id ? { ...l, qty: Math.max(0, Math.min(99999, Math.round(qty) || 0)) } : l)));
-  const setPrice = (id: string, typed: string) => setLines((cur) => cur.map((l) => {
-    if (l.productId !== id) return l;
-    const p = productOf(id);
-    if (typed.trim() === '') return { ...l, price: null };
-    const cents = Math.max(0, Math.round(Number(typed) * 100) || 0);
-    return { ...l, price: p && cents === listPriceOf(p) ? null : cents };
-  }));
-  const addProduct = (id: string) => setLines((cur) => [...cur, { productId: id, qty: 1, price: null }]);
-  const removeLine = (id: string) => setLines((cur) => cur.filter((l) => l.productId !== id));
-  // The 5-gallon bottle charge is not offered as a product to add (UX
-  // review, 11 Oct 2026): it comes from the empties box below, for the
-  // bottles not handed back. One already on an order still shows.
-  const notYet = products.filter((p) => !p.is_bottle_charge && !lines.some((l) => l.productId === p.id));
+  /* ---------------- payment ---------------- */
 
-  const address = addresses.find((a) => a.id === addressId) ?? null;
-  const zone = address?.delivery_zone ?? history?.customer.delivery_zone ?? customer?.delivery_zone ?? null;
-  const zoneDays = address ? [] : (customer?.zone_run_days ?? []);
-  const offDay = deliveryMode === 'Delivery' && zoneDays.length > 0 && requestedDate
-    && !zoneDays.includes(weekdayOf(requestedDate));
-  const round = sheets?.find((s) => s.zone === zone && s.status === 'Open') ?? null;
-  const canRepeat = deliveryMode !== 'Counter';
+  const balance = history?.balanceCents ?? Number(customer?.balance_cents ?? 0);
+  const credit = isAccount ? Math.max(0, -balance - (history?.keptForOrdersCents ?? 0)) : 0;
+  const due = Math.max(0, totals.grandTotal - credit);
+  const onCycle = customer?.invoice_cycle === 'Weekly' || customer?.invoice_cycle === 'Monthly';
+  const termsWords = onCycle ? `their ${customer!.invoice_cycle!.toLowerCase()} invoice`
+    : customer?.payment_terms ? `their ${customer.payment_terms} terms` : 'their terms';
+  const whens: Array<[PayWhen, string]> = [
+    ['Now', 'Now'],
+    ...(outMode === 'Delivery' ? [['On delivery', 'On delivery'] as [PayWhen, string]] : []),
+    ['On account', 'On account'],
+  ];
+  const when: PayWhen = isWalkIn ? 'Now'
+    : payWhen === 'On delivery' && outMode !== 'Delivery' ? 'On account' : payWhen;
+  const takingNow = isWalkIn || (isAccount && when === 'Now');
+  const amountTyped = amount ?? ((isWalkIn ? totals.grandTotal : due) / 100).toFixed(2);
+  const amountCents = centsOf(amountTyped);
+  const openOlder = (history?.invoices ?? [])
+    .filter((i) => !i.is_credit_note && Number(i.balance_cents) > 0 && i.status !== 'Cancelled')
+    .sort((a, b) => a.invoice_date.localeCompare(b.invoice_date));
+  const olderCents = isAccount && takingNow
+    ? openOlder.filter((i) => older.includes(i.invoice_id)).reduce((n, i) => n + Number(i.balance_cents), 0) : 0;
+  const forOrder = isAccount && takingNow ? amountCents : 0;
+  const taking = forOrder + olderCents;
+  // Money paid ahead on other orders is theirs to settle, not spare credit.
+  const after = balance + (history?.keptForOrdersCents ?? 0) + totals.grandTotal - taking;
+  const methods = payMethods(METHODS, takeCard);
+  const walkInShort = isWalkIn && amountCents < totals.grandTotal;
 
-  async function submit(e: React.FormEvent) {
-    e.preventDefault();
+  const amountNote = (() => {
+    if (isWalkIn) {
+      if (method !== 'Cash') return walkInShort ? <span className="bad-text">A walk-in pays in full: {money(totals.grandTotal)}.</span> : null;
+      const diff = amountCents - totals.grandTotal;
+      return diff >= 0
+        ? <strong className="ns-change">Change to give: {money(diff)}</strong>
+        : <strong className="bad-text">Still to pay: {money(-diff)}</strong>;
+    }
+    if (!takingNow) return null;
+    const d = amountCents - due;
+    if (d > 0) return <>{money(d)} over stays on their account as credit.</>;
+    if (d < 0) return <>Part payment: {money(-d)} left on {termsWords}.</>;
+    if (due === 0 && amountCents === 0) return <>Their credit covers it; nothing to take.</>;
+    return <>Pays this order in full.</>;
+  })();
+
+  /* ---------------- choosing who ---------------- */
+
+  function chooseCustomer(id: string) {
+    const c = customers.find((x) => x.id === id);
+    if (c?.is_walk_in) {
+      // A walk-in already on file: their details on the receipt, paid in full.
+      setWho('walkin');
+      setCustomerId(c.id);
+      setWalkIn({ name: c.name === 'Cash Walk-In' ? '' : c.name, phone: c.phone && c.phone !== '000' ? c.phone : '', email: c.email ?? '' });
+    } else {
+      setWho('account');
+      setCustomerId(id);
+    }
+    setAmount(null);
+    setResult(null);
+  }
+  function chooseWalkIn() {
+    setWho('walkin');
+    setCustomerId('');
+    setWalkIn({ name: '', phone: '', email: '' });
+    setMethod('Cash');
+    setAmount(null);
+    setResult(null);
+  }
+  function changeWho() {
+    setWho('none');
+    setCustomerId('');
+    setAmount(null);
+  }
+
+  /** A walk-in who gave a name and phone is put on file (or found there) for the receipt. */
+  async function walkInRecord(): Promise<string | null> {
+    if (customerId) return customerId;
+    const name = walkIn.name.trim();
+    const phone = walkIn.phone.trim();
+    if (!name || !phone) return null;
+    const digits = phone.replace(/\D/g, '');
+    const known = customers.find((c) => c.is_walk_in && (c.phone ?? '').replace(/\D/g, '') === digits
+      && c.name.toLowerCase() === name.toLowerCase());
+    if (known) return known.id;
+    const made = await api.post<{ id: string }>('/api/customers', {
+      name, phone, email: walkIn.email.trim(), isWalkIn: true,
+    });
+    return made.id;
+  }
+
+  function reset() {
+    setLines([]);
+    setEmptiesBack('');
+    setDiscount('0');
+    setDiscountAs('%');
+    setNote('');
+    setNoteOpen(false);
+    setRepeat(false);
+    setAmount(null);
+    setReference('');
+    setOlder([]);
+    setCustomerPo('');
+    setAddressId('');
+    setMode(startMode === 'Pickup' ? 'Pickup' : 'Delivery');
+    setWho(startWho);
+    setCustomerId('');
+    setWalkIn({ name: '', phone: '', email: '' });
+    saleKey.current = idempotencyKey('sale');
+  }
+
+  /* ---------------- finishing ---------------- */
+
+  async function finish() {
     setBusy(true); setError(null); setResult(null); setWarnings([]);
-
-    // The case-vs-bottle rule decides which field a quantity belongs in.
-    // A price typed on a line travels with it as an override; otherwise the
-    // server charges their usual price, exactly as shown.
     const payloadLines = lines
-      .filter((l) => l.qty > 0 && productOf(l.productId))
+      .filter((l) => qtyOf(l) > 0 && productOf(l.productId))
       .map((l) => {
         const cased = productOf(l.productId)!.bottles_per_case > 0;
-        const price = l.price === null ? {}
-          : cased ? { pricePerCaseCents: l.price } : { pricePerBottleCents: l.price };
+        const price = l.price === null ? {} : cased ? { pricePerCaseCents: l.price } : { pricePerBottleCents: l.price };
         return cased
-          ? { productId: l.productId, cases: l.qty, ...price }
-          : { productId: l.productId, looseBottles: l.qty, ...price };
+          ? { productId: l.productId, cases: qtyOf(l), ...price }
+          : { productId: l.productId, looseBottles: qtyOf(l), ...price };
       });
-    const money_ = {
-      discountPercent: totals.pct,
-      discountFixedCents: totals.fixed,
-      gctExempt: !chargeGct,
-    };
-
-    if (payloadLines.length === 0) {
-      setError('Add at least one product.');
-      setBusy(false);
-      return;
-    }
+    const fail = (m: string) => { setError(m); setBusy(false); };
+    if (payloadLines.length === 0) return fail('Add at least one product, with its size and how many.');
+    if (lines.some((l) => l.group && !l.productId)) return fail('Choose the size for every product, or remove the line.');
     if (fullFives > 0 && emptiesN === null && !bottleOnOrder) {
-      setError(deliveryMode === 'Counter' ? 'How many 5-gallon empties did they hand in? Put 0 if none.'
-        : 'How many 5-gallon empties will they hand over? Put 0 if none.');
-      setBusy(false);
-      return;
+      return fail(outMode === 'Delivery' ? 'How many 5-gallon empties will they hand over? Put 0 if none.'
+        : 'How many 5-gallon empties did they hand in? Put 0 if none.');
     }
-    const paidTyped = paidNow.trim() === '' ? null : Math.round(Number(paidNow) * 100);
-    if (deliveryMode === 'Counter' && isWalkIn && paidTyped !== null && paidTyped < totals.grandTotal) {
-      setError(`A walk-in pays in full (${money(totals.grandTotal)}). To take part payment, choose their customer account first, or add them.`);
-      setBusy(false);
-      return;
-    }
+    if (walkInShort) return fail(`A walk-in pays in full: ${money(totals.grandTotal)}. To take part payment, choose their customer account.`);
+    const money_ = { discountPercent: totals.pct, discountFixedCents: totals.fixed, gctExempt: !chargeGct };
+    const older_ = openOlder.filter((i) => older.includes(i.invoice_id))
+      .map((i) => ({ invoiceId: i.invoice_id, amountCents: Number(i.balance_cents) }));
 
-    const who = customer?.name ?? (deliveryMode === 'Counter' ? 'a walk-in' : 'the customer');
     try {
-      if (deliveryMode === 'Counter') {
-        // A counter sale creates the invoice and payment in one motion.
+      if (outMode === 'Counter') {
+        // Invoice and payment in one motion, at the counter.
+        const id = isWalkIn ? await walkInRecord() : customerId;
+        const email = isWalkIn ? walkIn.email.trim() : customer?.email ?? '';
+        const paidNow = isWalkIn ? totals.grandTotal : (takingNow ? amountCents : 0);
         const sale = await api.post<{
-          invoiceNumber: string; grandTotalCents: number; balanceCents: number;
+          invoiceNumber: string; grandTotalCents: number; balanceCents: number; paymentIds?: string[];
+          paymentError?: string; receipt?: { sentTo: string }; receiptError?: string;
         }>('/api/counter-sale', {
-          // Blank: a walk-in, on the shared Cash Walk-In record.
-          customerId: customerId || null,
+          customerId: id || null,
           lines: payloadLines,
           ...money_,
-          // Blank means paid in full (a walk-in always is).
-          amountPaidCents: paidTyped ?? (isWalkIn ? null : totals.grandTotal),
+          amountPaidCents: paidNow,
           method,
+          reference: reference.trim() || null,
+          notes: note.trim() || null,
           emptiesReturned: fullFives > 0 ? (emptiesN ?? 0) : null,
-          idempotencyKey: idempotencyKey('counter'),
+          idempotencyKey: saleKey.current,
+          sendReceipt: emailReceipt && !!email && paidNow > 0,
+          receiptTo: email || undefined,
+          olderPayment: older_.length ? {
+            amountCents: older_.reduce((n, o) => n + o.amountCents, 0), method,
+            reference: reference.trim() || null, allocations: older_,
+          } : undefined,
         });
+        const warn: string[] = [];
+        if (sale.paymentError) warn.push(`The sale is done, but the payment on older invoices was not recorded: ${sale.paymentError}`);
+        if (sale.receiptError) warn.push(`The receipt was not emailed: ${sale.receiptError}`);
+        setWarnings(warn);
+        const who_ = isWalkIn ? (walkIn.name.trim() || 'a walk-in') : customer?.name ?? 'the customer';
+        const ids = sale.paymentIds ?? [];
         setResult({
-          customerId,
-          text: `Counter sale for ${who} done. Invoice ${sale.invoiceNumber} for ` +
-            `${money(sale.grandTotalCents)}, balance ${money(sale.balanceCents)}.`,
+          customerId: isWalkIn ? null : customerId, paymentIds: ids, receiptName: `Receipt ${sale.invoiceNumber}.pdf`,
+          text: `Sale to ${who_} done. Invoice ${sale.invoiceNumber} for ${money(sale.grandTotalCents)}, `
+            + (sale.balanceCents > 0 ? `${money(sale.balanceCents)} left on account.` : 'paid.')
+            + (isWalkIn && method === 'Cash' && amountCents > totals.grandTotal ? ` Change given: ${money(amountCents - totals.grandTotal)}.` : '')
+            + (sale.receipt ? ` Receipt emailed to ${sale.receipt.sentTo}.` : ''),
         });
+        // The printed receipt, straight away.
+        if (ids.length) void downloadPost('/api/receipts.pdf', { paymentIds: ids }, `Receipt ${sale.invoiceNumber}.pdf`).catch(() => {});
       } else {
+        const payment = takingNow && taking > 0 ? {
+          amountCents: taking, method, reference: reference.trim() || null, paymentDate: today,
+          allocations: older_, idempotencyKey: saleKey.current,
+          sendReceipt: emailReceipt && !!customer?.email,
+        } : undefined;
         const order = await api.post<{
-          id: string; orderNumber: string; grandTotalCents: number;
-          deliverySheetId: string | null; warnings: string[];
+          id: string; orderNumber: string; grandTotalCents: number; deliverySheetId: string | null;
+          warnings: string[]; needsReview?: boolean; paymentIds?: string[]; paymentError?: string;
+          receipt?: { sentTo: string }; receiptError?: string;
         }>('/api/orders', {
           customerId,
-          deliveryMode,
+          deliveryMode: outMode,
           requestedDeliveryDate: requestedDate,
-          addressId: deliveryMode === 'Delivery' ? (addressId || null) : null,
+          addressId: outMode === 'Delivery' ? (addressId || null) : null,
           customerPo: customerPo || null,
+          notes: note.trim() || null,
           ...money_,
           lines: payloadLines,
           emptiesExpected: fullFives > 0 && !bottleOnOrder ? emptiesN : null,
+          payWhen: when,
+          payment,
         });
         const warn = [...(order.warnings ?? [])];
+        if (order.paymentError) warn.push(`The order is made, but the payment was not recorded: ${order.paymentError}. Record it on Payments.`);
+        if (order.receiptError) warn.push(`The receipt was not emailed: ${order.receiptError}`);
         let repeatText = '';
         if (repeat) {
           try {
-            const r = await api.post<{ nextDeliveryDate: string }>(
-              `/api/orders/${order.id}/recurring`, { pattern },
-            );
-            repeatText = ` It repeats ${PATTERNS.find(([p]) => p === pattern)![1].toLowerCase()}; ` +
-              `the next is for ${day(r.nextDeliveryDate)}.`;
-            /*
-             * Several days a week (Everton, 30 Sep 2026): this order is the
-             * standing order for its own day; each other day chosen gets its
-             * own weekly standing order, starting on the next such day.
-             */
+            const r = await api.post<{ nextDeliveryDate: string }>(`/api/orders/${order.id}/recurring`, { pattern });
+            repeatText = ` It repeats ${PATTERNS.find(([p]) => p === pattern)![1].toLowerCase()}; the next is for ${day(r.nextDeliveryDate)}.`;
+            // Several days a week: each other day is its own weekly standing order.
             if (pattern === 'Weekly') {
-              const others = repeatDays.filter((d) => d !== weekdayOf(requestedDate));
               const extra: string[] = [];
-              for (const d of others) {
+              for (const d of repeatDays.filter((x) => x !== weekdayOf(requestedDate))) {
                 const first = nextRunDate(addDays(requestedDate, 1), [d]);
                 const o2 = await api.post<{ id: string }>('/api/orders', {
-                  customerId, deliveryMode, requestedDeliveryDate: first,
-                  addressId: deliveryMode === 'Delivery' ? (addressId || null) : null,
-                  ...money_, lines: payloadLines,
+                  customerId, deliveryMode: outMode, requestedDeliveryDate: first,
+                  addressId: outMode === 'Delivery' ? (addressId || null) : null,
+                  ...money_, lines: payloadLines, payWhen: when === 'Now' ? 'On account' : when,
                 });
                 await api.post(`/api/orders/${o2.id}/recurring`, { pattern: 'Weekly' });
                 extra.push(`${d} (first ${day(first)})`);
@@ -403,448 +586,467 @@ export default function NewOrder() {
               if (extra.length) repeatText += ` Also every ${extra.join(', ')}.`;
             }
           } catch (err) {
-            warn.push(`The order was made, but it could not be set to repeat: ${
-              err instanceof Error ? err.message : 'unknown error'}. Use ⋯ on Orders to try again.`);
+            warn.push(`The order was made, but it could not be set to repeat: ${err instanceof Error ? err.message : 'unknown error'}. Use ⋯ on Orders to try again.`);
           }
         }
         setWarnings(warn);
+        const paidText = payment && !order.paymentError ? ` ${money(taking)} recorded${order.receipt ? `, receipt emailed to ${order.receipt.sentTo}` : ''}.` : '';
         setResult({
-          customerId,
-          text: `Order ${order.orderNumber} for ${who}, ${money(order.grandTotalCents)}` +
-            (deliveryMode === 'Pickup' ? `, to collect ${day(requestedDate)}.`
-              : order.deliverySheetId ? `, on the ${zone ?? ''} round for ${day(requestedDate)}.`
-                : '. It is not on a round yet.') + repeatText,
+          customerId, paymentIds: order.paymentIds ?? [], receiptName: `Receipt ${order.orderNumber}.pdf`,
+          text: `Order ${order.orderNumber} for ${customer?.name ?? 'the customer'}, ${money(order.grandTotalCents)}`
+            + (order.needsReview ? ', waiting for approval for today.'
+              : outMode === 'Pickup' ? `, to collect ${day(requestedDate)}.`
+                : order.deliverySheetId ? `, on the ${zone ?? ''} round for ${day(requestedDate)}.` : '. It is not on a round yet.')
+            + paidText + repeatText,
         });
       }
-      setLines([]);
-      setPaidNow('');
-      setEmptiesBack('');
-      setDiscount('0');
-      setDiscountAs('%');
-      setRepeat(false);
+      reset();
       window.scrollTo({ top: 0, behavior: 'smooth' });
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Could not save the order');
+      setError(err instanceof Error ? err.message : 'Could not save it');
     } finally {
       setBusy(false);
     }
   }
 
-  // ---- the customer line under the name ----
-  const open = history?.invoices.filter((i) => Number(i.balance_cents) > 0) ?? [];
-  const late = open.filter((i) => i.status === 'Overdue');
-  const owes = history?.balanceCents ?? Number(customer?.balance_cents ?? 0);
-  const summary = customer ? [
-    history?.customer.price_tier_name ? `${history.customer.price_tier_name} price list`
-      : customer.price_tier ? `${customer.price_tier} price list` : 'List prices',
-    customer.invoice_cycle === 'Weekly' ? 'invoiced weekly'
-      : customer.invoice_cycle === 'Monthly' ? 'invoiced monthly'
-        : history?.customer.payment_terms ?? null,
-    zone ? `${zone} zone${customer.zone_run_days?.length ? ` (${customer.zone_run_days.join(', ')})` : ''}` : 'No delivery zone',
-    customer.gct_exempt ? 'GCT exempt' : null,
-  ].filter(Boolean).join(' · ') : '';
+  /* ---------------- what the screen says ---------------- */
 
+  const late = openOlder.filter((i) => i.status === 'Overdue').length;
+  const kept = history?.keptForOrdersCents ?? 0;
+  const owesNet = balance + kept;
+  const balanceChip = !history ? null : (
+    <>
+      {owesNet > 0 ? <span className="chip bad">Owes {money(owesNet)}{late ? `, ${late} late` : ''}</span>
+        : credit > 0 ? <span className="chip ok">In credit {money(credit)}</span>
+          : <span className="chip neutral">Owes nothing</span>}
+      {kept > 0 && <span className="chip info">Paid ahead on orders {money(kept)}</span>}
+    </>
+  );
+
+  const billing = addresses.find((a) => a.is_billing);
+  const lineOf = (a: Address) => [a.address_line1, a.address_line2, a.city, a.parish].filter(Boolean).join(', ');
+  const mainAddress = history?.customer.delivery_address ?? customer?.delivery_address ?? null;
+  const billTo = billing ? lineOf(billing) : mainAddress;
+
+  const zoneDays = address ? [] : (customer?.zone_run_days ?? []);
+  const offDay = outMode === 'Delivery' && zoneDays.length > 0 && requestedDate && !zoneDays.includes(weekdayOf(requestedDate));
+  const round = sheets?.find((s) => s.zone === zone && s.status === 'Open') ?? null;
   const roundNote = (() => {
-    if (deliveryMode !== 'Delivery' || !customer) return null;
-    if (!zone) {
-      return <span className="bad-text">No delivery zone on file, so this cannot go on a round. Set one on their Details tab.</span>;
-    }
+    if (outMode !== 'Delivery' || !customer) return null;
+    if (!zone) return <span className="bad-text">No delivery zone on file, so this cannot go on a round. Set one on their Details tab.</span>;
     if (!sheets) return null;
-    if (round?.started_at) {
-      return <>The {zone} round for {day(requestedDate)} is already on the road; this is added to it ({round.stop_count} stops).</>;
-    }
-    if (round) {
-      return <>Goes on the {zone} round for {day(requestedDate)} ({round.stop_count} {round.stop_count === 1 ? 'stop' : 'stops'} so far).</>;
-    }
-    return <>Starts the {zone} round for {day(requestedDate)}. Nothing else is on it yet.</>;
+    if (round?.started_at) return <>The {zone} round for {day(requestedDate)} is already on the road; this is added to it ({round.stop_count} stops).</>;
+    if (round) return <>On the {zone} round for {day(requestedDate)} ({round.stop_count} {round.stop_count === 1 ? 'stop' : 'stops'} so far).</>;
+    return <>Starts the {zone} round for {day(requestedDate)}.</>;
   })();
 
+  const finishText = busy ? 'Saving…'
+    : isWalkIn ? `Take ${money(totals.grandTotal)} and print receipt`
+      : !isAccount ? 'Choose who it is for'
+        : taking > 0 ? `${outMode === 'Counter' ? 'Complete sale' : repeat ? 'Create standing order' : 'Create order'}, record ${money(taking)}`
+          : when === 'On delivery' ? `Create order · driver collects ${money(due)}`
+            : outMode === 'Counter' ? 'Complete sale on account'
+              : repeat ? 'Create standing order' : 'Create order';
+
+  const blankLine = lines.length === 0 || lines[lines.length - 1].productId !== '';
+
   return (
-    <>
-      <Link to="/orders" className="back-link">← Orders</Link>
-      <h1>New order</h1>
+    <div className="ns">
+      <div className="ns-head">
+        <h1>New sale</h1>
+        <Link to="/orders" className="back-link">← Orders</Link>
+      </div>
 
       {error && <div className="notice error">{error}</div>}
       {result && (
         <div className="notice ok">
           {result.text}{' '}
-          <Link to={`/customers/${result.customerId}?tab=orders`}>See their orders</Link>
+          {result.paymentIds.length > 0 && (
+            <button type="button" className="as-link"
+                    onClick={() => void downloadPost('/api/receipts.pdf', { paymentIds: result.paymentIds }, result.receiptName)}>
+              Receipt
+            </button>
+          )}
+          {result.customerId && <>{' · '}<Link to={`/customers/${result.customerId}?tab=orders`}>See their orders</Link></>}
         </div>
       )}
       {warnings.map((w) => <div className="notice warn" key={w}>{w}</div>)}
 
-      <form onSubmit={submit} className="order-grid">
-        <div className="order-main">
-          <section className="panel">
-            <div className="field" style={{ maxWidth: 520 }}>
-              <label htmlFor="cust">Customer</label>
-              <CustomerPicker id="cust" customers={customers} value={customerId}
-                              onChange={setCustomerId} />
-              {deliveryMode === 'Counter' && !customerId && (
-                <div className="muted small">Leave it blank for a walk-in: they pay in full. Part payment needs their customer account.</div>
-              )}
-              {customer && (
-                <div className="muted small cust-summary">
-                  {summary}
-                  {history && (
-                    <> · {owes > 0
-                      ? <>owes <strong className="ink">{money(owes)}</strong>{late.length
-                        ? <strong className="bad-text">, {late.length} late</strong> : ', none late'}</>
-                      : owes < 0 ? <>in credit {money(-owes)}</> : 'owes nothing'}</>
-                  )}
-                  {' · '}<Link to={`/customers/${customer.id}`}>open</Link>
+      <section className="panel ns-strip" aria-label="Customer and how it goes out">
+        <div className="ns-strip-row">
+          {who === 'none' && (
+            <div className="ns-who">
+              <label htmlFor="ns-cust">Customer</label>
+              <div className="ns-who-row">
+                <CustomerPicker id="ns-cust" customers={customers.filter((c) => c.name !== 'Cash Walk-In')}
+                                value="" onChange={chooseCustomer} placeholder="Type a name or phone number" />
+                <button type="button" className="secondary ns-walkin-btn" onClick={chooseWalkIn}>
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"
+                       strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                    <circle cx="12" cy="5" r="2" /><path d="M10 22l1-7-2-3 1-4h4l1 4-2 3 1 7" />
+                  </svg>
+                  Walk-in
+                </button>
+              </div>
+            </div>
+          )}
+
+          {isAccount && customer && (
+            <>
+              <div className="ns-who">
+                <span className="label">Customer</span>
+                <div className="ns-chosen">
+                  <Link to={`/customers/${customer.id}`} className="ns-name">{customer.name}</Link>
+                  <span className="chip neutral">{history?.customer.price_tier_name ?? customer.price_tier ?? 'List prices'}</span>
+                  <span className="chip neutral">{onCycle ? `Invoiced ${customer.invoice_cycle!.toLowerCase()}` : customer.payment_terms ?? 'No terms set'}</span>
+                  {customer.gct_exempt && <span className="chip neutral">GCT exempt</span>}
+                  {balanceChip}
+                  <button type="button" className="as-link" onClick={changeWho}>Change</button>
+                </div>
+              </div>
+              <div>
+                <span className="label">How it goes out</span>
+                <div className="ns-seg" role="group" aria-label="How it goes out">
+                  {MODES.map(([m, label]) => (
+                    <button key={m} type="button" className={mode === m ? 'on' : ''} aria-pressed={mode === m}
+                            onClick={() => { setMode(m); if (m === 'Counter') setRepeat(false); }}>{label}</button>
+                  ))}
+                </div>
+              </div>
+              {mode !== 'Counter' && (
+                <div className="ns-date">
+                  <label htmlFor="ns-date">{mode === 'Pickup' ? 'Collect on' : 'Deliver on'}</label>
+                  <input id="ns-date" type="date" value={requestedDate} min={today}
+                         onChange={(e) => setRequestedDate(e.target.value)} />
                 </div>
               )}
-            </div>
-
-            <div className="field">
-              <span className="label">How it goes out</span>
-              <div className="seg" role="group" aria-label="How it goes out">
-                {MODES.map(([m, label]) => (
-                  <button key={m} type="button" className={deliveryMode === m ? 'active' : ''}
-                          aria-pressed={deliveryMode === m}
-                          onClick={() => { setDeliveryMode(m); if (m === 'Counter') setRepeat(false); }}>
-                    {label}
-                  </button>
-                ))}
+              <div className="ns-po">
+                <label htmlFor="ns-po">Their PO no.</label>
+                <input id="ns-po" value={customerPo} onChange={(e) => setCustomerPo(e.target.value)} />
               </div>
-              {/* Kept for anything that reads the mode by its old id. */}
-              <input type="hidden" id="mode" value={deliveryMode} />
-            </div>
+            </>
+          )}
 
-            {deliveryMode === 'Delivery' && addresses.length > 0 && (
-              <div className="field">
-                <label htmlFor="addr">Deliver to</label>
-                <select id="addr" value={addressId} onChange={(e) => setAddressId(e.target.value)}>
-                  <option value="">Main address{customer?.delivery_zone ? ` (${customer.delivery_zone})` : ''}</option>
-                  {addresses.map((a) => (
+          {isWalkIn && (
+            <div className="ns-who ns-who-wide">
+              <span className="label">Customer</span>
+              <div className="ns-chosen">
+                <span className="ns-walkin-tag">
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"
+                       strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                    <circle cx="12" cy="5" r="2" /><path d="M10 22l1-7-2-3 1-4h4l1 4-2 3 1 7" />
+                  </svg>
+                  Walk-in
+                </span>
+                <input className="ns-wi-name" aria-label="Name for the receipt" placeholder="Name for the receipt"
+                       value={walkIn.name} disabled={!!customerId}
+                       onChange={(e) => setWalkIn({ ...walkIn, name: e.target.value })} />
+                <input className="ns-wi-phone" aria-label="Phone" placeholder="Phone" inputMode="tel"
+                       value={walkIn.phone} disabled={!!customerId}
+                       onChange={(e) => setWalkIn({ ...walkIn, phone: e.target.value })} />
+                <input className="ns-wi-email" aria-label="Email" placeholder="Email (to send the receipt)" type="email"
+                       value={walkIn.email} disabled={!!customerId}
+                       onChange={(e) => setWalkIn({ ...walkIn, email: e.target.value })} />
+                <button type="button" className="as-link" onClick={changeWho}>Change</button>
+              </div>
+              <div className="muted small">Takes the goods now and pays in full. A name and phone put them on file for next time.</div>
+            </div>
+          )}
+        </div>
+
+        {isAccount && customer && (
+          <div className="ns-address">
+            {mode === 'Delivery' && (
+              <>
+                <label htmlFor="ns-addr" className="ns-inline-label">Deliver to</label>
+                <select id="ns-addr" value={addressId} onChange={(e) => setAddressId(e.target.value)}>
+                  <option value="">Main address{mainAddress ? ` · ${mainAddress}` : ''}{customer.delivery_zone ? ` (${customer.delivery_zone})` : ''}</option>
+                  {deliveryAddresses.map((a) => (
                     <option key={a.id} value={a.id}>
-                      {a.label}{a.address_line1 ? `, ${a.address_line1}` : ''}{a.delivery_zone ? ` (${a.delivery_zone})` : ''}
+                      {a.label}{lineOf(a) ? ` · ${lineOf(a)}` : ''}{a.delivery_zone ? ` (${a.delivery_zone})` : ''}
                     </option>
                   ))}
                 </select>
-              </div>
-            )}
-
-            {deliveryMode !== 'Counter' ? (
-              <div className="row" style={{ alignItems: 'center' }}>
-                <div className="field" style={{ marginBottom: 0 }}>
-                  <label htmlFor="date">{deliveryMode === 'Pickup' ? 'Collect on' : 'Deliver on'}</label>
-                  <input id="date" type="date" value={requestedDate} min={todayInJamaica()}
-                         onChange={(e) => setRequestedDate(e.target.value)} />
-                </div>
-                <div className="field" style={{ marginBottom: 0 }}>
-                  <label htmlFor="cpo">Customer's PO no. (optional)</label>
-                  <input id="cpo" style={{ width: 150 }} value={customerPo} onChange={(e) => setCustomerPo(e.target.value)} />
-                </div>
-                {roundNote && <div className="small round-note">{roundNote}</div>}
-                {deliveryMode === 'Delivery' && requestedDate === todayInJamaica() && pastCutoff && (
-                  <div className="notice warn" style={{ margin: 0, flexBasis: '100%' }}>
-                    It is past the {cutoff} cut-off for same-day delivery.{' '}
-                    {isAdmin ? 'As an administrator, yours goes straight on today\'s round.'
-                      : 'This order will wait in Needs a decision until an administrator approves it for today.'}
-                  </div>
-                )}
-                {offDay && (
-                  <div className="notice warn" style={{ margin: 0, flexBasis: '100%' }}>
-                    The {zone} round runs {zoneDays.join(', ')}, not {weekdayOf(requestedDate)}.{' '}
-                    <button type="button" className="as-link"
-                            onClick={() => setRequestedDate(nextRunDate(requestedDate, zoneDays))}>
-                      Move it to {day(nextRunDate(requestedDate, zoneDays))}
-                    </button>
-                  </div>
-                )}
-              </div>
-            ) : (
-              <>
-                {!quickAdd && (
-                  <p className="muted small" style={{ margin: 0 }}>
-                    Walk-in not on file?{' '}
-                    <button type="button" className="secondary" onClick={() => setQuickAdd(true)}>
-                      Add them quickly
-                    </button>
-                  </p>
-                )}
-                {quickAdd && (
-                  <div className="sub-panel">
-                    <strong>New walk-in customer</strong>
-                    <p className="muted small" style={{ marginTop: 4 }}>
-                      Enough to issue a receipt. The rest can be filled in later.
-                    </p>
-                    <div className="row">
-                      <div className="field">
-                        <label htmlFor="wi-name">Name</label>
-                        <input id="wi-name" value={walkIn.name}
-                               onChange={(e) => setWalkIn({ ...walkIn, name: e.target.value })} />
-                      </div>
-                      <div className="field">
-                        <label htmlFor="wi-phone">Phone</label>
-                        <input id="wi-phone" value={walkIn.phone}
-                               onChange={(e) => setWalkIn({ ...walkIn, phone: e.target.value })} />
-                      </div>
-                      <div className="field">
-                        <label htmlFor="wi-email">Email</label>
-                        <input id="wi-email" type="email" value={walkIn.email}
-                               onChange={(e) => setWalkIn({ ...walkIn, email: e.target.value })} />
-                      </div>
-                      <div className="field">
-                        <button type="button"
-                                disabled={busy || !walkIn.name.trim() || !walkIn.phone.trim()
-                                          || !walkIn.email.trim()}
-                                onClick={addWalkIn}>
-                          Add and select
-                        </button>{' '}
-                        <button type="button" className="secondary"
-                                onClick={() => setQuickAdd(false)}>Cancel</button>
-                      </div>
-                    </div>
-                  </div>
-                )}
+                <Link to={`/customers/${customer.id}?tab=details&part=addresses`} className="small">+ Add an address</Link>
+                {roundNote && <span className="small ns-round">{roundNote}</span>}
               </>
             )}
-          </section>
+            <span className="small muted ns-billto">Bill to: {billTo ?? 'no address on file'}</span>
+          </div>
+        )}
+        {isAccount && mode === 'Delivery' && requestedDate === today && pastCutoff && (
+          <div className="notice warn ns-tight">
+            It is past the {cutoff} cut-off for same-day delivery.{' '}
+            {isAdmin ? 'As an administrator, yours goes straight on today\'s round.'
+              : 'This order will wait in Needs a decision until an administrator approves it for today.'}
+          </div>
+        )}
+        {isAccount && offDay && (
+          <div className="notice warn ns-tight">
+            The {zone} round runs {zoneDays.join(', ')}, not {weekdayOf(requestedDate)}.{' '}
+            <button type="button" className="as-link" onClick={() => setRequestedDate(nextRunDate(requestedDate, zoneDays))}>
+              Move it to {day(nextRunDate(requestedDate, zoneDays))}
+            </button>
+          </div>
+        )}
+      </section>
 
-          <section className="panel">
-            <h2 style={{ marginTop: 0 }}>What they want</h2>
-            {lines.length > 0 && (
-              <table className="lines-table">
-                <thead>
-                  <tr>
-                    <th>Product</th>
-                    <th className="num">{customer ? 'Unit price (theirs)' : 'Unit price'}</th>
-                    <th>How many</th>
-                    <th className="num">Line total</th>
-                    <th />
-                  </tr>
-                </thead>
-                <tbody>
-                  {lines.map((l) => {
-                    const p = productOf(l.productId);
-                    if (!p) return null;
-                    const cased = p.bottles_per_case > 0;
-                    return (
-                      <tr key={l.productId}>
-                        <td data-label="Product">
-                          <strong>{shortName(p.name)}</strong>
-                          <div className="muted small">
-                            {cased ? `by the case of ${p.bottles_per_case}` : 'by the bottle'}
-                            {p.is_returnable ? ' · returnable' : ''}
-                          </div>
-                        </td>
-                        <td data-label="Unit price" className="num">
-                          <input type="number" min="0" step="0.01" inputMode="decimal"
-                                 className={`price-input${l.price !== null ? ' changed' : ''}`}
-                                 aria-label={`Price per ${cased ? 'case' : 'bottle'} of ${p.name}`}
-                                 value={(priceOf(p, l) / 100).toFixed(2)}
-                                 onChange={(e) => setPrice(l.productId, e.target.value)} />
-                          <div className="muted small">
-                            per {cased ? 'case' : 'bottle'}
-                            {p.special_price && l.price === null && ' · special price'}
-                            {l.price !== null && (
-                              <> · <button type="button" className="as-link small"
-                                           onClick={() => setPrice(l.productId, '')}>
-                                usual {money(listPriceOf(p))}</button></>
-                            )}
-                          </div>
-                        </td>
-                        <td data-label="How many">
-                          <span className="stepper">
-                            <button type="button" className="secondary" aria-label={`Fewer ${p.name}`}
-                                    disabled={l.qty <= 1} onClick={() => setQty(l.productId, l.qty - 1)}>−</button>
-                            <input type="number" min="1" step="1" inputMode="numeric"
-                                   aria-label={`How many ${p.name}${cased ? ', in cases' : ', in bottles'}`}
-                                   value={l.qty || ''} onChange={(e) => setQty(l.productId, Number(e.target.value))} />
-                            <button type="button" className="secondary" aria-label={`More ${p.name}`}
-                                    onClick={() => setQty(l.productId, l.qty + 1)}>+</button>
-                          </span>
-                          <span className="muted small unit">{cased ? 'cs' : 'btl'}</span>
-                        </td>
-                        <td data-label="Line total" className="num">{money(l.qty * priceOf(p, l))}</td>
-                        <td className="num">
-                          <button type="button" className="danger-soft"
-                                  onClick={() => removeLine(l.productId)}>Remove</button>
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            )}
-            {lines.length === 0 && (
-              <p className="muted" style={{ marginTop: 0 }}>Nothing yet. Tap a product to add it.</p>
-            )}
-            {fullFives > 0 && deliveryMode !== 'Counter' && !bottleOnOrder && (
-              <div className="bottle-box">
-                <div className="field" style={{ marginBottom: 4 }}>
-                  <label htmlFor="emp-exp">5-gallon empties they will hand over</label>
-                  <input id="emp-exp" type="number" min="0" style={{ width: 110 }} value={emptiesBack}
-                         placeholder={String(fullFives)} onChange={(e) => setEmptiesBack(e.target.value)} />
-                </div>
-                <div className="small">
-                  {fullFives} full going out.{' '}
-                  {shortfall > 0 && bottleProduct
-                    ? <strong>{shortfall} short: {shortfall} × {shortName(bottleProduct.name)} added at {money(priceOf(bottleProduct))} each. They keep them.</strong>
-                    : 'Fewer empties than full bottles and the difference is charged as bottles, which they then own.'}
-                </div>
-              </div>
-            )}
-            {notYet.length > 0 && (
-              <div className="add-row">
-                <span className="muted small">Add:</span>
-                {notYet.map((p) => (
-                  <button key={p.id} type="button" className="secondary" onClick={() => addProduct(p.id)}>
-                    + {shortName(p.name)}
-                  </button>
-                ))}
-              </div>
-            )}
-          </section>
-        </div>
-
-        <aside className="order-side">
-          {canRepeat && (
-            <section className="panel">
-              <div className="switch-row">
-                <div>
-                  <strong>Repeat this order</strong>
-                  <div className="muted small">Raised for them automatically, a week before each date.</div>
-                </div>
-                <button type="button" role="switch" aria-checked={repeat} aria-label="Repeat this order"
-                        className={`switch${repeat ? ' on' : ''}`} onClick={() => setRepeat(!repeat)}>
-                  <span />
+      <div className="ns-cols">
+        <section className="panel ns-products" aria-labelledby="ns-lines-h">
+          <div className="ns-panel-head">
+            <h2 id="ns-lines-h">Products</h2>
+            <span className="small muted">Product, then size.{isAccount ? ' Their prices.' : ' List prices.'}</span>
+          </div>
+          <div className="ns-lg ns-lg-head" aria-hidden="true">
+            <span className="ns-hide-s">#</span><span>Product</span><span>Size</span><span>Qty</span>
+            <span className="num ns-hide-s">Rate</span><span className="num ns-hide-s">Amount</span><span />
+          </div>
+          {lines.map((l, i) => {
+            const p = productOf(l.productId);
+            const sizes = sizesOf(l.group);
+            return (
+              <div className="ns-lg" key={l.key}>
+                <span className="ns-n ns-hide-s">{i + 1}</span>
+                <select aria-label={`Product, line ${i + 1}`} value={l.group}
+                        onChange={(e) => chooseGroup(l.key, e.target.value)}>
+                  {!groups.some(([g]) => g === l.group) && <option value={l.group}>{l.group}</option>}
+                  {groups.map(([g]) => <option key={g} value={g}>{g}</option>)}
+                </select>
+                <select id={`ns-size-${l.key}`} aria-label={`Size, line ${i + 1}`} value={l.productId}
+                        onChange={(e) => chooseSize(l.key, e.target.value)}>
+                  <option value="">Choose a size…</option>
+                  {sizes.map((z) => (
+                    <option key={z.id} value={z.id}>{z.sizeLabel} · {packOf(z)} · {money(listPriceOf(z))}</option>
+                  ))}
+                  {p && !sizes.some((z) => z.id === p.id) && <option value={p.id}>{p.name}</option>}
+                </select>
+                <span className="ns-qty">
+                  <input id={`ns-qty-${l.key}`} inputMode="numeric" aria-label={`How many, line ${i + 1}`}
+                         value={l.qty} disabled={!p} onChange={(e) => setQty(l.key, e.target.value)}
+                         onFocus={(e) => e.currentTarget.select()}
+                         onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); focusSoon('ns-add'); } }} />
+                  <span className="small muted">{p ? unitOf(p) : ''}</span>
+                </span>
+                <span className="num ns-hide-s ns-rate">
+                  {p ? (
+                    <>
+                      <input inputMode="decimal" aria-label={`Price per ${p.bottles_per_case > 0 ? 'case' : 'bottle'}, line ${i + 1}`}
+                             className={`price-input${l.price !== null ? ' changed' : ''}`}
+                             value={(priceOf(p, l) / 100).toFixed(2)}
+                             onChange={(e) => setPrice(l.key, e.target.value)} />
+                      {l.price !== null
+                        ? <button type="button" className="as-link ns-tiny" onClick={() => setPrice(l.key, '')}>usual {money(listPriceOf(p))}</button>
+                        : p.special_price ? <span className="ns-tiny ok-text">special</span> : null}
+                    </>
+                  ) : ''}
+                </span>
+                <span className="num ns-hide-s ns-amt">{p ? money(qtyOf(l) * priceOf(p, l)) : ''}</span>
+                <button type="button" className="ns-x" aria-label={`Remove line ${i + 1}`} onClick={() => removeLine(l.key)}>
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4"
+                       strokeLinecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" /></svg>
                 </button>
               </div>
-              {repeat && (
-                <>
+            );
+          })}
+          {blankLine && (
+            <div className="ns-lg">
+              <span className="ns-n ns-hide-s">+</span>
+              <select id="ns-add" aria-label="Add a product" value="" onChange={(e) => chooseGroup(null, e.target.value)}>
+                <option value="">Add a product…</option>
+                {groups.map(([g, list]) => (
+                  <option key={g} value={g}>{g} ({list.length} {list.length === 1 ? 'size' : 'sizes'})</option>
+                ))}
+              </select>
+              <select disabled aria-label="Size"><option>Size</option></select>
+              <span /><span className="ns-hide-s" /><span className="ns-hide-s" /><span />
+            </div>
+          )}
+
+          {fullFives > 0 && !bottleOnOrder && (
+            <div className="ns-empties">
+              <label htmlFor="ns-emp">{outMode === 'Delivery' ? '5-gal empties to hand over' : '5-gal empties handed in'}</label>
+              <input id="ns-emp" inputMode="numeric" value={emptiesBack} placeholder={String(fullFives)}
+                     onChange={(e) => setEmptiesBack(e.target.value.replace(/[^0-9]/g, ''))} />
+              <span className="small">
+                of {fullFives} full: {shortfall > 0 && bottleProduct
+                  ? <strong>{shortfall} short, {shortfall} × {bottleProduct.name} at {money(priceOf(bottleProduct))} added. They own {shortfall === 1 ? 'it' : 'them'}.</strong>
+                  : emptiesN === null ? 'how many come back?' : 'a straight swap.'}
+              </span>
+            </div>
+          )}
+
+          {(isAccount || isWalkIn) && (
+            <div className="ns-extras">
+              <div className="ns-extras-row">
+                <button type="button" className="as-link" aria-expanded={noteOpen} onClick={() => setNoteOpen(!noteOpen)}>
+                  {noteOpen ? '−' : '+'} {outMode === 'Delivery' ? 'Note for the driver' : 'Note on the order'}
+                </button>
+                {isAccount && outMode !== 'Counter' && (
+                  <span className="ns-repeat">
+                    <span className="small">Repeat this order</span>
+                    <button type="button" role="switch" aria-checked={repeat} aria-label="Repeat this order"
+                            className={`switch${repeat ? ' on' : ''}`} onClick={() => setRepeat(!repeat)}><span /></button>
+                  </span>
+                )}
+              </div>
+              {noteOpen && (
+                <textarea aria-label={outMode === 'Delivery' ? 'Note for the driver' : 'Note on the order'}
+                          value={note} onChange={(e) => setNote(e.target.value)} rows={2} />
+              )}
+              {repeat && isAccount && outMode !== 'Counter' && (
+                <div className="ns-repeat-opts">
                   <div className="seg seg-small" role="group" aria-label="How often">
-                    {PATTERNS.map(([p, label]) => (
-                      <button key={p} type="button" className={pattern === p ? 'active' : ''}
-                              aria-pressed={pattern === p} onClick={() => setPattern(p)}>{label}</button>
+                    {PATTERNS.map(([pt, label]) => (
+                      <button key={pt} type="button" className={pattern === pt ? 'active' : ''}
+                              aria-pressed={pattern === pt} onClick={() => setPattern(pt)}>{label}</button>
                     ))}
                   </div>
                   {pattern === 'Weekly' && (
-                    <div style={{ marginTop: 10 }}>
-                      <span className="label">On these days</span>
-                      <div className="day-picks" role="group" aria-label="Repeat on these days">
-                        {WEEK.map((d) => {
-                          const on = repeatDays.includes(d) || d === weekdayOf(requestedDate);
-                          return (
-                            <button key={d} type="button" aria-pressed={on}
-                                    className={`day-pick${on ? ' on' : ''}`}
-                                    disabled={d === weekdayOf(requestedDate)}
-                                    onClick={() => setRepeatDays((cur) => (cur.includes(d)
-                                      ? cur.filter((x) => x !== d) : WEEK.filter((x) => x === d || cur.includes(x))))}>
-                              {d}
-                            </button>
-                          );
-                        })}
-                      </div>
-                      <div className="muted small" style={{ marginTop: 4 }}>
-                        {weekdayOf(requestedDate)} is this order's own day. Each other day becomes
-                        its own weekly standing order with the same products.
-                      </div>
+                    <div className="day-picks" role="group" aria-label="Repeat on these days">
+                      {WEEK.map((d) => {
+                        const on = repeatDays.includes(d) || d === weekdayOf(requestedDate);
+                        return (
+                          <button key={d} type="button" aria-pressed={on} className={`day-pick${on ? ' on' : ''}`}
+                                  disabled={d === weekdayOf(requestedDate)}
+                                  onClick={() => setRepeatDays((cur) => (cur.includes(d)
+                                    ? cur.filter((x) => x !== d) : WEEK.filter((x) => x === d || cur.includes(x))))}>
+                            {d}
+                          </button>
+                        );
+                      })}
                     </div>
                   )}
-                  {requestedDate && (
-                    <div className="muted small" style={{ marginTop: 8 }}>
-                      Next after this: {day(nextAfter(date(requestedDate), pattern))}
-                    </div>
-                  )}
-                </>
+                  <div className="muted small">
+                    {pattern === 'Weekly' ? `${weekdayOf(requestedDate)} is this order's own day; each other day becomes its own weekly standing order. ` : ''}
+                    Next after this: {day(nextAfter(date(requestedDate), pattern))}.
+                  </div>
+                </div>
               )}
-            </section>
+            </div>
           )}
+        </section>
 
-          <section className="panel totals-card">
-            {shortfall > 0 && bottleProduct && (
-              <div className="total-line muted"><span>incl. {shortfall} × {shortName(bottleProduct.name)}</span><span>{money(shortfall * priceOf(bottleProduct))}</span></div>
-            )}
-            <div className="total-line"><span>Subtotal</span><span>{money(totals.subtotal)}</span></div>
-            <div className="total-line">
-              <label htmlFor="disc" style={{ margin: 0, color: 'inherit', fontSize: 'inherit' }}>Discount</label>
-              <span>
-                <span className="money-toggle" role="group" aria-label="Discount as">
-                  {(['%', '$'] as const).map((k) => (
-                    <button key={k} type="button" className={discountAs === k ? 'on' : ''}
-                            aria-pressed={discountAs === k}
-                            onClick={() => { setDiscountAs(k); setDiscount('0'); }}>{k === '%' ? '%' : '$ amount'}</button>
-                  ))}
-                </span>{' '}
-                <input id="disc" type="number" min="0" max={discountAs === '%' ? 100 : undefined} step="0.01"
-                       style={{ width: 84 }} value={discount}
-                       onChange={(e) => setDiscount(e.target.value)} />
+        <section className="panel ns-money" aria-labelledby="ns-pay-h">
+          <div className="total-line"><span>Subtotal</span><span className="num">{money(totals.subtotal)}</span></div>
+          {shortfall > 0 && bottleProduct && (
+            <div className="total-line muted small"><span>incl. {shortfall} × {bottleProduct.name}</span><span className="num">{money(shortfall * priceOf(bottleProduct))}</span></div>
+          )}
+          <div className="total-line">
+            <label htmlFor="ns-disc" className="ns-inline-label">Discount</label>
+            <span className="ns-disc">
+              <span className="money-toggle" role="group" aria-label="Discount as">
+                {(['%', '$'] as const).map((k) => (
+                  <button key={k} type="button" className={discountAs === k ? 'on' : ''} aria-pressed={discountAs === k}
+                          onClick={() => { setDiscountAs(k); setDiscount('0'); }}>{k}</button>
+                ))}
               </span>
-            </div>
-            {totals.discountAmount > 0 && (
-              <div className="total-line muted"><span /><span>−{money(totals.discountAmount)}</span></div>
-            )}
-            {/* GCT is charged on the post-discount figure. */}
-            <div className="total-line">
-              <label className="check" style={{ margin: 0 }}>
-                <input type="checkbox" checked={chargeGct} onChange={(e) => setChargeGct(e.target.checked)} />
-                GCT 15%
-              </label>
-              <span>{chargeGct ? money(totals.gct) : 'none'}</span>
-            </div>
-            {!chargeGct && (
-              <div className="muted small">{customer?.gct_exempt ? 'They are GCT exempt.' : 'No GCT on this order.'}</div>
-            )}
-            <div className="total-line grand"><span>Total</span><span>{money(totals.grandTotal)}</span></div>
+              <input id="ns-disc" inputMode="decimal" value={discount} onChange={(e) => setDiscount(e.target.value)} />
+            </span>
+          </div>
+          {totals.discountAmount > 0 && <div className="total-line muted"><span /><span className="num">−{money(totals.discountAmount)}</span></div>}
+          <div className="total-line">
+            <label className="check ns-inline-label">
+              <input type="checkbox" checked={chargeGct} onChange={(e) => setChargeGct(e.target.checked)} /> GCT 15%
+            </label>
+            <span className="num">{chargeGct ? money(totals.gct) : 'none'}</span>
+          </div>
+          {!chargeGct && customer?.gct_exempt && <div className="muted small">They are GCT exempt.</div>}
+          <div className="total-line grand"><span>Total</span><span className="num ns-total">{money(totals.grandTotal)}</span></div>
 
-            {deliveryMode === 'Counter' ? (
-              <>
-              <div className="row" style={{ marginTop: 12 }}>
-                <div className="field" style={{ flex: 1 }}>
-                  <label htmlFor="meth">Paid by</label>
-                  <select id="meth" value={method} style={{ width: '100%' }}
-                          onChange={(e) => setMethod(e.target.value)}>
-                    {payMethods(['Cash', 'Card', 'Bank Transfer', 'Cheque', 'Other'], takeCard).map((m) => <option key={m}>{m}</option>)}
-                  </select>
+          <h2 id="ns-pay-h" className="ns-pay-h">Payment</h2>
+
+          {isAccount && (
+            <div className="ns-seg ns-seg-full" role="group" aria-label="When do we collect payment">
+              {whens.map(([w, label]) => (
+                <button key={w} type="button" className={when === w ? 'on' : ''} aria-pressed={when === w}
+                        onClick={() => { setPayWhen(w); setAmount(null); }}>{label}</button>
+              ))}
+            </div>
+          )}
+          {credit > 0 && (
+            <div className="notice ok ns-tight">
+              {money(credit)} credit goes against this order first{due > 0 ? `: ${money(due)} left to pay.` : ' and covers it.'}
+            </div>
+          )}
+          {isAccount && when === 'On delivery' && (
+            <div className="small">The driver collects {money(due)} at the door; it is settled with the round.</div>
+          )}
+          {isAccount && when === 'On account' && (
+            <div className="small">Nothing taken now. It goes on {termsWords}.</div>
+          )}
+          {isWalkIn && <div className="small muted">A walk-in pays the full {money(totals.grandTotal)} now.</div>}
+
+          {takingNow && (
+            <>
+              <div className="ns-seg ns-seg-full" role="group" aria-label="Paid by">
+                {methods.map(([v, label]) => (
+                  <button key={v} type="button" className={method === v ? 'on' : ''} aria-pressed={method === v}
+                          onClick={() => setMethod(v)}>{label}</button>
+                ))}
+              </div>
+              <div className="ns-pay-row">
+                <div>
+                  <label htmlFor="ns-amt">{isWalkIn && method === 'Cash' ? 'Cash received' : isAccount ? 'For this order' : 'Amount received'}</label>
+                  <input id="ns-amt" inputMode="decimal" value={amountTyped} onChange={(e) => setAmount(e.target.value)} />
                 </div>
-                <div className="field" style={{ flex: 1 }}>
-                  <label htmlFor="paid">Received now</label>
-                  <input id="paid" type="number" step="0.01" min="0" value={paidNow}
-                         placeholder={(totals.grandTotal / 100).toFixed(2)} style={{ width: '100%' }}
-                         onChange={(e) => setPaidNow(e.target.value)} />
-                  <div className="muted small">Blank = paid in full.</div>
-                </div>
-                {fullFives > 0 && !bottleOnOrder && (
-                  <div className="field" style={{ flex: 1 }}>
-                    <label htmlFor="empt">5-gal empties handed in</label>
-                    <input id="empt" type="number" min="0" value={emptiesBack} placeholder={String(fullFives)} style={{ width: '100%' }}
-                           onChange={(e) => setEmptiesBack(e.target.value)} />
+                {method !== 'Cash' && (
+                  <div>
+                    <label htmlFor="ns-ref">{method === 'Cheque' ? 'Cheque no.' : 'Reference'}</label>
+                    <input id="ns-ref" value={reference} onChange={(e) => setReference(e.target.value)} />
                   </div>
                 )}
               </div>
-              {isWalkIn && (
-                <div className="notice info" style={{ margin: '8px 0 0' }}>
-                  A walk-in pays in full. To take part payment, choose their customer account above.
-                </div>
-              )}
-              {shortfall > 0 && bottleProduct && (
-                <div className="small" style={{ marginTop: 6 }}>
-                  {shortfall} empt{shortfall === 1 ? 'y' : 'ies'} short: {shortfall} × {shortName(bottleProduct.name)} at {money(priceOf(bottleProduct))} is in the total. They keep those bottles.
-                </div>
-              )}
-              </>
-            ) : (
-              <p className="muted small" style={{ margin: '8px 0 0' }}>
-                {customer?.invoice_cycle === 'Weekly' || customer?.invoice_cycle === 'Monthly'
-                  ? <>Goes on their {customer.invoice_cycle.toLowerCase()} invoice, from what is actually {deliveryMode === 'Pickup' ? 'collected' : 'delivered'}.</>
-                  : <>Invoiced from what is actually {deliveryMode === 'Pickup' ? 'collected' : 'delivered'}.</>}
-              </p>
-            )}
+              {amountNote && <div className="small">{amountNote}</div>}
+            </>
+          )}
 
-            <button className="wide" style={{ marginTop: 12 }}
-                    disabled={busy || (!customerId && deliveryMode !== 'Counter') || lines.every((l) => l.qty <= 0)}>
-              {busy ? 'Saving…'
-                : deliveryMode === 'Counter' ? 'Complete counter sale'
-                  : repeat ? 'Create standing order' : 'Create order'}
-            </button>
-            {!customerId && deliveryMode !== 'Counter' && <p className="muted small" style={{ margin: '6px 0 0' }}>Choose the customer first.</p>}
-          </section>
-        </aside>
-      </form>
-    </>
+          {isAccount && takingNow && openOlder.length > 0 && (
+            <div>
+              <span className="label">Also collect on older invoices</span>
+              <div className="ns-older">
+                {openOlder.map((i) => {
+                  const on = older.includes(i.invoice_id);
+                  return (
+                    <label key={i.invoice_id} className={on ? 'on' : ''} title={`${day(i.invoice_date)}${i.due_date ? `, due ${day(i.due_date)}` : ''}`}>
+                      <input type="checkbox" checked={on}
+                             onChange={() => setOlder((cur) => (on ? cur.filter((x) => x !== i.invoice_id) : [...cur, i.invoice_id]))} />
+                      <span className="ns-inv">{i.invoice_number}</span>
+                      {i.status === 'Overdue' && <span className="chip bad">Late</span>}
+                      <span className="num">{money(Number(i.balance_cents))}</span>
+                    </label>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          {isAccount && (
+            <div className="ns-sum">
+              <div className="total-line"><span>Taking now</span><strong className="num">{money(taking)}</strong></div>
+              <div className="total-line">
+                <span>{after < 0 ? 'In credit afterwards' : `They will owe, once ${outMode === 'Delivery' ? 'delivered' : 'invoiced'}`}</span>
+                <strong className={`num${after <= 0 ? ' ok-text' : ''}`}>{money(Math.abs(after))}</strong>
+              </div>
+            </div>
+          )}
+
+          {takingNow && ((isWalkIn && walkIn.email.trim()) || (isAccount && customer?.email)) && (
+            <label className="check small">
+              <input type="checkbox" checked={emailReceipt} onChange={(e) => setEmailReceipt(e.target.checked)} />
+              Email the receipt to {isWalkIn ? walkIn.email.trim() : customer!.email}
+            </label>
+          )}
+
+          <button type="button" className="ns-go" disabled={busy || who === 'none' || (who === 'account' && !customer)
+                  || lines.every((l) => qtyOf(l) <= 0 || !l.productId)} onClick={finish}>
+            {finishText}
+          </button>
+          <div className="ns-foot">
+            <Link to="/orders" className="small">Cancel</Link>
+            {isAccount && <Link to={`/quotes?customer=${customer!.id}`} className="small">Make a quote instead</Link>}
+          </div>
+        </section>
+      </div>
+    </div>
   );
 }

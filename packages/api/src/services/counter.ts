@@ -17,7 +17,7 @@ import type { Cents, PaymentMethod } from '@alka/shared';
 import { RuleViolation, computeTotals } from '@alka/shared';
 import { createOrder, resolveLines, withBottleShortfall, type OrderLineInput } from './orders.ts';
 import { createInvoice, getInvoiceLedger } from './invoices.ts';
-import { insertPayment } from './payments.ts';
+import { applyAccountCredit, insertPayment } from './payments.ts';
 import { refreshOrderStatus } from './orders.ts';
 import { billedOnCycle } from './delivery.ts';
 import { takeFinishedGoods, deliveredBottles } from './stockmoves.ts';
@@ -93,6 +93,8 @@ export interface CounterSaleInput {
    */
   amountPaidCents?: Cents | null;
   method?: PaymentMethod;
+  /** Cheque number or transfer reference, for the receipt. */
+  reference?: string | null;
   notes?: string | null;
   idempotencyKey?: string | null;
   /** 5-gallon empties the customer handed in with this sale. */
@@ -157,6 +159,7 @@ export async function counterSale(
       notes: input.notes ?? 'Counter sale',
       amountPaidCents: paying,
       method: input.method ?? 'Cash',
+      reference: input.reference ?? null,
       emptiesBack: input.emptiesReturned ?? 0,
     });
 
@@ -192,6 +195,7 @@ async function invoiceAndTakePayment(
   args: {
     orderId: string; customerId: string;
     notes: string; amountPaidCents: Cents; method: PaymentMethod; emptiesBack?: number;
+    reference?: string | null;
   },
 ): Promise<{ id: string }> {
   // What is handed over is the whole order, so delivered quantities are the
@@ -237,25 +241,35 @@ async function invoiceAndTakePayment(
     })),
   });
 
+  // Money already on their account (paid with this order, or credit) goes on
+  // first (11 Oct 2026), so what is handed over now pays what is left.
+  await applyAccountCredit(t, actor, invoice.id);
+  const left = Math.max(0, (await getInvoiceLedger(t, invoice.id))!.balanceCents);
+
   if (args.amountPaidCents > 0) {
     // Straight to Confirmed - no route, so nothing to reconcile later.
-    await insertPayment(t, actor, {
-      customerId: args.customerId,
-      invoiceId: invoice.id,
-      amountCents: Math.min(args.amountPaidCents, invoice.grandTotalCents),
-      method: args.method,
-      status: 'Confirmed',
-      notes: args.notes,
-    });
+    const onInvoice = Math.min(args.amountPaidCents, left);
+    if (onInvoice > 0) {
+      await insertPayment(t, actor, {
+        customerId: args.customerId,
+        invoiceId: invoice.id,
+        amountCents: onInvoice,
+        method: args.method,
+        reference: args.reference ?? null,
+        status: 'Confirmed',
+        notes: args.notes,
+      });
+    }
     // Anything above the invoice is simply a second, unattached payment -
     // the same uniform treatment used at route settlement.
-    const excess = args.amountPaidCents - invoice.grandTotalCents;
+    const excess = args.amountPaidCents - onInvoice;
     if (excess > 0) {
       await insertPayment(t, actor, {
         customerId: args.customerId,
         invoiceId: null,
         amountCents: excess,
         method: args.method,
+        reference: args.reference ?? null,
         status: 'Confirmed',
         notes: args.notes,
       });
@@ -330,7 +344,7 @@ export async function collectOrder(
       if (paid > 0) {
         await insertPayment(t, actor, {
           customerId: order.customer_id, invoiceId: null, amountCents: paid,
-          method: input.method ?? 'Cash', status: 'Confirmed',
+          method: input.method ?? 'Cash', status: 'Confirmed', orderId: input.orderId,
           notes: `Paid on collecting ${order.order_number}`,
         });
       }

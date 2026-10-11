@@ -57,6 +57,11 @@ export interface CreateOrderInput {
    * nothing is added - older screens and standing orders.
    */
   emptiesExpected?: number | null;
+  /**
+   * What the office agreed for payment on the New order screen (11 Oct
+   * 2026): taken now, collected by the driver at the door, or on account.
+   */
+  payWhen?: 'Now' | 'On delivery' | 'On account' | null;
 }
 
 export interface CreateOrderResult {
@@ -218,9 +223,9 @@ export async function createOrder(
           source, delivery_mode, discount_percent,
           subtotal_cents, discount_amount_cents, gct_cents, grand_total_cents,
           discount_fixed_cents, gct_exempt, address_id, quotation_id,
-          customer_po, needs_review, empties_expected)
+          customer_po, needs_review, empties_expected, pay_when)
        VALUES ($1,$2,COALESCE($3::date, business_today()),$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,
-               $17,$18,$19,$20,$21,$22,$23)
+               $17,$18,$19,$20,$21,$22,$23,$24)
        RETURNING id`,
       [
         orderNumber, input.customerId, input.orderDate ?? null,
@@ -231,6 +236,8 @@ export async function createOrder(
         totals.subtotal, totals.discountAmount, totals.gct, totals.grandTotal,
         fixed, gctExempt, input.addressId ?? null, input.quotationId ?? null,
         input.customerPo?.trim() || null, input.needsReview === true, empties,
+        input.payWhen === 'Now' || input.payWhen === 'On delivery' || input.payWhen === 'On account'
+          ? input.payWhen : null,
       ],
     );
 

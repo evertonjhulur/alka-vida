@@ -18,6 +18,7 @@ import { assertMethodAllowed, audit, num, requireRole } from './core.ts';
 import type { Cents, PaymentMethod, StopOutcome } from '@alka/shared';
 import { RuleViolation, validateAllocation, assertQuantityShape, totalBottles } from '@alka/shared';
 import { createInvoice, openInvoicesForCustomer } from './invoices.ts';
+import { applyAccountCredit } from './payments.ts';
 import {
   addBottleChargeLine, bottleChargeProduct, deliveryTarget, placeOnDeliverySheet, recomputeDelivered,
   refreshOrderStatus, summariseOrderLines, summariseRemaining,
@@ -89,6 +90,24 @@ export interface MarkStopResult {
  * recurring orders behave identically to one-off ones.
  */
 export async function markStop(
+  db: Db,
+  actor: Actor,
+  input: MarkStopInput,
+): Promise<MarkStopResult> {
+  const r = await recordStopOutcome(db, actor, input);
+  // Money already on their account - paid with the order, or credit - goes
+  // against the new invoice (11 Oct 2026). After the stop has committed, and
+  // never able to undo or block it (invariant 3).
+  if (r.outcome === 'Delivered' && r.invoiceId) {
+    try {
+      const applied = await db.tx((t) => applyAccountCredit(t, actor, r.invoiceId!));
+      if (applied > 0) r.amountOwedCents = await amountOwedForStop(db, r.stopId);
+    } catch { /* the delivery stands; the office can apply it from the invoice */ }
+  }
+  return r;
+}
+
+async function recordStopOutcome(
   db: Db,
   actor: Actor,
   input: MarkStopInput,
@@ -485,12 +504,29 @@ async function moveBottlePool(
  * grand_total when no invoice exists yet. Never returns a subtotal.
  */
 export async function amountOwedForStop(t: Queryable, stopId: string): Promise<Cents> {
+  return (await owedAtStop(t, stopId)).owedCents;
+}
+
+/**
+ * What the driver collects at a stop, and what has come off it already.
+ *
+ * The gross is the invoice grand_total once there is an invoice, else the
+ * order's own live grand_total (or what is left of a part-delivered order).
+ * Off that comes money from outside this round: paid with the order on the
+ * New order screen, or credit on their account (11 Oct 2026). Money this
+ * round's own settlement attaches never counts, so the figure stays put
+ * before and after the round is settled. Tax-inclusive, always.
+ */
+export async function owedAtStop(t: Queryable, stopId: string): Promise<{
+  grossCents: Cents; alreadyPaidCents: Cents; owedCents: Cents;
+}> {
   const row = await t.maybeOne<{
-    invoice_total: number | null; order_total: number | null; order_id: string | null;
-    outcome: string; part: boolean;
+    invoice_id: string | null; invoice_total: number | null; order_total: number | null;
+    order_id: string | null; outcome: string; part: boolean; sheet_id: string; customer_id: string;
   }>(
-    `SELECT i.grand_total_cents AS invoice_total,
+    `SELECT s.invoice_id, i.grand_total_cents AS invoice_total,
             o.grand_total_cents AS order_total, s.order_id, s.stop_outcome AS outcome,
+            s.delivery_sheet_id AS sheet_id, s.customer_id,
             -- Another stop of this order has already delivered part of it.
             EXISTS (SELECT 1 FROM delivery_stops x WHERE x.order_id = s.order_id
                      AND x.id <> s.id AND x.stop_outcome = 'Delivered') AS part
@@ -500,12 +536,41 @@ export async function amountOwedForStop(t: Queryable, stopId: string): Promise<C
      WHERE s.id = $1`,
     [stopId],
   );
-  if (!row) return 0;
-  if (row.invoice_total !== null) return num(row.invoice_total);
-  if (!row.order_id) return 0;
+  if (!row) return { grossCents: 0, alreadyPaidCents: 0, owedCents: 0 };
+  const done = (gross: Cents, paid: Cents) => {
+    const off = Math.max(0, Math.min(gross, paid));
+    return { grossCents: gross, alreadyPaidCents: off, owedCents: gross - off };
+  };
+  if (row.invoice_total !== null) {
+    const paid = await t.one<{ c: number }>(
+      `SELECT COALESCE(SUM(amount_cents), 0)::bigint AS c FROM payments
+       WHERE invoice_id = $1 AND status = 'Confirmed'
+         AND delivery_sheet_id IS DISTINCT FROM $2`, [row.invoice_id, row.sheet_id],
+    );
+    return done(num(row.invoice_total), num(paid.c));
+  }
+  if (!row.order_id) return done(0, 0);
   // The rest of a part-delivered order: what is left, at the order's prices.
-  if (row.part && row.outcome !== 'Delivered') return remainingValue(t, row.order_id);
-  return num(row.order_total);
+  const gross = row.part && row.outcome !== 'Delivered'
+    ? await remainingValue(t, row.order_id) : num(row.order_total);
+  // Paid with this order, or credit they hold, comes off when it is invoiced.
+  const money = await t.one<{ linked: number; credit: number }>(
+    `SELECT COALESCE((SELECT SUM(amount_cents) FROM payments
+                      WHERE order_id = $1 AND invoice_id IS NULL AND status = 'Confirmed'
+                        AND NOT is_reversal), 0)::bigint AS linked,
+            -- In credit, less money kept for their OTHER orders still to go.
+            GREATEST(0, -COALESCE((SELECT balance_cents FROM customer_balances
+                                   WHERE customer_id = $2), 0)
+                        - COALESCE((SELECT SUM(p.amount_cents) FROM payments p
+                                    JOIN customer_orders o ON o.id = p.order_id
+                                    WHERE p.customer_id = $2 AND p.order_id <> $1
+                                      AND p.invoice_id IS NULL AND p.status = 'Confirmed'
+                                      AND NOT p.is_reversal
+                                      AND o.status NOT IN ('Delivered', 'Cancelled')), 0))::bigint AS credit`,
+    [row.order_id, row.customer_id],
+  );
+  const walkIn = await t.one<{ w: boolean }>(`SELECT is_walk_in AS w FROM customers WHERE id = $1`, [row.customer_id]);
+  return done(gross, walkIn.w ? 0 : Math.max(num(money.linked), num(money.credit)));
 }
 
 /** What the undelivered part of an order comes to, tax-inclusive. */
@@ -729,7 +794,7 @@ export async function getStopForDriver(db: Db, stopId: string) {
     `SELECT s.*, c.name AS customer_name, c.payment_terms, c.notes AS customer_notes, c.invoice_cycle,
             COALESCE(ca.delivery_instructions, c.delivery_instructions) AS delivery_instructions,
             o.notes AS order_notes, o.customer_po, o.requested_delivery_date::text AS order_date_wanted,
-            o.empties_expected, o.status AS order_status,
+            o.empties_expected, o.status AS order_status, o.pay_when,
             d.zone AS sheet_zone, d.delivery_date::text AS sheet_date, d.status AS sheet_status,
             (SELECT COUNT(*) FROM delivery_stops x
               WHERE x.delivery_sheet_id = s.delivery_sheet_id)::int AS stop_count,
@@ -745,7 +810,8 @@ export async function getStopForDriver(db: Db, stopId: string) {
   );
   if (!stop) return null;
 
-  const amountOwedCents = await amountOwedForStop(db, stopId);
+  const owed = await owedAtStop(db, stopId);
+  const amountOwedCents = owed.owedCents;
   const otherOpenInvoices = await openInvoicesForCustomer(db, stop.customer_id as string);
   const lines = await db.query(
     // is_returnable and total_bottles come along so the driver's screen can
@@ -808,6 +874,9 @@ export async function getStopForDriver(db: Db, stopId: string) {
     laterPayments,
     // Tax-inclusive, always.
     amountOwedCents,
+    // Paid with the order, or their credit, already taken off (11 Oct 2026).
+    alreadyPaidCents: owed.alreadyPaidCents,
+    grossCents: owed.grossCents,
     lines,
     openInvoices,
     bottlesHeld,
