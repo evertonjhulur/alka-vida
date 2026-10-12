@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { api } from '../lib/api';
 import { date, when } from '../lib/format';
 import { ask, askText } from '../components/Dialog';
+import { SortTh, StatusSelect, useSort } from '../components/ListTools';
 
 interface Schedule {
   id: string; orderNumber: string; customerId: string; customerName: string;
@@ -102,8 +103,17 @@ export default function Recurring() {
     } finally { setBusy(false); }
   }
 
-  const active = rows.filter((r) => !r.paused);
-  const paused = rows.filter((r) => r.paused);
+  // Status drop-down and sortable headings (11 Oct 2026).
+  const [state, setState] = useState('');
+  const activeSort = useSort(rows.filter((r) => !r.paused), {
+    customer: (r) => r.customerName, what: (r) => r.lineSummary, often: (r) => r.pattern,
+    next: (r) => (r.nextDeliveryDate ? date(r.nextDeliveryDate) : null), raised: (r) => r.occurrencesRaised,
+  });
+  const pausedSort = useSort(rows.filter((r) => r.paused), {
+    customer: (r) => r.customerName, often: (r) => r.pattern, raised: (r) => r.occurrencesRaised, why: (r) => r.lastNote ?? '',
+  });
+  const active = state === 'paused' ? [] : activeSort.sorted;
+  const paused = state === 'active' ? [] : pausedSort.sorted;
 
   return (
     <>
@@ -146,7 +156,12 @@ export default function Recurring() {
         </div>
       )}
 
-      <div className="panel">
+      <div className="row">
+        <StatusSelect id="so-st" value={state} onChange={setState}
+                      options={[['', 'Any status'], ['active', 'Active'], ['paused', 'Paused']]} />
+      </div>
+
+      {state !== 'paused' && <div className="panel">
         <div className="row" style={{ justifyContent: 'space-between' }}>
           <h2 style={{ marginTop: 0 }}>Active ({active.length})</h2>
           <button disabled={busy} onClick={generate}>
@@ -157,8 +172,12 @@ export default function Recurring() {
         <table>
           <thead>
             <tr>
-              <th>Customer</th><th>What they take</th><th>How often</th>
-              <th>Next delivery</th><th className="num">Raised so far</th><th />
+              <SortTh label="Customer" k="customer" sort={activeSort.sort} onSort={activeSort.onSort} />
+              <SortTh label="What they take" k="what" sort={activeSort.sort} onSort={activeSort.onSort} />
+              <SortTh label="How often" k="often" sort={activeSort.sort} onSort={activeSort.onSort} />
+              <SortTh label="Next delivery" k="next" sort={activeSort.sort} onSort={activeSort.onSort} />
+              <SortTh label="Raised so far" k="raised" sort={activeSort.sort} onSort={activeSort.onSort} className="num" />
+              <th />
             </tr>
           </thead>
           <tbody>
@@ -246,7 +265,7 @@ export default function Recurring() {
             Orders and turn it into a standing order.
           </p>
         )}
-      </div>
+      </div>}
 
       {paused.length > 0 && (
         <div className="panel">
@@ -258,8 +277,11 @@ export default function Recurring() {
           <table>
             <thead>
               <tr>
-                <th>Customer</th><th>How often</th>
-                <th className="num">Raised so far</th><th>Why</th><th />
+                <SortTh label="Customer" k="customer" sort={pausedSort.sort} onSort={pausedSort.onSort} />
+                <SortTh label="How often" k="often" sort={pausedSort.sort} onSort={pausedSort.onSort} />
+                <SortTh label="Raised so far" k="raised" sort={pausedSort.sort} onSort={pausedSort.onSort} className="num" />
+                <SortTh label="Why" k="why" sort={pausedSort.sort} onSort={pausedSort.onSort} />
+                <th />
               </tr>
             </thead>
             <tbody>

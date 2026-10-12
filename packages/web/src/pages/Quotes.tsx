@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
-import { api, download } from '../lib/api';
+import { api, download, downloadPost } from '../lib/api';
+import { BatchBar, SortTh, StatusSelect, TickAllTh, TickTd, sendSummary, useSort, useTicks } from '../components/ListTools';
+import { downloadCsv, dollars } from '../lib/csv';
 import { money, statusTone, todayInJamaica, when } from '../lib/format';
 import CustomerPicker, { type PickerCustomer } from '../components/CustomerPicker';
 import { ask, askText } from '../components/Dialog';
@@ -61,21 +63,42 @@ export default function Quotes() {
 
 function QuoteList() {
   const [rows, setRows] = useState<QuoteRow[]>([]);
-  const [show, setShow] = useState<'waiting' | 'accepted' | 'done' | 'all'>('waiting');
+  // Out with the customer first, as before; any status from the drop-down.
+  const [show, setShow] = useState('waiting');
   const [find, setFind] = useState('');
   const [error, setError] = useState<string | null>(null);
+  const [msg, setMsg] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
 
-  useEffect(() => { api.get<QuoteRow[]>('/api/quotations').then(setRows).catch((e) => setError(e.message)); }, []);
+  const load = () => api.get<QuoteRow[]>('/api/quotations').then(setRows).catch((e) => setError(e.message));
+  useEffect(() => { void load(); }, []);
 
   const needle = find.trim().toLowerCase();
-  const shown = rows.filter((q) => {
+  const filtered = rows.filter((q) => {
     const st = statusOf(q);
     if (show === 'waiting' && !['Draft', 'Sent'].includes(st)) return false;
-    if (show === 'accepted' && st !== 'Accepted') return false;
-    if (show === 'done' && !['Converted', 'Declined', 'Expired'].includes(st)) return false;
+    if (show && show !== 'waiting' && st !== show) return false;
     return !needle || q.quote_number.toLowerCase().includes(needle) || q.customer_name.toLowerCase().includes(needle);
   });
-  const count = (f: (q: QuoteRow) => boolean) => rows.filter(f).length;
+  const { sorted: shown, sort, onSort } = useSort(filtered, {
+    number: (q) => q.quote_number, customer: (q) => q.customer_name, what: (q) => q.lines_summary ?? '',
+    valid: (q) => (q.valid_until ? String(q.valid_until).slice(0, 10) : null), total: (q) => Number(q.grand_total_cents),
+    status: (q) => STATUS_WORDS[statusOf(q)] ?? statusOf(q),
+  });
+  const ticks = useTicks(shown.map((q) => q.id));
+  const picked = shown.filter((q) => ticks.has(q.id));
+  const sendable = (q: QuoteRow) => !['Converted', 'Declined'].includes(q.status);
+
+  async function batch(fn: () => Promise<string | null>, failed: string) {
+    setBusy(true); setError(null); setMsg(null);
+    try { const m = await fn(); if (m) setMsg(m); } catch (e) { setError(e instanceof Error ? e.message : failed); }
+    finally { setBusy(false); }
+  }
+  const exportQuotes = (list: QuoteRow[]) => downloadCsv('quotes', [
+    ['Quote', 'Date', 'Customer', 'What', 'Valid until', 'Total', 'Where it stands'],
+    ...list.map((q) => [q.quote_number, String(q.quote_date).slice(0, 10), q.customer_name, q.lines_summary ?? '',
+      q.valid_until ? String(q.valid_until).slice(0, 10) : '', dollars(Number(q.grand_total_cents)), STATUS_WORDS[statusOf(q)] ?? statusOf(q)]),
+  ]);
 
   return (
     <>
@@ -89,25 +112,61 @@ function QuoteList() {
         <Link to="/quotes/new"><button type="button">New quote</button></Link>
       </div>
       {error && <div className="notice error">{error}</div>}
+      {msg && <div className="notice ok">{msg}</div>}
       <div className="panel phone-cards">
-        <div className="pills">
-          {([
-            ['waiting', `Out with the customer (${count((q) => ['Draft', 'Sent'].includes(statusOf(q)))})`],
-            ['accepted', `Accepted (${count((q) => statusOf(q) === 'Accepted')})`],
-            ['done', 'Done'], ['all', 'All'],
-          ] as const).map(([k, label]) => (
-            <button key={k} type="button" className={`pill${show === k ? ' active' : ''}`} onClick={() => setShow(k)}>{label}</button>
-          ))}
-          <input aria-label="Find a quote" placeholder="Find: number or customer" value={find}
-                 onChange={(e) => setFind(e.target.value)} style={{ marginLeft: 'auto', minWidth: 220 }} />
+        <div className="row">
+          <div className="field">
+            <label htmlFor="q-find">Find</label>
+            <input id="q-find" type="search" placeholder="Number or customer" value={find}
+                   onChange={(e) => setFind(e.target.value)} style={{ minWidth: 220 }} />
+          </div>
+          <StatusSelect id="q-st" value={show} onChange={setShow} options={[
+            ['', 'Any status'], ['waiting', 'Out with the customer'], ['Draft', 'Draft, not sent'],
+            ['Sent', 'Waiting for their answer'], ['Accepted', 'Accepted, make the order'], ['Converted', 'Order made'],
+            ['Declined', 'Declined'], ['Expired', 'Expired'],
+          ]} />
         </div>
+        <BatchBar count={picked.length} noun={['quote', 'quotes']} busy={busy}
+                  summary={money(picked.reduce((a, q) => a + Number(q.grand_total_cents), 0))}
+                  onClear={ticks.clear}
+                  actions={[
+                    { label: 'Print (one PDF)', run: () => batch(async () => {
+                      await downloadPost('/api/batch/quotes/print.pdf', { ids: ticks.picked }, `Quotes-${picked.length}.pdf`);
+                      return `${picked.length} in one PDF.`;
+                    }, 'Could not build the PDF') },
+                    { label: 'Email to the customers (with the accept link)', run: () => batch(async () => {
+                      const r = await api.post<Array<{ label: string; sentTo?: string; error?: string }>>('/api/batch/quotes/send', { ids: ticks.picked });
+                      const sm = sendSummary(r);
+                      if (sm.problems.length) setError(`Not sent: ${sm.problems.join(' · ')}`);
+                      await load();
+                      return sm.ok;
+                    }, 'Could not send them'),
+                    disabledWhy: picked.every(sendable) ? null : 'Untick the ones already turned into orders or declined' },
+                    { label: 'Mark as sent', run: () => batch(async () => {
+                      const drafts = picked.filter((q) => q.status === 'Draft');
+                      for (const q of drafts) await api.post(`/api/quotations/${q.id}/mark-sent`, {});
+                      await load();
+                      return `${drafts.length} marked as sent.`;
+                    }, 'Could not mark them'),
+                    disabledWhy: picked.some((q) => q.status === 'Draft') ? null : 'None of these is a draft' },
+                    { label: 'Export to Excel', run: () => exportQuotes(picked) },
+                  ]} />
         <table>
           <thead>
-            <tr><th>Quote</th><th>Customer</th><th>What</th><th>Valid until</th><th className="num">Total</th><th>Where it stands</th></tr>
+            <tr>
+              <TickAllTh all={ticks.all} some={ticks.some} onToggle={ticks.toggleAll} disabled={shown.length === 0} />
+              <SortTh label="Quote" k="number" sort={sort} onSort={onSort} />
+              <SortTh label="Customer" k="customer" sort={sort} onSort={onSort} />
+              <SortTh label="What" k="what" sort={sort} onSort={onSort} />
+              <SortTh label="Valid until" k="valid" sort={sort} onSort={onSort} />
+              <SortTh label="Total" k="total" sort={sort} onSort={onSort} className="num" />
+              <SortTh label="Where it stands" k="status" sort={sort} onSort={onSort} />
+            </tr>
           </thead>
           <tbody>
             {shown.map((q) => (
               <tr key={q.id}>
+                <TickTd checked={ticks.has(q.id)} onToggle={() => ticks.toggle(q.id)} label={`Tick ${q.quote_number}`} />
                 <td className="lead"><Link to={`/quotes/${q.id}`}><strong>{q.quote_number}</strong></Link>
                   <div className="muted small">{when(q.quote_date)}</div></td>
                 <td data-label="Customer"><Link to={`/customers/${q.customer_id}`}>{q.customer_name}</Link></td>

@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { api } from '../lib/api';
 import { money, date, when } from '../lib/format';
+import { SortTh, useSort } from '../components/ListTools';
 
 interface Entry {
   date: string;
@@ -52,6 +53,12 @@ export function StatementView(
   const [bottles, setBottles] = useState<BottleAccount | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  // Sort by a heading (11 Oct 2026). The balance on each line stays the
+  // balance after that entry in date order, so it is not itself sortable.
+  const { sorted: entries, sort, onSort } = useSort(data?.entries ?? [], {
+    date: (e) => date(e.date), type: (e) => e.type, description: (e) => e.description,
+    reference: (e) => e.reference, amount: (e) => e.amountCents,
+  });
 
   useEffect(() => {
     if (showPicker) api.get<Customer[]>('/api/customers').then(setCustomers).catch(() => {});
@@ -208,8 +215,12 @@ export function StatementView(
           <table>
             <thead>
               <tr>
-                <th>Date</th><th>Type</th><th>Description</th><th>Reference</th>
-                <th className="num">Amount</th><th className="num">Balance</th>
+                <SortTh label="Date" k="date" sort={sort} onSort={onSort} />
+                <SortTh label="Type" k="type" sort={sort} onSort={onSort} />
+                <SortTh label="Description" k="description" sort={sort} onSort={onSort} />
+                <SortTh label="Reference" k="reference" sort={sort} onSort={onSort} />
+                <SortTh label="Amount" k="amount" sort={sort} onSort={onSort} className="num" />
+                <th className="num" title="The balance after each entry, in date order">Balance</th>
               </tr>
             </thead>
             <tbody>
@@ -217,7 +228,7 @@ export function StatementView(
                 <td colSpan={5} className="muted">Opening balance</td>
                 <td className="num muted">{money(data.openingBalanceCents)}</td>
               </tr>
-              {data.entries.map((e, i) => (
+              {entries.map((e, i) => (
                 <tr key={i}>
                   <td>{when(e.date)}</td>
                   <td>

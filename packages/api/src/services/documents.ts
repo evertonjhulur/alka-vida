@@ -1149,3 +1149,58 @@ export async function emailInvoices(
 }
 
 export { cash as formatCash, newDoc, fmtDate, billTo, letterhead, BRAND, recipient, signOff, COLOR_BLUE, COLOR_INDIGO };
+
+/* ------------------------------------------------------------------ */
+/* Batch actions on the invoice lists (11 Oct 2026)                    */
+/* ------------------------------------------------------------------ */
+
+/**
+ * "Print" for any invoices or credit notes, any customers: one PDF, each on
+ * its own page, no cover (that is for one customer's email). Oldest first.
+ */
+export async function printInvoices(db: Db, invoiceIds: readonly string[]): Promise<{ filename: string; pdf: Buffer }> {
+  const ids = [...new Set(invoiceIds)];
+  if (ids.length === 0) throw new RuleViolation('choose at least one invoice');
+  const rows = await db.query<{ invoice_id: string }>(
+    `SELECT invoice_id FROM invoice_ledger WHERE invoice_id = ANY($1::uuid[])
+     ORDER BY invoice_date, invoice_number`, [ids],
+  );
+  if (rows.length === 0) throw new RuleViolation('those invoices no longer exist');
+  const { doc, finished } = newDoc();
+  for (let i = 0; i < rows.length; i++) {
+    if (i > 0) doc.addPage();
+    await drawInvoice(doc, db, rows[i].invoice_id);
+  }
+  doc.end();
+  return { filename: `Invoices-${rows.length}.pdf`, pdf: await finished };
+}
+
+/**
+ * "Send" for invoices of any customers: each customer gets ONE email with
+ * their invoices from the batch in one PDF (the same email as ticking them on
+ * the customer's page). Says, per customer, where it went or why it did not.
+ */
+export async function emailInvoicesByCustomer(
+  db: Db, actor: Actor, invoiceIds: readonly string[],
+): Promise<Array<{ label: string; sentTo?: string; error?: string }>> {
+  requireRole(actor, 'admin', 'user');
+  const rows = await db.query<{ invoice_id: string; customer_id: string; customer_name: string }>(
+    `SELECT invoice_id, customer_id, customer_name FROM invoice_ledger
+     WHERE invoice_id = ANY($1::uuid[]) AND status <> 'Cancelled'
+     ORDER BY customer_name, invoice_date`, [[...new Set(invoiceIds)]],
+  );
+  const groups = new Map<string, { name: string; ids: string[] }>();
+  for (const r of rows) {
+    if (!groups.has(r.customer_id)) groups.set(r.customer_id, { name: r.customer_name, ids: [] });
+    groups.get(r.customer_id)!.ids.push(r.invoice_id);
+  }
+  const out: Array<{ label: string; sentTo?: string; error?: string }> = [];
+  for (const g of groups.values()) {
+    try {
+      // emailInvoices marks each one Sent.
+      const r = await emailInvoices(db, actor, g.ids, {});
+      out.push({ label: g.name, sentTo: r.sentTo });
+    } catch (e) { out.push({ label: g.name, error: (e as Error).message }); }
+  }
+  return out;
+}

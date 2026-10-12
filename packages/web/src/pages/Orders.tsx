@@ -1,6 +1,9 @@
 import { Fragment, useEffect, useState, type ReactNode } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { api } from '../lib/api';
+import { askText } from '../components/Dialog';
+import { BatchBar, SortTh, StatusSelect, TickAllTh, TickTd, useSort, useTicks } from '../components/ListTools';
+import { downloadCsv, dollars } from '../lib/csv';
 import { payMethods, useTakeCard } from '../lib/payments';
 import { money, date, day, relDay, toCents, todayInJamaica } from '../lib/format';
 
@@ -42,7 +45,20 @@ interface OrderLine {
   price_per_case_cents: number; price_per_bottle_cents: number;
 }
 
-type Show = 'waiting' | 'delivered' | 'cancelled' | 'all';
+type Show = 'waiting' | 'delivered' | 'cancelled' | 'all' | 'onround' | 'needsround' | 'collect' | 'late' | 'part' | 'review';
+/** The Status drop-down (Everton, 11 Oct 2026: a drop-down, not buttons). */
+const ORDER_SHOW: ReadonlyArray<readonly [Show, string]> = [
+  ['waiting', 'Waiting (not delivered yet)'],
+  ['onround', '· On a round or on the road'],
+  ['needsround', '· Needs a round'],
+  ['collect', '· To collect'],
+  ['late', '· Late, missed or not collected'],
+  ['part', '· Part delivered'],
+  ['review', '· Needs approval'],
+  ['delivered', 'Delivered, collected or sold'],
+  ['cancelled', 'Cancelled'],
+  ['all', 'Any status'],
+];
 type When = 'any' | 'today' | 'week' | 'late' | 'range';
 type Panel = 'collect' | 'repeat' | 'offround' | 'cancel';
 
@@ -325,9 +341,21 @@ export default function Orders() {
     return d.toISOString().slice(0, 10);
   })();
   const needle = find.trim().toLowerCase();
-  const byStatus = (o: Order) => (show === 'waiting' ? waiting(o)
-    : show === 'delivered' ? o.status === 'Delivered'
-      : show === 'cancelled' ? o.status === 'Cancelled' : true);
+  const byStatus = (o: Order) => {
+    const label = standing(o, today).label;
+    switch (show) {
+      case 'waiting': return waiting(o);
+      case 'delivered': return o.status === 'Delivered';
+      case 'cancelled': return o.status === 'Cancelled';
+      case 'onround': return label === 'On a round' || label === 'On the road';
+      case 'needsround': return label === 'Needs a round';
+      case 'collect': return waiting(o) && o.delivery_mode === 'Pickup';
+      case 'late': return label === 'Late' || label.startsWith('Missed') || label === 'Not collected yet';
+      case 'part': return o.status === 'Partially Delivered';
+      case 'review': return !!o.needs_review && waiting(o);
+      default: return true;
+    }
+  };
   const forDay = (o: Order) => (o.requested_delivery_date ? date(o.requested_delivery_date) : date(o.order_date));
   const byWhen = (o: Order) => {
     const d = forDay(o);
@@ -348,17 +376,37 @@ export default function Orders() {
     .sort((a, b) => (show === 'waiting'
       ? forDay(a).localeCompare(forDay(b)) || a.order_number.localeCompare(b.order_number)
       : 0));
-  const page = shown.slice(0, limit);
-  const count = (f: Show) => orders.filter((o) => (f === 'waiting' ? waiting(o)
-    : f === 'delivered' ? o.status === 'Delivered'
-      : f === 'cancelled' ? o.status === 'Cancelled' : true)).length;
-
-  const pill = (key: Show, label: string, withCount = false) => (
-    <button type="button" className={`pill${show === key ? ' active' : ''}`}
-            aria-pressed={show === key} onClick={() => { setShow(key); setLimit(50); }}>
-      {label}{withCount ? ` · ${count(key)}` : ''}
-    </button>
-  );
+  // Sorting by a heading (11 Oct 2026); until one is clicked, the order above.
+  const { sorted, sort, onSort } = useSort(shown, {
+    number: (o) => o.order_number, customer: (o) => o.customer_name,
+    date: (o) => (o.delivery_mode === 'Counter' ? date(o.order_date) : forDay(o)),
+    how: (o) => howLabel(o), status: (o) => standing(o, today).label, total: (o) => Number(o.grand_total_cents),
+  });
+  const page = sorted.slice(0, limit);
+  const ticks = useTicks(page.map((o) => o.id));
+  const picked = page.filter((o) => ticks.has(o.id));
+  const cancellable = picked.filter((o) => o.status === 'Pending');
+  const exportOrders = (list: Order[]) => downloadCsv('orders', [
+    ['Order', 'Customer', 'Placed', 'Delivery date', 'How', 'Status', 'What', 'PO', 'Total'],
+    ...list.map((o) => [o.order_number, o.customer_name, date(o.order_date),
+      o.requested_delivery_date ? date(o.requested_delivery_date) : '', howLabel(o), standing(o, today).label,
+      short(o.lines_summary), o.customer_po ?? '', dollars(Number(o.grand_total_cents))]),
+  ]);
+  async function cancelPicked() {
+    const reason = await askText(`Cancel ${cancellable.length} order${cancellable.length === 1 ? '' : 's'}? `
+      + 'Each customer is told, as when one is cancelled on its own.', { label: 'Why (optional)', confirmLabel: 'Cancel them' });
+    if (reason === null) return;
+    setBusy(true); setError(null); setMsg(null);
+    const failed: string[] = [];
+    for (const o of cancellable) {
+      try { await api.post(`/api/orders/${o.id}/cancel`, { reason: reason.trim() || undefined }); }
+      catch (e) { failed.push(`${o.order_number}: ${e instanceof Error ? e.message : 'could not cancel'}`); }
+    }
+    await load().catch(() => {});
+    setBusy(false);
+    setMsg(`${cancellable.length - failed.length} cancelled.`);
+    if (failed.length) setError(failed.join(' · '));
+  }
 
   const menu = (o: Order) => {
     const onRound = !!o.stop_id && o.sheet_status === 'Open' && o.stop_outcome === 'Pending'
@@ -481,7 +529,7 @@ export default function Orders() {
     }
     return (
       <tr className="order-panel-row">
-        <td colSpan={7}><div className="order-panel">{body}</div></td>
+        <td colSpan={8}><div className="order-panel">{body}</div></td>
       </tr>
     );
   };
@@ -648,12 +696,7 @@ export default function Orders() {
             <input id="find" type="search" placeholder="Order number or customer"
                    value={find} onChange={(e) => { setFind(e.target.value); setLimit(50); }} />
           </div>
-          <div className="pills" role="group" aria-label="Status">
-            {pill('waiting', 'Waiting', true)}
-            {pill('delivered', 'Delivered')}
-            {pill('cancelled', 'Cancelled')}
-            {pill('all', 'All')}
-          </div>
+          <StatusSelect id="ord-st" value={show} onChange={(v) => { setShow(v as Show); setLimit(50); }} options={ORDER_SHOW} />
           <div className="field">
             <label htmlFor="kind">How</label>
             <select id="kind" value={how} onChange={(e) => setHow(e.target.value)}>
@@ -694,11 +737,25 @@ export default function Orders() {
           )}
         </div>
 
+        <BatchBar inset count={picked.length} noun={['order', 'orders']} busy={busy}
+                  summary={money(picked.reduce((a, o) => a + Number(o.grand_total_cents), 0))}
+                  onClear={ticks.clear}
+                  actions={[
+                    { label: 'Export to Excel', run: () => exportOrders(picked) },
+                    { label: 'Cancel orders', danger: true, run: () => { void cancelPicked(); },
+                      disabledWhy: cancellable.length ? null : 'Only orders not delivered yet can be cancelled' },
+                  ]} />
         <table className="orders-table">
           <thead>
             <tr>
-              <th>Order</th><th>Customer</th><th>Delivery date</th><th>How</th>
-              <th>Status</th><th className="num">Total</th><th />
+              <TickAllTh all={ticks.all} some={ticks.some} onToggle={ticks.toggleAll} disabled={page.length === 0} />
+              <SortTh label="Order" k="number" sort={sort} onSort={onSort} />
+              <SortTh label="Customer" k="customer" sort={sort} onSort={onSort} />
+              <SortTh label="Delivery date" k="date" sort={sort} onSort={onSort} />
+              <SortTh label="How" k="how" sort={sort} onSort={onSort} />
+              <SortTh label="Status" k="status" sort={sort} onSort={onSort} />
+              <SortTh label="Total" k="total" sort={sort} onSort={onSort} className="num" />
+              <th />
             </tr>
           </thead>
           <tbody>
@@ -708,6 +765,7 @@ export default function Orders() {
               return (
                 <Fragment key={o.id}>
                   <tr className={open?.id === o.id ? 'is-open' : undefined}>
+                    <TickTd checked={ticks.has(o.id)} onToggle={() => ticks.toggle(o.id)} label={`Tick ${o.order_number}`} />
                     <td data-label="Order">
                       <strong>{o.order_number}</strong>
                       <div className="muted small">{origin(o)}</div>
@@ -773,7 +831,7 @@ export default function Orders() {
         )}
         <div className="list-foot">
           <span>
-            {page.length} of {shown.length} {show === 'waiting' ? 'waiting · soonest first' : 'shown · newest first'}
+            {page.length} of {shown.length} {sort ? 'shown' : show === 'waiting' ? 'waiting · soonest first' : 'shown · newest first'}
           </span>
           {shown.length > page.length && (
             <button type="button" className="secondary" onClick={() => setLimit(limit + 50)}>Show more</button>

@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
-import { api, download, type Session } from '../lib/api';
+import { api, download, downloadPost, type Session } from '../lib/api';
+import { BatchBar, SortTh, StatusSelect, TickAllTh, TickTd, sendSummary, useSort, useTicks } from '../components/ListTools';
+import { downloadCsv, dollars } from '../lib/csv';
 import { money, toCents, when } from '../lib/format';
 import CustomerPicker, { type PickerCustomer } from '../components/CustomerPicker';
 
@@ -141,6 +143,30 @@ export default function CreditNotes({ session }: { session: Session }) {
 
   const notYet = prices.filter((p) => !lines.some((l) => l.productId === p.product_id));
 
+  /* ---- the list: status, sort, batch actions (11 Oct 2026) ---- */
+  const [cnStatus, setCnStatus] = useState('');
+  const amountOf = (r: Row) => (r.credit_status === 'Pending' ? Math.abs(Number(r.pending_amount_cents ?? 0)) : Math.abs(Number(r.grand_total_cents)));
+  const cnFiltered = rows.filter((r) => (!cnStatus ? true
+    : cnStatus === 'unsent' ? r.credit_status === 'Approved' && !r.sent_date
+      : cnStatus === 'sent' ? !!r.sent_date : r.credit_status === cnStatus));
+  const cnSort = useSort(cnFiltered, {
+    number: (r) => r.invoice_number, date: (r) => String(r.invoice_date).slice(0, 10), customer: (r) => r.customer_name,
+    against: (r) => r.linked_invoice_number ?? '', why: (r) => r.reason ?? '', credit: (r) => amountOf(r), state: (r) => r.credit_status,
+  });
+  const cnTicks = useTicks(cnSort.sorted.map((r) => r.id));
+  const cnPicked = cnSort.sorted.filter((r) => cnTicks.has(r.id));
+  async function cnBatch(fn: () => Promise<string | null>, failed: string) {
+    setBusy(true); setError(null); setMsg(null);
+    try { const m = await fn(); if (m) setMsg(m); } catch (e) { setError(e instanceof Error ? e.message : failed); }
+    finally { setBusy(false); }
+  }
+  const exportCns = (list: Row[]) => downloadCsv('credit-notes', [
+    ['Credit note', 'Date', 'Customer', 'Against', 'Why', 'Credit', 'State', 'Sent'],
+    ...list.map((r) => [r.invoice_number, String(r.invoice_date).slice(0, 10), r.customer_name, r.linked_invoice_number ?? 'Account',
+      r.reason ?? '', dollars(amountOf(r)), r.credit_status === 'Approved' ? 'Counted' : r.credit_status === 'Pending' ? 'Waiting for approval' : 'Rejected',
+      r.sent_date ? String(r.sent_date).slice(0, 10) : '']),
+  ]);
+
   return (
     <>
       <div className="panel-head record-head">
@@ -259,13 +285,49 @@ export default function CreditNotes({ session }: { session: Session }) {
       )}
 
       <div className="panel phone-cards">
+        <div className="row">
+          <StatusSelect id="cn-st" value={cnStatus} onChange={setCnStatus} options={[
+            ['', 'Any status'], ['Approved', 'Counted'], ['Pending', 'Waiting for approval'], ['Rejected', 'Rejected'],
+            ['unsent', 'Counted, not sent yet'], ['sent', 'Sent'],
+          ]} />
+        </div>
+        <BatchBar count={cnPicked.length} noun={['credit note', 'credit notes']} busy={busy}
+                  summary={money(cnPicked.reduce((a, r) => a + amountOf(r), 0))}
+                  onClear={cnTicks.clear}
+                  actions={[
+                    { label: 'Print (one PDF)', run: () => cnBatch(async () => {
+                      await downloadPost('/api/batch/invoices/print.pdf', { ids: cnTicks.picked }, `Credit-notes-${cnPicked.length}.pdf`);
+                      return `${cnPicked.length} in one PDF.`;
+                    }, 'Could not build the PDF') },
+                    { label: 'Email (each customer gets theirs together)', run: () => cnBatch(async () => {
+                      const r = await api.post<Array<{ label: string; sentTo?: string; error?: string }>>('/api/batch/invoices/send', { ids: cnTicks.picked });
+                      const sm = sendSummary(r);
+                      if (sm.problems.length) setError(`Not sent: ${sm.problems.join(' · ')}`);
+                      await load();
+                      return sm.ok;
+                    }, 'Could not send them'),
+                    disabledWhy: cnPicked.every((r) => r.credit_status === 'Approved') ? null : 'Only counted credit notes can be sent' },
+                    { label: 'Export to Excel', run: () => exportCns(cnPicked) },
+                  ]} />
         <table>
-          <thead><tr><th>Credit note</th><th>Customer</th><th>Against</th><th>Why</th><th className="num">Credit</th><th>State</th><th /></tr></thead>
+          <thead>
+            <tr>
+              <TickAllTh all={cnTicks.all} some={cnTicks.some} onToggle={cnTicks.toggleAll} disabled={cnSort.sorted.length === 0} />
+              <SortTh label="Credit note" k="number" sort={cnSort.sort} onSort={cnSort.onSort} />
+              <SortTh label="Customer" k="customer" sort={cnSort.sort} onSort={cnSort.onSort} />
+              <SortTh label="Against" k="against" sort={cnSort.sort} onSort={cnSort.onSort} />
+              <SortTh label="Why" k="why" sort={cnSort.sort} onSort={cnSort.onSort} />
+              <SortTh label="Credit" k="credit" sort={cnSort.sort} onSort={cnSort.onSort} className="num" />
+              <SortTh label="State" k="state" sort={cnSort.sort} onSort={cnSort.onSort} />
+              <th />
+            </tr>
+          </thead>
           <tbody>
-            {rows.map((r) => {
-              const amt = r.credit_status === 'Pending' ? Math.abs(Number(r.pending_amount_cents ?? 0)) : Math.abs(Number(r.grand_total_cents));
+            {cnSort.sorted.map((r) => {
+              const amt = amountOf(r);
               return (
                 <tr key={r.id}>
+                  <TickTd checked={cnTicks.has(r.id)} onToggle={() => cnTicks.toggle(r.id)} label={`Tick ${r.invoice_number}`} />
                   <td className="lead"><Link to={`/invoices/${r.id}`}><strong>{r.invoice_number}</strong></Link>
                     <div className="muted small">{when(r.invoice_date)}</div></td>
                   <td data-label="Customer"><Link to={`/customers/${r.customer_id}`}>{r.customer_name}</Link></td>
@@ -294,6 +356,7 @@ export default function CreditNotes({ session }: { session: Session }) {
             })}
           </tbody>
         </table>
+        {rows.length > 0 && cnSort.sorted.length === 0 && <p className="muted">No credit note in that status.</p>}
         {rows.length === 0 && <p className="muted">No credit notes yet.</p>}
       </div>
     </>

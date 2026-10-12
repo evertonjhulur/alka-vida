@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../lib/api';
+import { SortTh, StatusSelect, useSort } from '../components/ListTools';
 import { money, date, todayInJamaica, when } from '../lib/format';
 
 interface Sheet {
@@ -74,16 +75,13 @@ export default function DeliverySheets() {
   const dayOf = (s: Sheet) => String(s.delivery_date).slice(0, 10);
   const daysWithSheets = [...new Set(sheets.map(dayOf))].sort().reverse();
   const onDay = day ? sheets.filter((s) => dayOf(s) === day) : sheets;
-  const shown = phase === 'all' ? onDay : onDay.filter((s) => phaseOf(s) === phase);
-  const pill = (key: Phase | 'all', label: string) => {
-    const n = key === 'all' ? onDay.length : onDay.filter((s) => phaseOf(s) === key).length;
-    return (
-      <button key={key} type="button" className={`pill${phase === key ? ' active' : ''}`}
-              aria-pressed={phase === key} onClick={() => setPhase(key)}>
-        {label} · {n}
-      </button>
-    );
-  };
+  const filtered = phase === 'all' ? onDay : onDay.filter((s) => phaseOf(s) === phase);
+  // Click a heading to sort (11 Oct 2026); until then, as they come.
+  const { sorted: shown, sort, onSort } = useSort(filtered, {
+    date: (s) => dayOf(s), zone: (s) => s.zone, driver: (s) => s.driver_name ?? '',
+    stops: (s) => Number(s.stop_count), status: (s) => PHASES.findIndex((p) => p.key === phaseOf(s)),
+    variance: (s) => (s.cash_variance_cents === null ? null : Number(s.cash_variance_cents)),
+  });
 
   return (
     <>
@@ -157,15 +155,20 @@ export default function DeliverySheets() {
       )}
 
       <div className="panel">
-        <div className="pills" role="group" aria-label="Status">
-          {pill('all', 'All')}
-          {PHASES.map((p) => pill(p.key, p.label))}
+        <div className="row">
+          <StatusSelect id="rd-st" value={phase} onChange={(v) => setPhase(v as Phase | 'all')}
+                        options={[['all', 'Any status'], ...PHASES.map((p) => [p.key, p.label] as const)]} />
         </div>
         <table>
           <thead>
             <tr>
-              <th>Date</th><th>Zone</th><th>Driver</th><th>Stops</th>
-              <th>Status</th><th className="num">Cash variance</th><th />
+              <SortTh label="Date" k="date" sort={sort} onSort={onSort} />
+              <SortTh label="Zone" k="zone" sort={sort} onSort={onSort} />
+              <SortTh label="Driver" k="driver" sort={sort} onSort={onSort} />
+              <SortTh label="Stops" k="stops" sort={sort} onSort={onSort} />
+              <SortTh label="Status" k="status" sort={sort} onSort={onSort} />
+              <SortTh label="Cash variance" k="variance" sort={sort} onSort={onSort} className="num" />
+              <th />
             </tr>
           </thead>
           <tbody>

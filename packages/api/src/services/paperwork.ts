@@ -28,13 +28,19 @@ import { raiseCycleInvoices } from './cycles.ts';
 /* ------------------------------------------------------------------ */
 
 export async function renderQuotePdf(db: Db, quoteId: string) {
+  const { doc, finished } = newDoc();
+  const meta = await drawQuote(doc, db, quoteId);
+  doc.end();
+  return { ...meta, pdf: await finished };
+}
+
+async function drawQuote(doc: PDFKit.PDFDocument, db: Db, quoteId: string) {
   const q = await getQuotation(db, quoteId) as unknown as Record<string, unknown> & {
     lines: Array<Record<string, unknown>>;
   } | null;
   if (!q) throw new RuleViolation('that quotation no longer exists');
   const customer = await billTo(db, q.customer_id as string);
 
-  const { doc, finished } = newDoc();
   letterhead(doc, 50);
   doc.moveDown(1.2);
   doc.fillColor(COLOR_INDIGO).fontSize(16).text('QUOTATION', 50, doc.y, { align: 'right', width: 510 });
@@ -94,10 +100,8 @@ export async function renderQuotePdf(db: Db, quoteId: string) {
     .text(`${BRAND.company}  ·  All amounts in Jamaican dollars. This is a quotation, not an invoice.`
       + `\nContact ${await contactEmail(db)} for any orders or queries.`,
       50, doc.y, { align: 'center', width: 510 });
-  doc.end();
   return {
-    filename: `${q.quote_number}.pdf`, pdf: await finished,
-    quoteNumber: String(q.quote_number), customerName: customer.name, customerEmail: customer.email,
+    filename: `${q.quote_number}.pdf`, quoteNumber: String(q.quote_number), customerName: customer.name, customerEmail: customer.email,
   };
 }
 
@@ -174,6 +178,13 @@ export async function markQuoteSent(db: Db, actor: Actor, quoteId: string) {
 /* ------------------------------------------------------------------ */
 
 export async function renderPoPdf(db: Db, poId: string) {
+  const { doc, finished } = newDoc();
+  const meta = await drawPo(doc, db, poId);
+  doc.end();
+  return { ...meta, pdf: await finished };
+}
+
+async function drawPo(doc: PDFKit.PDFDocument, db: Db, poId: string) {
   const po = await getPurchaseOrder(db, poId) as unknown as Record<string, unknown> & {
     lines: Array<Record<string, unknown>>;
   } | null;
@@ -182,7 +193,6 @@ export async function renderPoPdf(db: Db, poId: string) {
     `SELECT value FROM system_settings WHERE key = 'env_tax_rate_percent'`,
   );
 
-  const { doc, finished } = newDoc();
   letterhead(doc, 50);
   doc.moveDown(1.2);
   doc.fillColor(COLOR_INDIGO).fontSize(16).text('PURCHASE ORDER', 50, doc.y, { align: 'right', width: 510 });
@@ -239,10 +249,8 @@ export async function renderPoPdf(db: Db, poId: string) {
   doc.moveDown(2).fontSize(8).fillColor('#777')
     .text(`${BRAND.company}  ·  Please quote ${po.po_number} on your invoice and delivery note.`,
       50, doc.y, { align: 'center', width: 510 });
-  doc.end();
   return {
-    filename: `${po.po_number}.pdf`, pdf: await finished,
-    poNumber: String(po.po_number), supplierName: String(po.supplier_name),
+    filename: `${po.po_number}.pdf`, poNumber: String(po.po_number), supplierName: String(po.supplier_name),
     supplierEmail: (po.supplier_email as string) ?? null,
   };
 }
@@ -292,6 +300,13 @@ export async function emailPurchaseOrder(
  * the first time a receipt is issued.
  */
 export async function renderReceiptPdf(db: Db, paymentIds: readonly string[]) {
+  const { doc, finished } = newDoc();
+  const meta = await drawReceipt(doc, db, paymentIds);
+  doc.end();
+  return { ...meta, pdf: await finished };
+}
+
+async function drawReceipt(doc: PDFKit.PDFDocument, db: Db, paymentIds: readonly string[]) {
   if (paymentIds.length === 0) throw new RuleViolation('no payment to give a receipt for');
   const rows = await db.query<{
     id: string; customer_id: string; amount_cents: number; payment_date: string; method: string;
@@ -325,7 +340,6 @@ export async function renderReceiptPdf(db: Db, paymentIds: readonly string[]) {
   );
   const total = rows.reduce((s, r) => s + num(r.amount_cents), 0);
 
-  const { doc, finished } = newDoc();
   letterhead(doc, 50);
   doc.moveDown(1.2);
   doc.fillColor(COLOR_INDIGO).fontSize(16).text('RECEIPT', 50, doc.y, { align: 'right', width: 510 });
@@ -359,9 +373,8 @@ export async function renderReceiptPdf(db: Db, paymentIds: readonly string[]) {
   doc.moveDown(2).fontSize(8).fillColor('#777')
     .text(`${BRAND.company}  ·  All amounts in Jamaican dollars.`
       + `\nContact ${await contactEmail(db)} for any orders or queries.`, 50, doc.y, { align: 'center', width: 510 });
-  doc.end();
   return {
-    filename: `Receipt-${number}.pdf`, pdf: await finished, receiptNumber: number,
+    filename: `Receipt-${number}.pdf`, receiptNumber: number,
     customerName: customer.name, customerEmail: customer.email, totalCents: total,
   };
 }
@@ -596,4 +609,98 @@ export async function automationLog(db: Db, limit = 100) {
      FROM auto_emails a JOIN customers c ON c.id = a.customer_id
      ORDER BY a.created_at DESC LIMIT $1`, [limit],
   );
+}
+
+/* ------------------------------------------------------------------ */
+/* Several at once: batch actions on the lists (11 Oct 2026)           */
+/* ------------------------------------------------------------------ */
+
+/** What happened to each thing a batch action was asked to send. */
+export interface BatchResult { label: string; sentTo?: string; error?: string }
+
+/** Several documents in one PDF, each starting on its own page. */
+async function printEach(
+  ids: readonly string[], noun: string, filename: string,
+  draw: (doc: PDFKit.PDFDocument, id: string) => Promise<unknown>,
+): Promise<{ filename: string; pdf: Buffer }> {
+  const list = [...new Set(ids)];
+  if (list.length === 0) throw new RuleViolation(`choose at least one ${noun}`);
+  const { doc, finished } = newDoc();
+  for (let i = 0; i < list.length; i++) {
+    if (i > 0) doc.addPage();
+    await draw(doc, list[i]);
+  }
+  doc.end();
+  return { filename, pdf: await finished };
+}
+
+export async function printQuotes(db: Db, ids: readonly string[]) {
+  return printEach(ids, 'quote', `Quotes-${ids.length}.pdf`, (doc, id) => drawQuote(doc, db, id));
+}
+
+export async function printPurchaseOrders(db: Db, ids: readonly string[]) {
+  return printEach(ids, 'purchase order', `Purchase-orders-${ids.length}.pdf`, (doc, id) => drawPo(doc, db, id));
+}
+
+/** One receipt per payment, any customers, in one PDF. Reversals have none. */
+export async function printReceipts(db: Db, paymentIds: readonly string[]) {
+  const ok = await db.query<{ id: string }>(
+    `SELECT id FROM payments WHERE id = ANY($1::uuid[]) AND NOT is_reversal AND amount_cents > 0
+     ORDER BY payment_date, created_at`, [[...new Set(paymentIds)]],
+  );
+  if (ok.length === 0) throw new RuleViolation('none of those payments gets a receipt (reversals do not)');
+  return printEach(ok.map((r) => r.id), 'payment', `Receipts-${ok.length}.pdf`, (doc, id) => drawReceipt(doc, db, [id]));
+}
+
+/** Each customer gets one receipt email covering their payments in the batch. */
+export async function emailReceiptsByCustomer(
+  db: Db, actor: Actor, paymentIds: readonly string[],
+): Promise<BatchResult[]> {
+  requireRole(actor, 'admin', 'user');
+  const rows = await db.query<{ id: string; customer_id: string; name: string }>(
+    `SELECT p.id, p.customer_id, c.name FROM payments p JOIN customers c ON c.id = p.customer_id
+     WHERE p.id = ANY($1::uuid[]) AND NOT p.is_reversal AND p.amount_cents > 0
+     ORDER BY c.name, p.payment_date`, [[...new Set(paymentIds)]],
+  );
+  const groups = new Map<string, { name: string; ids: string[] }>();
+  for (const r of rows) {
+    if (!groups.has(r.customer_id)) groups.set(r.customer_id, { name: r.name, ids: [] });
+    groups.get(r.customer_id)!.ids.push(r.id);
+  }
+  const out: BatchResult[] = [];
+  for (const g of groups.values()) {
+    try {
+      const r = await emailReceipt(db, actor, g.ids, {});
+      out.push({ label: g.name, sentTo: r.sentTo });
+    } catch (e) { out.push({ label: g.name, error: (e as Error).message }); }
+  }
+  return out;
+}
+
+export async function emailPurchaseOrders(db: Db, actor: Actor, ids: readonly string[]): Promise<BatchResult[]> {
+  const out: BatchResult[] = [];
+  for (const id of new Set(ids)) {
+    try {
+      const r = await emailPurchaseOrder(db, actor, id);
+      out.push({ label: r.poNumber, sentTo: r.sentTo });
+    } catch (e) {
+      const po = await db.maybeOne<{ po_number: string }>(`SELECT po_number FROM purchase_orders WHERE id = $1`, [id]);
+      out.push({ label: po?.po_number ?? 'A purchase order', error: (e as Error).message });
+    }
+  }
+  return out;
+}
+
+export async function emailQuotes(db: Db, actor: Actor, ids: readonly string[]): Promise<BatchResult[]> {
+  const out: BatchResult[] = [];
+  for (const id of new Set(ids)) {
+    try {
+      const r = await emailQuote(db, actor, id);
+      out.push({ label: r.quoteNumber, sentTo: r.sentTo ?? undefined });
+    } catch (e) {
+      const q = await db.maybeOne<{ quote_number: string }>(`SELECT quote_number FROM quotations WHERE id = $1`, [id]);
+      out.push({ label: q?.quote_number ?? 'A quote', error: (e as Error).message });
+    }
+  }
+  return out;
 }

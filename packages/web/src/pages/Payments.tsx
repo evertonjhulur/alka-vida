@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { api, idempotencyKey } from '../lib/api';
+import { api, downloadPost, idempotencyKey } from '../lib/api';
+import { BatchBar, SortTh, StatusSelect, TickAllTh, TickTd, sendSummary, useSort, useTicks } from '../components/ListTools';
+import { downloadCsv, dollars } from '../lib/csv';
 import { payMethods, useTakeCard } from '../lib/payments';
 import { money, toCents, day } from '../lib/format';
 import { todayInJamaica as todayJa } from '../lib/format';
@@ -27,6 +29,8 @@ interface Unapplied {
   id: string; customer_id: string; customer_name: string; amount_cents: number | string;
   payment_date: string; method: string; reference: string | null; notes: string | null;
   round_zone?: string | null;
+  /** Paid with an order still to be delivered: it waits for that order's invoice. */
+  order_number?: string | null; order_open?: boolean | null;
 }
 
 const METHODS: Array<[string, string]> = [
@@ -48,6 +52,8 @@ export default function Payments() {
   const [error, setError] = useState<string | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  /** Bumped after anything changes, so the list of payments received reloads. */
+  const [stamp, setStamp] = useState(0);
 
   const load = useCallback(async () => {
     const [c, u, inv] = await Promise.all([
@@ -97,7 +103,7 @@ export default function Payments() {
 
   async function act(what: () => Promise<string>, fallback: string) {
     setBusy(true); setError(null); setMsg(null);
-    try { setMsg(await what()); await load(); } catch (err) {
+    try { setMsg(await what()); await load(); setStamp((n) => n + 1); } catch (err) {
       setError(err instanceof Error ? err.message : fallback);
     } finally { setBusy(false); }
   }
@@ -267,6 +273,9 @@ export default function Payments() {
                     <td data-label="Customer">
                       <Link to={`/customers/${p.customer_id}?tab=payments`}>{p.customer_name}</Link>
                       {p.reference && <div className="muted small">{p.reference}</div>}
+                      {p.order_number && p.order_open && (
+                        <div className="small" style={{ color: 'var(--info)' }}>paid with {p.order_number}: goes on its invoice when delivered</div>
+                      )}
                     </td>
                     <td data-label="How" className="small">
                       {p.method === 'Bank Transfer' ? 'Bank transfer' : p.method}{p.round_zone ? ` on the ${p.round_zone} round` : ''}
@@ -309,6 +318,162 @@ export default function Payments() {
           </div>
         )}
       </div>
+      <Received stamp={stamp} />
     </>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* Every payment received: status, sort, batch actions (11 Oct 2026)   */
+/* ------------------------------------------------------------------ */
+
+interface Paid {
+  id: string; customer_id: string; customer_name: string; payment_date: string;
+  amount_cents: number | string; method: string | null; reference: string | null;
+  receipt_number: string | null; invoice_id: string | null; invoice_number: string | null;
+  is_reversal: boolean; reversed: boolean; order_number: string | null; round_zone: string | null;
+}
+
+const PAID_FILTERS = [
+  ['', 'Any'], ['invoice', 'Against an invoice'], ['account', 'Left on the account'], ['reversed', 'Reversed'],
+] as const;
+
+const startOfMonth = () => `${todayJa().slice(0, 8)}01`;
+
+function Received({ stamp }: { stamp: number }) {
+  const [rows, setRows] = useState<Paid[]>([]);
+  const [from, setFrom] = useState(startOfMonth());
+  const [to, setTo] = useState('');
+  const [state, setState] = useState('');
+  const [how, setHow] = useState('');
+  const [find, setFind] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const q = new URLSearchParams();
+    if (from) q.set('from', from);
+    if (to) q.set('to', to);
+    api.get<Paid[]>(`/api/payments?${q}`).then(setRows).catch((e) => setError(e.message));
+  }, [from, to, stamp]);
+
+  const needle = find.trim().toLowerCase();
+  const filtered = rows.filter((p) => (!state ? true
+    : state === 'invoice' ? !!p.invoice_id && !p.is_reversal
+      : state === 'account' ? !p.invoice_id && !p.is_reversal
+        : p.is_reversal || p.reversed)
+    && (!how || p.method === how)
+    && (!needle || p.customer_name.toLowerCase().includes(needle)
+      || (p.reference ?? '').toLowerCase().includes(needle) || (p.invoice_number ?? '').toLowerCase().includes(needle)));
+  const { sorted, sort, onSort } = useSort(filtered, {
+    date: (p) => p.payment_date, customer: (p) => p.customer_name, against: (p) => p.invoice_number ?? '',
+    how: (p) => p.method ?? '', reference: (p) => p.reference ?? '', amount: (p) => Number(p.amount_cents),
+  });
+  const ticks = useTicks(sorted.filter((p) => !p.is_reversal && Number(p.amount_cents) > 0).map((p) => p.id));
+  const picked = sorted.filter((p) => ticks.has(p.id));
+  const methods = [...new Set(rows.map((p) => p.method).filter(Boolean))] as string[];
+
+  async function batch(fn: () => Promise<string | null>, failed: string) {
+    setBusy(true); setError(null); setMsg(null);
+    try { const m = await fn(); if (m) setMsg(m); } catch (e) { setError(e instanceof Error ? e.message : failed); }
+    finally { setBusy(false); }
+  }
+  const exportRows = (list: Paid[]) => downloadCsv(`payments${from ? `-${from}` : ''}${to ? `-to-${to}` : ''}`, [
+    ['Date', 'Customer', 'Against', 'How', 'Reference', 'Receipt', 'Amount', 'Reversed'],
+    ...list.map((p) => [p.payment_date, p.customer_name, p.invoice_number ?? 'On account', p.method ?? '',
+      p.reference ?? '', p.receipt_number ?? '', dollars(Number(p.amount_cents)), p.is_reversal ? 'reversal' : p.reversed ? 'yes' : '']),
+  ]);
+
+  return (
+    <div className="panel" style={{ padding: 0 }}>
+      <div className="panel-pad">
+        <h2 style={{ margin: 0 }}>Payments received</h2>
+        <p className="muted small" style={{ margin: '4px 0 0' }}>Every payment recorded, newest first. Click a heading to sort.</p>
+      </div>
+      {error && <div className="notice error" style={{ margin: '0 16px 10px' }}>{error}</div>}
+      {msg && <div className="notice ok" style={{ margin: '0 16px 10px' }}>{msg}</div>}
+      <div className="list-filters">
+        <div className="field">
+          <label htmlFor="pr-find">Find</label>
+          <input id="pr-find" type="search" placeholder="Customer, reference or invoice" value={find} onChange={(e) => setFind(e.target.value)} />
+        </div>
+        <StatusSelect id="pr-state" label="Show" value={state} onChange={setState} options={PAID_FILTERS} />
+        <div className="field">
+          <label htmlFor="pr-how">How</label>
+          <select id="pr-how" value={how} onChange={(e) => setHow(e.target.value)}>
+            <option value="">Any way</option>
+            {methods.map((m) => <option key={m} value={m}>{m === 'Bank Transfer' ? 'Bank transfer' : m}</option>)}
+          </select>
+        </div>
+        <div className="field">
+          <label htmlFor="pr-from">From</label>
+          <input id="pr-from" type="date" value={from} onChange={(e) => setFrom(e.target.value)} />
+        </div>
+        <div className="field">
+          <label htmlFor="pr-to">To</label>
+          <input id="pr-to" type="date" value={to} onChange={(e) => setTo(e.target.value)} />
+        </div>
+      </div>
+        <BatchBar inset count={picked.length} noun={['payment', 'payments']} busy={busy}
+                  summary={money(picked.reduce((a, p) => a + Number(p.amount_cents), 0))}
+                  onClear={ticks.clear}
+                  actions={[
+                    { label: 'Print receipts (one PDF)', run: () => batch(async () => {
+                      await downloadPost('/api/batch/receipts/print.pdf', { ids: ticks.picked }, `Receipts-${picked.length}.pdf`);
+                      return `${picked.length} receipt${picked.length === 1 ? '' : 's'} in one PDF.`;
+                    }, 'Could not build the receipts') },
+                    { label: 'Email receipts (one per customer)', run: () => batch(async () => {
+                      const r = await api.post<Array<{ label: string; sentTo?: string; error?: string }>>('/api/batch/receipts/send', { ids: ticks.picked });
+                      const s = sendSummary(r);
+                      if (s.problems.length) setError(`Not sent: ${s.problems.join(' · ')}`);
+                      return s.ok;
+                    }, 'Could not send the receipts') },
+                    { label: 'Export to Excel', run: () => exportRows(picked) },
+                  ]} />
+      <table className="orders-table">
+        <thead>
+          <tr>
+            <TickAllTh all={ticks.all} some={ticks.some} onToggle={ticks.toggleAll} disabled={sorted.length === 0} />
+            <SortTh label="Received" k="date" sort={sort} onSort={onSort} />
+            <SortTh label="Customer" k="customer" sort={sort} onSort={onSort} />
+            <SortTh label="Against" k="against" sort={sort} onSort={onSort} />
+            <SortTh label="How" k="how" sort={sort} onSort={onSort} />
+            <SortTh label="Reference" k="reference" sort={sort} onSort={onSort} />
+            <SortTh label="Amount" k="amount" sort={sort} onSort={onSort} className="num" />
+          </tr>
+        </thead>
+        <tbody>
+          {sorted.map((p) => {
+            const tickable = !p.is_reversal && Number(p.amount_cents) > 0;
+            return (
+              <tr key={p.id}>
+                {tickable
+                  ? <TickTd checked={ticks.has(p.id)} onToggle={() => ticks.toggle(p.id)} label={`Tick ${money(Number(p.amount_cents))} from ${p.customer_name}`} />
+                  : <td className="tick-col" />}
+                <td data-label="Received">
+                  {day(p.payment_date)}
+                  {p.is_reversal && <> <span className="chip bad">reversal</span></>}
+                  {p.reversed && <> <span className="chip bad">reversed</span></>}
+                </td>
+                <td data-label="Customer"><Link to={`/customers/${p.customer_id}?tab=payments`}>{p.customer_name}</Link></td>
+                <td data-label="Against">
+                  {p.invoice_id ? <Link to={`/invoices/${p.invoice_id}`}>{p.invoice_number}</Link>
+                    : <span className="muted">on account{p.order_number ? ` (with ${p.order_number})` : ''}</span>}
+                </td>
+                <td data-label="How" className="small">{p.method === 'Bank Transfer' ? 'Bank transfer' : p.method}{p.round_zone ? ` · ${p.round_zone} round` : ''}</td>
+                <td data-label="Reference" className="small muted">{p.reference ?? '—'}{p.receipt_number ? ` · ${p.receipt_number}` : ''}</td>
+                <td data-label="Amount" className="num">{money(Number(p.amount_cents))}</td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+      {sorted.length === 0 && <p className="muted" style={{ padding: '0 16px 14px', margin: 0 }}>{rows.length ? 'Nothing matches.' : 'No payments in these dates.'}</p>}
+      <div className="list-foot">
+        <span>{sorted.length} shown · {money(sorted.filter((p) => !p.is_reversal).reduce((a, p) => a + Number(p.amount_cents), 0))}</span>
+        <button type="button" className="secondary" disabled={sorted.length === 0} onClick={() => exportRows(sorted)}>Export to Excel ({sorted.length})</button>
+      </div>
+    </div>
   );
 }

@@ -43,6 +43,7 @@ import * as zones from './services/zones.ts';
 import * as labour from './services/labour.ts';
 import { collectOrder, counterSale } from './services/counter.ts';
 import { registerRevisionRoutes } from './routes/revisions.ts';
+import { registerBatchRoutes } from './routes/batches.ts';
 import { registerFeedbackRoutes } from './routes/feedback.ts';
 import { registerOctoberRoutes } from './routes/october.ts';
 import * as trucks from './services/trucks.ts';
@@ -1542,6 +1543,7 @@ export async function buildServer(db: Db) {
     async () => reports.bottlePoolReport(db));
 
   registerRevisionRoutes(app as never, db, { allow: allow as never, actorOf, assertOwnCustomer });
+  registerBatchRoutes(app as never, db, { allow: allow as never, actorOf });
   registerFeedbackRoutes(app as never, db, { allow: allow as never, actorOf });
   registerOctoberRoutes(app as never, db, { allow: allow as never, actorOf });
   registerTruckRoutes(app as never, db, { allow: allow as never, actorOf });

@@ -342,13 +342,15 @@ export async function unappliedPayments(db: Db, customerId?: string) {
   return db.query<{
     id: string; customer_id: string; customer_name: string; amount_cents: number;
     payment_date: string; method: string; reference: string | null; notes: string | null;
-    round_zone: string | null;
+    round_zone: string | null; order_number: string | null; order_open: boolean | null;
   }>(
     `SELECT p.id, p.customer_id, c.name AS customer_name, p.amount_cents,
             business_date(p.payment_date)::text AS payment_date,
-            p.method, p.reference, p.notes, ds.zone AS round_zone
+            p.method, p.reference, p.notes, ds.zone AS round_zone,
+            o.order_number, (o.status NOT IN ('Delivered', 'Cancelled')) AS order_open
      FROM payments p JOIN customers c ON c.id = p.customer_id
      LEFT JOIN delivery_sheets ds ON ds.id = p.delivery_sheet_id
+     LEFT JOIN customer_orders o ON o.id = p.order_id
      WHERE p.invoice_id IS NULL AND p.status = 'Confirmed' AND NOT p.is_reversal
        AND ($1::uuid IS NULL OR p.customer_id = $1::uuid)
      ORDER BY p.payment_date DESC, c.name`,

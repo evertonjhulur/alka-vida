@@ -1507,3 +1507,31 @@ button.ns-go:disabled { background: #7d8896; border-color: #7d8896; opacity: 1; 
   .ns-billto { margin-left: 0; }
   .ns-who-row { flex-wrap: wrap; }
 }
+
+/* ---- Lists: status drop-down, sort by heading, batch actions (11 Oct 2026) ---- */
+th[aria-sort] { padding: 0; }
+.th-sort {
+  display: inline-flex; align-items: center; gap: 4px; width: 100%;
+  background: none; border: 0; border-radius: 0; color: inherit; cursor: pointer;
+  font: inherit; font-size: 12px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase;
+  padding: 8px 10px; text-align: inherit;
+}
+th.num .th-sort { justify-content: flex-end; }
+.th-sort:hover { background: #f1f5f9; color: var(--ink); filter: none; }
+.th-sort.on { color: var(--ink); }
+.th-arrow { font-size: 10px; opacity: .55; }
+.th-sort.on .th-arrow { opacity: 1; color: var(--brand); }
+.orders-table th[aria-sort]:first-child .th-sort { padding-left: 16px; }
+.batch-tools {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px;
+  padding: 8px 0; font-size: 13.5px;
+}
+.batch-tools.inset { padding: 8px 16px; border-bottom: 1px solid var(--line); }
+.batch-menu { position: relative; }
+.batch-menu > button { min-height: 34px; padding: 5px 12px; }
+.batch-pop { min-width: 260px; }
+.batch-pop .pop-item { flex-direction: column; align-items: flex-start; }
+.batch-pop button.pop-item:disabled { color: var(--chip-neutral); cursor: not-allowed; background: transparent; }
+.batch-count { color: var(--muted); }
+td.tick-col, th.tick-col { width: 34px; padding-right: 0; }
+.orders-table th.tick-col:first-child, .orders-table td.tick-col:first-child { padding-left: 16px; }

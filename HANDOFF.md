@@ -9,7 +9,8 @@ collection stops, truck loading and returns, invoice footer, card payments off, 
 and Justin's testing findings the same day (reminders, tablet layout, sign-up address, logo,
 security), then the UX review build of 11 Oct 2026 (shorter pinned menu with tabs, Statement…
 dialog, tidy-ups, customer Details in four parts), then the New sale screen of 11 Oct 2026
-(one screen, product then size, payment at the end, credit used first). See the last entries at the end.
+(one screen, product then size, payment at the end, credit used first) and the lists round (status
+drop-downs, sort by heading, batch actions). See the last entries at the end.
 
 ---
 
@@ -50,7 +51,7 @@ Working and verified end to end, in the browser as well as in tests:
 | Addresses | Line 1, line 2, town, parish. Composed into `delivery_address`, which stays what the stop and the invoice PDF read (migration 014). |
 | Employees & labour cost | Who works here, paid by the hour or by the trip, and the hours/trips recorded against them. Payroll totals for any date range. **Add from logins** creates a record per existing login — title from the role (`admin`→Manager, `user`→Employee, `driver`→Driver), rate left blank — and is safe to press twice. **Deliberately not wired into costing** (migration 015). A person is managed on their own record at `/employees/:id` — details, rate, and their own work history. |
 
-**Tests: 529 passing** (11 Oct 2026) — 68 pure domain (`packages/shared`), 461 API
+**Tests: 534 passing** (11 Oct 2026) — 68 pure domain (`packages/shared`), 466 API
 (`packages/api`, against real PostgreSQL via PGlite).
 
 ```bash
@@ -1338,3 +1339,59 @@ is now (correctly) used by the next invoice.
 Not done: a separate "note on the invoice" (orders have one note, which the
 driver sees); a product line / size field on Products & pricing (the split
 comes from the name - name new products "<product> <size>").
+
+### Lists: status drop-down, sort by heading, batch actions, 11 Oct 2026
+
+Everton: filter by status **with a drop-down, like the statement's** (not
+buttons with counts), **sort by every heading**, and **batch actions like
+QuickBooks' invoice list** on the customer page and Invoices, Payments,
+Purchase orders, Credit notes, etc.
+
+Shared pieces: `web/src/components/ListTools.tsx` (`StatusSelect`, `useSort` +
+`SortTh` - click a heading A-Z / lowest first, again to reverse, blanks
+last, rows keep their own order until a heading is clicked; `useTicks` +
+`TickAllTh`/`TickTd`; `BatchBar` - "Batch actions ▾" menu, greyed actions
+say why; `sendSummary`). `web/src/lib/invoiceState.ts`: one set of invoice
+words for screen and filter, the statement's (Open, Overdue, Partially paid,
+Paid) plus Sent, Credit note, Cancelled; Overdue wins over part paid. Styles
+at the end of styles.css (`.th-sort`, `.batch-tools`, `.batch-pop`).
+
+Where (the old filter pills were replaced by drop-downs):
+- Invoices: status, sort, ticks. Batch: Print (one PDF, any customers),
+  Send by email (each customer gets theirs together), Receive payment (one
+  customer: opens their Payments tab with those invoices filled in,
+  `?tab=payments&pay=id,id`), Mark as sent, Export to Excel. Lists every
+  invoice now (status filtered in the browser).
+- Customer page: Orders tab (status, sort), Invoices tab (status, sort,
+  batch: email together, print, receive payment, mark sent, export - now
+  every invoice, from `/api/invoices?customerId`), Payments tab (show:
+  against an invoice / on account / reversed; sort; batch: print receipts,
+  one receipt email, export - every payment, from `/api/payments`).
+- Payments: new "Payments received" list (find, show, how, dates - this
+  month to start; sort; batch: print receipts, email receipts one per
+  customer, export). The on-account list says when money was paid with an
+  order still to be delivered.
+- Orders: Status drop-down (Waiting and its kinds: on a round, needs a
+  round, to collect, late/missed, part delivered, needs approval; Delivered;
+  Cancelled; Any), sort, batch: Export, Cancel orders (red; only those not
+  delivered; asks why once; each customer told as for one).
+- Delivery rounds, Standing orders: status drop-down and sort.
+- Customer statement (Invoices & statement tab, and Statements): headings sort too
+  (date, type, description, reference, amount); each line's Balance stays the
+  balance after that entry in date order.
+- Purchase orders: find, status (incl. "Still to come"), sort, batch: Print,
+  Email each to its supplier, Export.
+- Credit notes: status (Counted / Waiting / Rejected / Counted not sent /
+  Sent), sort, batch: Print, Email (counted only), Export.
+- Quotes: status drop-down (Out with the customer first), sort, batch:
+  Print, Email with accept link, Mark as sent, Export.
+
+Server (`routes/batches.ts`): `POST /api/batch/{invoices|receipts|purchase-orders|quotes}/print.pdf`
+and `.../send` with `{ ids }`; send answers `[{label, sentTo?, error?}]`, one
+that cannot go never stops the rest. `GET /api/payments` (confirmed payments
+with invoice, order, reversal; customerId/from/to). Paperwork drawing split
+from the PDF so several go in one document: `drawQuote`, `drawPo`,
+`drawReceipt` (paperwork.ts), `printInvoices` and `emailInvoicesByCustomer`
+(documents.ts). `unappliedPayments` returns `order_number`, `order_open`.
+
+Tests: 534 passing (68 shared + 466 API); new `test/batches.test.ts` (5).

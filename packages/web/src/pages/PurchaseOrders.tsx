@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import { api, download } from '../lib/api';
+import { api, download, downloadPost } from '../lib/api';
+import { BatchBar, SortTh, StatusSelect, TickAllTh, TickTd, sendSummary, useSort, useTicks } from '../components/ListTools';
+import { downloadCsv, dollars } from '../lib/csv';
 import { money, toCents, when, day, todayInJamaica } from '../lib/format';
 import { ask } from '../components/Dialog';
 
@@ -78,6 +80,30 @@ export default function PurchaseOrders() {
   }, []);
 
   const supplier = suppliers.find((s) => s.id === supplierId);
+
+  /* ---- the list: status, sort, batch actions (11 Oct 2026) ---- */
+  const [poStatus, setPoStatus] = useState('');
+  const [poFind, setPoFind] = useState('');
+  const poNeedle = poFind.trim().toLowerCase();
+  const poFiltered = orders.filter((p) => (!poStatus ? true
+    : poStatus === 'coming' ? ['Draft', 'Sent', 'Partially Received'].includes(p.status) : p.status === poStatus)
+    && (!poNeedle || p.po_number.toLowerCase().includes(poNeedle) || p.supplier_name.toLowerCase().includes(poNeedle)));
+  const poSort = useSort(poFiltered, {
+    number: (p) => p.po_number, supplier: (p) => p.supplier_name, date: (p) => String(p.order_date).slice(0, 10),
+    lines: (p) => Number(p.line_count), status: (p) => p.status, total: (p) => Number(p.grand_total_cents),
+  });
+  const poTicks = useTicks(poSort.sorted.map((p) => p.id));
+  const poPicked = poSort.sorted.filter((p) => poTicks.has(p.id));
+  async function poBatch(fn: () => Promise<string | null>, failed: string) {
+    setBusy(true); setError(null); setMsg(null);
+    try { const m = await fn(); if (m) setMsg(m); } catch (e) { setError(e instanceof Error ? e.message : failed); }
+    finally { setBusy(false); }
+  }
+  const exportPos = (list: PO[]) => downloadCsv('purchase-orders', [
+    ['PO', 'Supplier', 'Ordered', 'Lines', 'Status', 'Total'],
+    ...list.map((p) => [p.po_number, p.supplier_name, String(p.order_date).slice(0, 10), String(p.line_count),
+      p.status, dollars(Number(p.grand_total_cents))]),
+  ]);
   const tagOf = (materialId: string) => supplier?.materials.find((m) => m.rawMaterialId === materialId);
 
   async function autoPrice(index: number, rawMaterialId: string, qty: string) {
@@ -352,13 +378,52 @@ export default function PurchaseOrders() {
 
         {!form && (
           <>
+            <div className="row">
+              <div className="field">
+                <label htmlFor="po-find">Find</label>
+                <input id="po-find" type="search" placeholder="PO number or supplier" value={poFind} onChange={(e) => setPoFind(e.target.value)} />
+              </div>
+              <StatusSelect id="po-st" value={poStatus} onChange={setPoStatus} options={[
+                ['', 'Any status'], ['coming', 'Still to come'], ['Draft', 'Draft'], ['Sent', 'Sent'],
+                ['Partially Received', 'Partially received'], ['Received', 'Received'],
+                ['Partially Received - Closed', 'Partially received - closed'], ['Cancelled', 'Cancelled'],
+              ]} />
+            </div>
+            <BatchBar count={poPicked.length} noun={['purchase order', 'purchase orders']} busy={busy}
+                      summary={money(poPicked.reduce((a, p) => a + Number(p.grand_total_cents), 0))}
+                      onClear={poTicks.clear}
+                      actions={[
+                        { label: 'Print (one PDF)', run: () => poBatch(async () => {
+                          await downloadPost('/api/batch/purchase-orders/print.pdf', { ids: poTicks.picked }, `Purchase-orders-${poPicked.length}.pdf`);
+                          return `${poPicked.length} in one PDF.`;
+                        }, 'Could not build the PDF') },
+                        { label: 'Email each to its supplier', run: () => poBatch(async () => {
+                          const r = await api.post<Array<{ label: string; sentTo?: string; error?: string }>>('/api/batch/purchase-orders/send', { ids: poTicks.picked });
+                          const sm = sendSummary(r);
+                          if (sm.problems.length) setError(`Not sent: ${sm.problems.join(' · ')}`);
+                          await load();
+                          return sm.ok;
+                        }, 'Could not send them'),
+                        disabledWhy: poPicked.some((p) => p.status === 'Cancelled') ? 'Untick the cancelled ones' : null },
+                        { label: 'Export to Excel', run: () => exportPos(poPicked) },
+                      ]} />
             <table>
               <thead>
-                <tr><th>PO</th><th>Supplier</th><th>Ordered</th><th>Lines</th><th>Status</th><th className="num">Total</th><th /></tr>
+                <tr>
+                  <TickAllTh all={poTicks.all} some={poTicks.some} onToggle={poTicks.toggleAll} disabled={poSort.sorted.length === 0} />
+                  <SortTh label="PO" k="number" sort={poSort.sort} onSort={poSort.onSort} />
+                  <SortTh label="Supplier" k="supplier" sort={poSort.sort} onSort={poSort.onSort} />
+                  <SortTh label="Ordered" k="date" sort={poSort.sort} onSort={poSort.onSort} />
+                  <SortTh label="Lines" k="lines" sort={poSort.sort} onSort={poSort.onSort} />
+                  <SortTh label="Status" k="status" sort={poSort.sort} onSort={poSort.onSort} />
+                  <SortTh label="Total" k="total" sort={poSort.sort} onSort={poSort.onSort} className="num" />
+                  <th />
+                </tr>
               </thead>
               <tbody>
-                {orders.map((p) => (
+                {poSort.sorted.map((p) => (
                   <tr key={p.id}>
+                    <TickTd checked={poTicks.has(p.id)} onToggle={() => poTicks.toggle(p.id)} label={`Tick ${p.po_number}`} />
                     <td>{p.po_number}</td>
                     <td>{p.supplier_name}</td>
                     <td>{when(p.order_date)}</td>
@@ -372,6 +437,7 @@ export default function PurchaseOrders() {
                 ))}
               </tbody>
             </table>
+            {orders.length > 0 && poSort.sorted.length === 0 && <p className="muted">No purchase order in that status.</p>}
             {orders.length === 0 && <p className="muted">No purchase orders yet.</p>}
           </>
         )}
