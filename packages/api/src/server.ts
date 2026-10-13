@@ -1076,9 +1076,12 @@ export async function buildServer(db: Db) {
     const q = req.query as { customerId?: string; status?: string };
     const customerId = s.role === 'customer' ? s.customerId : (q.customerId ?? null);
     return db.query(
-      `SELECT l.*, i.subtotal_cents, i.gct_cents,
+      `SELECT l.*, i.subtotal_cents, i.gct_cents, i.credit_status, i.notes,
               CASE WHEN i.discount_status = 'Approved' THEN i.discount_amount_cents ELSE 0 END
-                AS discount_amount_cents
+                AS discount_amount_cents,
+              (SELECT string_agg(o.order_number, ', ' ORDER BY o.order_number)
+                 FROM invoice_orders io JOIN customer_orders o ON o.id = io.order_id
+                WHERE io.invoice_id = l.invoice_id) AS order_numbers
        FROM invoice_ledger l JOIN invoices i ON i.id = l.invoice_id
        WHERE ($1::uuid IS NULL OR l.customer_id = $1::uuid)
          AND ($2::text IS NULL OR l.status = $2)

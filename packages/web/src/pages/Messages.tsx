@@ -5,6 +5,7 @@ import { api, type Session } from '../lib/api';
 import { money, when } from '../lib/format';
 import { ask } from '../components/Dialog';
 import { DAYS } from '../components/CustomerForm';
+import CustomerPicker from '../components/CustomerPicker';
 
 /**
  * Messages & news (team feedback, 1 Oct 2026, points 8.2 and 23).
@@ -14,6 +15,10 @@ import { DAYS } from '../components/CustomerForm';
  * well as email. Email goes from the app; WhatsApp is a link per customer
  * with the words already typed, because sending WhatsApp messages in bulk
  * needs Meta's paid business service.
+ *
+ * Everton, 12 Oct 2026: a message can go to one customer (or a few) picked
+ * by name, without making a list first. "Send a message" on the customer
+ * page opens this screen with that customer chosen (?customer=<id>).
  */
 
 interface Criteria {
@@ -43,7 +48,7 @@ interface BroadcastDetail {
 }
 interface Zone { id: string; name: string; retired_at: string | null }
 interface Tier { id: string; name: string }
-interface Cust { id: string; name: string }
+interface Cust { id: string; name: string; phone?: string | null; delivery_zone?: string | null; is_walk_in?: boolean; active?: boolean }
 
 const TABS = [['send', 'Send a message'], ['lists', 'Customer lists'], ['news', 'News & offers'], ['sent', 'Sent']] as const;
 type Tab = (typeof TABS)[number][0];
@@ -68,8 +73,12 @@ export default function Messages({ session }: { session: Session }) {
   const [msg, setMsg] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
-  // Sending
-  const [to, setTo] = useState<string>('all');
+  // Sending: 'all', 'pick' (customers chosen by name) or a saved list's id.
+  const startWith = params.get('customer');
+  const [to, setTo] = useState<string>(startWith ? 'pick' : 'all');
+  const [picked, setPicked] = useState<string[]>(startWith ? [startWith] : []);
+  /** Bumped after each pick so the search box clears for the next name. */
+  const [pickKey, setPickKey] = useState(0);
   const [purpose, setPurpose] = useState<'Marketing' | 'Service'>('Marketing');
   const [subject, setSubject] = useState('');
   const [body, setBody] = useState('');
@@ -110,16 +119,32 @@ export default function Messages({ session }: { session: Session }) {
   }
 
   /* -------- who a message goes to -------- */
-  const audience = (): { listId?: string; criteria?: Criteria } =>
-    (to === 'all' ? { criteria: {} } : { listId: to });
+  const picking = to === 'pick';
+  const audience = (): { listId?: string; criteria?: Criteria; customerIds?: string[] } =>
+    (to === 'all' ? { criteria: {} } : picking ? { customerIds: picked } : { listId: to });
   async function loadPreview() {
+    if (picking) {
+      // Nobody matches the impossible zone, so only the chosen ones come back.
+      setPreview(picked.length ? await api.post<Member[]>('/api/customer-lists/preview',
+        { criteria: { zones: ['__none__'] }, includeIds: picked }) : []);
+      return;
+    }
     const list = lists.find((l) => l.id === to);
     const members = await api.post<Member[]>('/api/customer-lists/preview', list
       ? { criteria: list.criteria, includeIds: list.include_ids, excludeIds: list.exclude_ids }
       : { criteria: {} });
     setPreview(members);
   }
-  useEffect(() => { if (tab === 'send') loadPreview().catch(() => setPreview(null)); }, [to, tab, lists.length]);
+  useEffect(() => { if (tab === 'send') loadPreview().catch(() => setPreview(null)); }, [to, tab, lists.length, picked.join()]);
+
+  /** Customers a message can be sent to by name (walk-ins and closed accounts are left out, as on lists). */
+  const pickable = customers.filter((c) => !c.is_walk_in && c.active !== false && c.name !== 'Cash Walk-In');
+  const nameOf = (cid: string) => customers.find((c) => c.id === cid)?.name ?? 'this customer';
+  /** Chosen but not someone a message can go to (e.g. opened from a walk-in's page). */
+  const cannotPick = customers.length > 0 ? picked.filter((cid) => !pickable.some((c) => c.id === cid)) : [];
+  const oneName = picking && picked.length === 1 ? nameOf(picked[0]) : null;
+  /** The words as WhatsApp will show them, for the chosen customers' links. */
+  const waText = `${subject.trim()}\n\n${body.trim()}\n\nOrder online: ${window.location.origin}`;
 
   // Each kind respects its own tick (7 Oct 2026, point 4).
   const willEmail = (preview ?? []).filter((m) => m.email?.trim()
@@ -155,12 +180,13 @@ export default function Messages({ session }: { session: Session }) {
   );
 
   const send = () => run(async () => {
-    if (!await ask(`Send "${subject}" to ${willEmail} customer${willEmail === 1 ? '' : 's'} by email?`,
-      { confirmLabel: 'Send it' })) return;
+    const whom = oneName && willEmail === 1 ? oneName : `${willEmail} customer${willEmail === 1 ? '' : 's'}`;
+    if (!await ask(`Send "${subject}" to ${whom} by email?`, { confirmLabel: 'Send it' })) return;
     const r = await api.post<{ id: string; recipients: number; sentNow: number; stillQueued: number; problem?: string }>(
       '/api/broadcasts', {
         subject, body, purpose, ...audience(),
-        postAsNews: alsoNews && !fromPost ? { kind: purpose === 'Service' ? 'Update' : 'Promotion', endsOn: newsEnds || null } : null,
+        // A message to chosen customers is theirs alone: never a portal post everyone sees.
+        postAsNews: alsoNews && !fromPost && !picking ? { kind: purpose === 'Service' ? 'Update' : 'Promotion', endsOn: newsEnds || null } : null,
         imageIds: msgPics.map((p) => p.id),
         newsPostId: fromPost,
       });
@@ -231,13 +257,19 @@ export default function Messages({ session }: { session: Session }) {
       <tbody>
         {rows.slice(0, 200).map((m) => (
           <tr key={m.id}>
-            <td>{m.name}{m.marketing_opt_out && <div className="muted small">no offers</div>}</td>
+            <td>{m.name}
+              {!m.email?.trim() ? null : purpose === 'Marketing' && m.marketing_opt_out ? <div className="muted small">said no to offers</div>
+                : purpose === 'Service' && m.service_emails === false ? <div className="muted small">turned off service announcements</div> : null}
+            </td>
             <td className="small">{m.delivery_zone ?? '—'}</td>
             <td className="small">{m.email || <span className="muted">none</span>}</td>
             <td className="num">{money(Number(m.balance_cents))}</td>
             {showWhatsapp && (
               <td className="num">
-                {m.whatsappLink ? <a href={m.whatsappLink} target="_blank" rel="noreferrer">WhatsApp</a> : <span className="muted small">no number</span>}
+                {m.whatsappLink
+                  ? <a className="button-link whatsapp" target="_blank" rel="noreferrer"
+                       href={subject.trim() || body.trim() ? `${m.whatsappLink}?text=${encodeURIComponent(waText)}` : m.whatsappLink}>WhatsApp</a>
+                  : <span className="muted small">no number</span>}
               </td>
             )}
           </tr>
@@ -267,9 +299,14 @@ export default function Messages({ session }: { session: Session }) {
             <div className="row">
               <div className="field grow">
                 <label htmlFor="to">Send to</label>
-                <select id="to" value={to} onChange={(e) => setTo(e.target.value)}>
+                <select id="to" value={to} onChange={(e) => { setTo(e.target.value); setDetail(null); }}>
                   <option value="all">Every customer</option>
-                  {lists.map((l) => <option key={l.id} value={l.id}>{l.name} ({l.size})</option>)}
+                  <option value="pick">Customers I choose by name…</option>
+                  {lists.length > 0 && (
+                    <optgroup label="Saved lists">
+                      {lists.map((l) => <option key={l.id} value={l.id}>{l.name} ({l.size})</option>)}
+                    </optgroup>
+                  )}
                 </select>
               </div>
               <div className="field">
@@ -286,6 +323,31 @@ export default function Messages({ session }: { session: Session }) {
                 : 'For closures, blackout days or a change to deliveries: skips customers who turned off service announcements.'}
               {' '}<button type="button" className="as-link small" onClick={() => { setTab('lists'); setEditList({ id: null, name: '', criteria: {}, include: [], exclude: [] }); }}>Make a new list</button>
             </p>
+            {picking && (
+              <div className="field">
+                <label htmlFor="pick-cust">{picked.length ? 'Add another customer' : 'Customer'}</label>
+                <CustomerPicker key={pickKey} id="pick-cust" value=""
+                                customers={pickable.filter((c) => !picked.includes(c.id))}
+                                placeholder="Type a name or phone number"
+                                onChange={(cid) => { setPicked((p) => (p.includes(cid) ? p : [...p, cid])); setPickKey((k) => k + 1); setDetail(null); }} />
+                {picked.length > 0 && (
+                  <div className="picked-list">
+                    {picked.map((cid) => (
+                      <span key={cid} className="chip neutral picked">
+                        {nameOf(cid)}
+                        <button type="button" className="picked-x" aria-label={`Take ${nameOf(cid)} off`}
+                                onClick={() => { setPicked((p) => p.filter((x) => x !== cid)); setDetail(null); }}>×</button>
+                      </span>
+                    ))}
+                  </div>
+                )}
+                {cannotPick.length > 0 && (
+                  <div className="notice warn small">
+                    {cannotPick.map(nameOf).join(', ')} can't be sent messages from here (a walk-in or a closed account).
+                  </div>
+                )}
+              </div>
+            )}
             <div className="field">
               <label htmlFor="subj">Subject</label>
               <input id="subj" style={{ width: '100%' }} value={subject} placeholder="e.g. Closed on Heroes Day, Monday 19 October"
@@ -304,16 +366,16 @@ export default function Messages({ session }: { session: Session }) {
               {picRow(msgPics, (id) => setMsgPics((c) => c.filter((x) => x.id !== id)))}
               {fromPost && <div className="muted small">Sending the post's pictures with it.</div>}
             </div>
-            {!fromPost && <label className="check"><input type="checkbox" checked={alsoNews} onChange={(e) => setAlsoNews(e.target.checked)} />
+            {!fromPost && !picking && <label className="check"><input type="checkbox" checked={alsoNews} onChange={(e) => setAlsoNews(e.target.checked)} />
               Also show it under News &amp; offers on the customer portal</label>}
-            {alsoNews && !fromPost && (
+            {alsoNews && !fromPost && !picking && (
               <div className="field">
                 <label htmlFor="ne">Show it until (optional)</label>
                 <input id="ne" type="date" value={newsEnds} onChange={(e) => setNewsEnds(e.target.value)} />
               </div>
             )}
             <button disabled={busy || !subject.trim() || !body.trim() || willEmail === 0} onClick={send}>
-              {busy ? 'Sending…' : `Email ${willEmail} customer${willEmail === 1 ? '' : 's'}`}
+              {busy ? 'Sending…' : oneName && willEmail === 1 ? `Email ${oneName}` : `Email ${willEmail} customer${willEmail === 1 ? '' : 's'}`}
             </button>
           </div>
           <div className="panel">
@@ -328,11 +390,20 @@ export default function Messages({ session }: { session: Session }) {
                 <h2 style={{ marginTop: 0 }}>Who it goes to</h2>
                 {preview === null ? <p className="muted">Loading…</p> : (
                   <>
-                    <p className="small" style={{ marginTop: 0 }}>
-                      {preview.length} customer{preview.length === 1 ? '' : 's'}; {willEmail} by email
-                      {preview.length - willEmail > 0 ? ` (${preview.length - willEmail} have no email${purpose === 'Marketing' ? ' or said no to offers' : ''})` : ''}.
-                    </p>
-                    {memberTable(preview, false)}
+                    {picking && preview.length === 0 ? (
+                      <p className="muted" style={{ marginTop: 0 }}>Type a customer's name on the left to choose who it goes to.</p>
+                    ) : (
+                      <p className="small" style={{ marginTop: 0 }}>
+                        {preview.length} customer{preview.length === 1 ? '' : 's'}; {willEmail} by email
+                        {preview.length - willEmail > 0 ? ` (${preview.length - willEmail} ${preview.length - willEmail === 1 ? 'has' : 'have'} no email${purpose === 'Marketing' ? ' or said no to offers' : ' or turned off service announcements'})` : ''}.
+                      </p>
+                    )}
+                    {picking && preview.length > 0 && (
+                      <p className="muted small">
+                        No email? Use their WhatsApp link: it opens WhatsApp with your subject and message typed in. Only emails show under Sent.
+                      </p>
+                    )}
+                    {(!picking || preview.length > 0) && memberTable(preview, picking)}
                   </>
                 )}
               </>

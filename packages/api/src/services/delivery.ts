@@ -555,9 +555,10 @@ export async function owedAtStop(t: Queryable, stopId: string): Promise<{
     ? await remainingValue(t, row.order_id) : num(row.order_total);
   // Paid with this order, or credit they hold, comes off when it is invoiced.
   const money = await t.one<{ linked: number; credit: number }>(
-    `SELECT COALESCE((SELECT SUM(amount_cents) FROM payments
-                      WHERE order_id = $1 AND invoice_id IS NULL AND status = 'Confirmed'
-                        AND NOT is_reversal), 0)::bigint AS linked,
+    `SELECT COALESCE((SELECT SUM(amount_cents) FROM payments q
+                      WHERE q.order_id = $1 AND q.invoice_id IS NULL AND q.status = 'Confirmed'
+                        AND NOT q.is_reversal
+                        AND NOT EXISTS (SELECT 1 FROM payments r WHERE r.reverses_payment_id = q.id)), 0)::bigint AS linked,
             -- In credit, less money kept for their OTHER orders still to go.
             GREATEST(0, -COALESCE((SELECT balance_cents FROM customer_balances
                                    WHERE customer_id = $2), 0)
@@ -566,6 +567,7 @@ export async function owedAtStop(t: Queryable, stopId: string): Promise<{
                                     WHERE p.customer_id = $2 AND p.order_id <> $1
                                       AND p.invoice_id IS NULL AND p.status = 'Confirmed'
                                       AND NOT p.is_reversal
+                                      AND NOT EXISTS (SELECT 1 FROM payments r WHERE r.reverses_payment_id = p.id)
                                       AND o.status NOT IN ('Delivered', 'Cancelled')), 0))::bigint AS credit`,
     [row.order_id, row.customer_id],
   );

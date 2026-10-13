@@ -543,9 +543,10 @@ export async function getInvoiceDetail(db: Db, invoiceId: string) {
      WHERE entity_type = 'Invoice' AND entity_id = $1 ORDER BY ts`, [invoiceId],
   );
   const onAccount = await db.one<{ cents: number }>(
-    `SELECT COALESCE(SUM(amount_cents), 0)::bigint AS cents FROM payments
-     WHERE customer_id = $1 AND invoice_id IS NULL AND status = 'Confirmed'
-       AND NOT is_reversal AND amount_cents > 0`, [ledger.customerId],
+    `SELECT COALESCE(SUM(amount_cents), 0)::bigint AS cents FROM payments q
+     WHERE q.customer_id = $1 AND q.invoice_id IS NULL AND q.status = 'Confirmed'
+       AND NOT q.is_reversal AND q.amount_cents > 0
+       AND NOT EXISTS (SELECT 1 FROM payments r WHERE r.reverses_payment_id = q.id)`, [ledger.customerId],
   );
   return {
     ...header, ...ledger, lines, payments, customer, orders,

@@ -9,7 +9,7 @@
 
 import type { Db, Queryable } from '../db/index.ts';
 import type { Actor } from './core.ts';
-import { assertMethodAllowed, audit, requireRole, withIdempotency, num } from './core.ts';
+import { assertMethodAllowed, audit, nextNumber, requireRole, withIdempotency, num } from './core.ts';
 import type { Cents, PaymentMethod } from '@alka/shared';
 import { RuleViolation, planPayments, validateAllocation } from '@alka/shared';
 
@@ -29,6 +29,12 @@ export interface RecordPaymentInput {
   orderId?: string | null;
   /** Duplicate-submission guard for the office "Record Payment" button. */
   idempotencyKey?: string | null;
+  /**
+   * The payment's number (RCT-...). Normally left out: rows recorded for the
+   * same customer in the same transaction share one, else a new one is given.
+   * Passed when part of an existing payment is split off, so it keeps its number.
+   */
+  receiptNumber?: string | null;
 }
 
 /**
@@ -42,6 +48,28 @@ export function paymentInstant(d: string | null | undefined): string | null {
   return /^\d{4}-\d{2}-\d{2}$/.test(d) ? `${d}T12:00:00-05:00` : d;
 }
 
+/**
+ * The payment number for a row about to be recorded (12 Oct 2026). Rows
+ * recorded for the same customer in the same transaction are one payment
+ * spread over several invoices (or a counter sale plus older invoices), so
+ * they share a number; anything else gets the next number. Remembered per
+ * transaction (its start time, now(), names it) rather than read back from
+ * the table, so a split-off part of an OLDER payment recorded in the same
+ * transaction - which keeps that older number - is never mistaken for it.
+ */
+const numbersGiven = new WeakMap<object, Map<string, string>>();
+async function paymentNumberFor(t: Queryable, customerId: string): Promise<string> {
+  const { ts } = await t.one<{ ts: string }>(`SELECT now()::text AS ts`);
+  const key = `${customerId}|${ts}`;
+  let given = numbersGiven.get(t);
+  if (!given) { given = new Map(); numbersGiven.set(t, given); }
+  const have = given.get(key);
+  if (have) return have;
+  const fresh = await nextNumber(t, 'receipt_number_seq', 'RCT');
+  given.set(key, fresh);
+  return fresh;
+}
+
 /** The one low-level insert every Confirmed payment goes through. */
 export async function insertPayment(
   t: Queryable,
@@ -50,17 +78,19 @@ export async function insertPayment(
 ): Promise<{ id: string }> {
   if (input.amountCents === 0) throw new RuleViolation('a payment cannot be for zero');
 
+  const receiptNumber = input.receiptNumber || await paymentNumberFor(t, input.customerId);
   const row = await t.one<{ id: string }>(
     `INSERT INTO payments
        (customer_id, invoice_id, amount_cents, payment_date, method, reference,
-        notes, status, delivery_sheet_id, delivery_stop_id, kind, created_by_id, order_id)
-     VALUES ($1,$2,$3,COALESCE($4::timestamptz, now()),$5,$6,$7,$8,$9,$10,$11,$12,$13)
+        notes, status, delivery_sheet_id, delivery_stop_id, kind, created_by_id, order_id,
+        receipt_number)
+     VALUES ($1,$2,$3,COALESCE($4::timestamptz, now()),$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
      RETURNING id`,
     [input.customerId, input.invoiceId ?? null, input.amountCents,
      paymentInstant(input.paymentDate), input.method, input.reference ?? null,
      input.notes ?? null, input.status ?? 'Confirmed',
      input.deliverySheetId ?? null, input.deliveryStopId ?? null,
-     input.kind ?? null, actor?.id ?? null, input.orderId ?? null],
+     input.kind ?? null, actor?.id ?? null, input.orderId ?? null, receiptNumber],
   );
 
   await audit(t, actor, 'pay', 'Payment', row.id, input.reference ?? row.id, {
@@ -125,8 +155,8 @@ export async function reversePayment(
     const reversal = await t.one<{ id: string }>(
       `INSERT INTO payments
          (customer_id, invoice_id, amount_cents, method, status,
-          is_reversal, reverses_payment_id, notes, created_by_id)
-       VALUES ($1,$2,$3,$4,$5,true,$6,$7,$8)
+          is_reversal, reverses_payment_id, notes, created_by_id, receipt_number)
+       VALUES ($1,$2,$3,$4,$5,true,$6,$7,$8,(SELECT receipt_number FROM payments WHERE id = $6))
        RETURNING id`,
       [original.customer_id, original.invoice_id, -num(original.amount_cents),
        original.method, original.status, paymentId,
@@ -352,6 +382,8 @@ export async function unappliedPayments(db: Db, customerId?: string) {
      LEFT JOIN delivery_sheets ds ON ds.id = p.delivery_sheet_id
      LEFT JOIN customer_orders o ON o.id = p.order_id
      WHERE p.invoice_id IS NULL AND p.status = 'Confirmed' AND NOT p.is_reversal
+       -- A reversed payment is not money on the account (12 Oct 2026).
+       AND NOT EXISTS (SELECT 1 FROM payments r WHERE r.reverses_payment_id = p.id)
        AND ($1::uuid IS NULL OR p.customer_id = $1::uuid)
      ORDER BY p.payment_date DESC, c.name`,
     [customerId ?? null],
@@ -409,6 +441,7 @@ interface OnAccountRow {
   id: string; amount_cents: number; payment_date: string; method: PaymentMethod;
   reference: string | null; notes: string | null; delivery_sheet_id: string | null;
   delivery_stop_id: string | null; kind: string | null; order_id: string | null;
+  receipt_number: string | null;
   /** Taken with one of the orders this invoice bills. */
   for_this: boolean;
   /** Taken with ANOTHER order that is still to be delivered: kept for it. */
@@ -424,7 +457,7 @@ async function moneyOnAccount(
 ): Promise<OnAccountRow[]> {
   return t.query<OnAccountRow>(
     `SELECT p.id, p.amount_cents, p.payment_date::text AS payment_date, p.method, p.reference, p.notes,
-            p.delivery_sheet_id, p.delivery_stop_id, p.kind, p.order_id,
+            p.delivery_sheet_id, p.delivery_stop_id, p.kind, p.order_id, p.receipt_number,
             (p.order_id IS NOT NULL AND p.order_id IN
                (SELECT io.order_id FROM invoice_orders io WHERE io.invoice_id = $3)) AS for_this,
             COALESCE((SELECT o.status NOT IN ('Delivered', 'Cancelled')
@@ -433,6 +466,8 @@ async function moneyOnAccount(
      FROM payments p
      WHERE p.customer_id = $1 AND p.invoice_id IS NULL AND p.status = 'Confirmed'
        AND NOT p.is_reversal AND p.amount_cents > 0
+       -- Never put a reversed payment against an invoice (12 Oct 2026).
+       AND NOT EXISTS (SELECT 1 FROM payments r WHERE r.reverses_payment_id = p.id)
        AND ($2::uuid IS NULL OR p.id = $2::uuid)
      ORDER BY (p.order_id IS NOT NULL AND p.order_id IN
                  (SELECT io.order_id FROM invoice_orders io WHERE io.invoice_id = $3)) DESC,
@@ -476,6 +511,7 @@ async function putAgainstInvoice(
         deliveryStopId: p.delivery_stop_id,
         kind: p.kind,
         orderId: p.order_id,
+        receiptNumber: p.receipt_number,
         status: 'Confirmed',
       });
       await audit(t, actor, 'adjust', 'Payment', p.id, p.reference ?? p.id, {
@@ -692,8 +728,8 @@ export async function applyPaymentChange(
     await t.query(
       `INSERT INTO payments
          (customer_id, invoice_id, amount_cents, payment_date, method, status,
-          is_reversal, reverses_payment_id, notes, created_by_id)
-       VALUES ($1,$2,$3,now(),$4,'Confirmed',true,$5,$6,$7)`,
+          is_reversal, reverses_payment_id, notes, created_by_id, receipt_number)
+       VALUES ($1,$2,$3,now(),$4,'Confirmed',true,$5,$6,$7,(SELECT receipt_number FROM payments WHERE id = $5))`,
       [p.customer_id, p.invoice_id, -num(p.amount_cents), p.method,
        paymentId, `Replaced by a corrected payment: ${reason}`, actor.id],
     );

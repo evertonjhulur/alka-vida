@@ -3,13 +3,13 @@ import { Link, useParams, useSearchParams } from 'react-router-dom';
 import { api, downloadPost, type Session } from '../lib/api';
 import { payMethods, useTakeCard } from '../lib/payments';
 import { money, date, statusTone, toCents, todayInJamaica, when } from '../lib/format';
-import { StatementView } from './Statement';
 import StatementDialog from '../components/StatementDialog';
 import CustomerForm, { customerToForm, formToPayload, BLANK_CUSTOMER, type CustomerFormValues } from '../components/CustomerForm';
 import { AddressesPanel, SpecialPricesPanel } from '../components/CustomerExtras';
 import { BatchBar, SortTh, StatusSelect, TickAllTh, TickTd, useSort, useTicks } from '../components/ListTools';
-import { INVOICE_FILTERS, STATE_TONE, invoiceMatches, invoiceState } from '../lib/invoiceState';
+import { STATE_TONE, invoiceMatches, invoiceState } from '../lib/invoiceState';
 import { downloadCsv, dollars } from '../lib/csv';
+import { buildTransactions, type Tx } from '../lib/transactions';
 
 interface Customer {
   id: string; name: string; phone: string; email: string;
@@ -18,6 +18,11 @@ interface Customer {
   account_type: string | null; price_tier_name: string | null;
   portal_email: string | null; notes: string | null; active: boolean;
   invoice_cycle?: string | null; gct_exempt?: boolean; delivery_days?: string[] | null;
+  whatsapp?: string | null;
+}
+interface Address {
+  id: string; label: string; address_line1: string | null; address_line2: string | null;
+  city: string | null; parish: string | null; is_billing: boolean; is_delivery: boolean; active?: boolean;
 }
 interface Waiting {
   kind: string; orderNumber: string; date: string; subtotalCents: number;
@@ -60,8 +65,9 @@ interface InvRow {
   invoice_id: string; invoice_number: string; invoice_date: string; due_date: string | null;
   status: string; lifecycle?: string; grand_total_cents: number | string; amount_paid_cents: number | string;
   balance_cents: number | string; is_credit_note: boolean;
+  credit_status?: string | null; notes?: string | null; order_numbers?: string | null;
 }
-/** Every payment of theirs, for the Payments tab. */
+/** Every payment of theirs (one row per invoice it went against), for the Transactions tab. */
 interface PayRow {
   id: string; payment_date: string; amount_cents: number | string; method: string | null;
   reference: string | null; receipt_number: string | null; invoice_id: string | null;
@@ -71,9 +77,61 @@ const ORDER_FILTERS = [
   ['', 'Any status'], ['waiting', 'Waiting (not delivered yet)'], ['part', 'Part delivered'],
   ['Delivered', 'Delivered'], ['Cancelled', 'Cancelled'], ['review', 'Needs approval'],
 ] as const;
-const PAY_FILTERS = [
-  ['', 'Any'], ['invoice', 'Against an invoice'], ['account', 'Left on the account'], ['reversed', 'Reversed'],
+/** The Transactions tab (12 Oct 2026): one list of invoices, payments and credit notes. */
+const TX_TYPES = [
+  ['', 'All transactions'], ['invoice', 'Invoices'], ['payment', 'Payments received'], ['credit', 'Credit notes'],
 ] as const;
+const TX_STATUS = [
+  ['', 'Any status'], ['open', 'Open (still owed)'], ['overdue', 'Overdue'], ['partial', 'Partially paid'],
+  ['paid', 'Paid'], ['unsent', 'Not sent yet'], ['account', 'Money left on account'],
+  ['reversed', 'Reversed'], ['cancelled', 'Cancelled'],
+] as const;
+const TX_DATES = [
+  ['', 'All dates'], ['month', 'This month'], ['last', 'Last month'], ['custom', 'Choose dates…'],
+] as const;
+const KIND_WORDS: Record<Tx['kind'], string> = {
+  invoice: 'Invoice', credit: 'Credit note', payment: 'Payment', reversal: 'Payment reversed',
+};
+/** A number as WhatsApp wants it: with the country code (as the server's whatsappDigits). */
+function whatsappLink(raw: string | null | undefined): string | null {
+  const d = (raw ?? '').replace(/\D/g, '');
+  const full = d.length === 7 ? `1876${d}` : d.length === 10 ? `1${d}` : d.length >= 11 ? d : null;
+  return full ? `https://wa.me/${full}` : null;
+}
+/** The status words for a line on the Transactions tab. */
+function txStatusWords(t: Tx): string {
+  if (t.kind === 'invoice' || t.kind === 'credit') {
+    if (t.kind === 'credit' && t.invoice?.credit_status === 'Pending') return 'Waiting for approval';
+    if (t.kind === 'credit' && t.invoice?.credit_status === 'Rejected') return 'Rejected';
+    return invoiceState(t.invoice!);
+  }
+  if (t.kind === 'reversal') return 'Reversal';
+  if (t.reversed === 'all') return 'Reversed';
+  if (t.reversed === 'part') return 'Part reversed';
+  return t.openCents > 0 ? 'On account' : 'Applied';
+}
+function txTone(t: Tx): string {
+  const w = txStatusWords(t);
+  if (t.kind === 'invoice' || (t.kind === 'credit' && w === 'Credit note')) return STATE_TONE[invoiceState(t.invoice!)];
+  return w === 'Applied' ? 'ok' : w === 'On account' ? 'info'
+    : w === 'Waiting for approval' || w === 'Part reversed' ? 'warn' : w === 'Rejected' ? 'muted' : 'bad';
+}
+/** What the line is, in a few words. */
+function txDescription(t: Tx): string {
+  if (t.kind === 'invoice') return t.orderNumbers?.length ? `For ${t.orderNumbers.join(', ')}` : (t.invoice?.notes ?? '');
+  if (t.kind === 'credit') return t.invoice?.notes ?? '';
+  if (t.kind === 'reversal') return `Reversal of ${t.number || 'a payment'}`;
+  const how = [t.method, t.reference].filter(Boolean).join(' ');
+  const against = t.invoiceNumbers?.length ? `applied to ${t.invoiceNumbers.join(', ')}` : '';
+  const account = t.openCents > 0 ? `${money(t.openCents)} left on account` : '';
+  const order = t.orderNumbers?.length ? `paid with ${t.orderNumbers.join(', ')}` : '';
+  return [how, [against, account].filter(Boolean).join(', '), order].filter(Boolean).join(' · ');
+}
+/** Under the status: when an invoice still owed is (or was) due. */
+function txDue(t: Tx): string | null {
+  if (t.kind !== 'invoice' || t.openCents <= 0 || !t.invoice?.due_date) return null;
+  return invoiceState(t.invoice) === 'Overdue' ? `was due ${when(t.invoice.due_date)}` : `due ${when(t.invoice.due_date)}`;
+}
 const METHODS = ['Cash', 'Cheque', 'Bank Transfer', 'Card'] as const;
 const PATTERN_WORDS: Record<Schedule['pattern'], string> = {
   Weekly: 'every week', Biweekly: 'every 2 weeks', Monthly: 'every month',
@@ -81,13 +139,14 @@ const PATTERN_WORDS: Record<Schedule['pattern'], string> = {
 
 const TABS = [
   ['overview', 'Overview'],
+  ['transactions', 'Transactions'],
   ['orders', 'Orders'],
   ['standing', 'Standing orders'],
-  ['invoices', 'Invoices & statement'],
-  ['payments', 'Payments'],
   ['bottles', 'Bottles'],
   ['details', 'Details'],
 ] as const;
+/** Links made before 12 Oct 2026 open the tab that replaced them. */
+const OLD_TABS: Record<string, string> = { invoices: 'transactions', payments: 'transactions' };
 type Tab = (typeof TABS)[number][0];
 
 /** The parts of the Details tab. */
@@ -109,12 +168,20 @@ type Part = (typeof PARTS)[number][0];
  * invoices and the statement, payments, bottles and the editable details are
  * tabs here rather than separate screens to search again. The tab is in the
  * address (?tab=orders), so a link can open straight onto one.
+ *
+ * Redesigned 12 Oct 2026 (Everton, after QuickBooks' customer page): contact
+ * details and a money summary (open balance and overdue) in the header; one
+ * "New transaction" menu for New order, Take a payment, Statement…, quotes
+ * and credit notes; and one Transactions tab - invoices, payments and credit
+ * notes together, with an optional running balance - in place of the
+ * Invoices & statement and Payments tabs.
  */
 export default function CustomerRecord({ session }: { session: Session }) {
   const takeCard = useTakeCard();
   const { customerId } = useParams();
   const [params, setParams] = useSearchParams();
-  const tabParam = params.get('tab');
+  const rawTab = params.get('tab');
+  const tabParam = rawTab ? OLD_TABS[rawTab] ?? rawTab : null;
   const tab: Tab = TABS.some(([k]) => k === tabParam) ? tabParam as Tab : 'overview';
   const setTab = (t: Tab) => {
     const next = new URLSearchParams(params);
@@ -144,23 +211,31 @@ export default function CustomerRecord({ session }: { session: Session }) {
   const [pay, setPay] = useState({ amount: '', method: 'Cash', date: '', reference: '', receipt: true });
   /** How much of the payment goes on each open invoice (point 11.1). */
   const [alloc, setAlloc] = useState<Record<string, string>>({});
-  /** Changing a posted payment (point 11.2). */
+  /** Changing a posted payment (point 11.2). `parts`: the rows of the payment, when it went against several invoices. */
   const [change, setChange] = useState<{
     p: Payment; amount: string; date: string; method: string; reference: string;
-    customerId: string; invoiceId: string; reason: string;
+    customerId: string; invoiceId: string; reason: string; parts: Payment[]; number: string | null;
   } | null>(null);
   const [allCustomers, setAllCustomers] = useState<PickCustomer[]>([]);
   const [targetInvoices, setTargetInvoices] = useState<Invoice[]>([]);
   const [invRows, setInvRows] = useState<InvRow[]>([]);
   const [payRows, setPayRows] = useState<PayRow[]>([]);
-  const [invStatus, setInvStatus] = useState('');
+  const [addresses, setAddresses] = useState<Address[]>([]);
   const [ordStatus, setOrdStatus] = useState('');
-  const [payStatus, setPayStatus] = useState('');
+  /** The Transactions tab's filters (12 Oct 2026). */
+  const [txType, setTxType] = useState('');
+  const [txStatus, setTxStatus] = useState('');
+  const [txRange, setTxRange] = useState('');
+  const [txFrom, setTxFrom] = useState('');
+  const [txTo, setTxTo] = useState('');
+  const [showBal, setShowBal] = useState(false);
   const [waiting, setWaiting] = useState<Waiting[]>([]);
   /** Statement… asks for the period first (UX review, 11 Oct 2026). */
   const [statementOpen, setStatementOpen] = useState(false);
   const [moreOpen, setMoreOpen] = useState(false);
   const moreRef = useRef<HTMLDivElement>(null);
+  const [newOpen, setNewOpen] = useState(false);
+  const newRef = useRef<HTMLDivElement>(null);
 
   const [form, setForm] = useState<CustomerFormValues>({ ...BLANK_CUSTOMER });
   const [formLoaded, setFormLoaded] = useState(false);
@@ -182,22 +257,50 @@ export default function CustomerRecord({ session }: { session: Session }) {
     api.get<Waiting[]>(`/api/customers/${customerId}/uninvoiced`)
       .then(setWaiting).catch(() => setWaiting([]));
     api.get<InvRow[]>(`/api/invoices?customerId=${customerId}`).then(setInvRows).catch(() => setInvRows([]));
-    api.get<PayRow[]>(`/api/payments?customerId=${customerId}`).then(setPayRows).catch(() => setPayRows([]));
+    api.get<PayRow[]>(`/api/payments?customerId=${customerId}&limit=2000`).then(setPayRows).catch(() => setPayRows([]));
+    api.get<Address[]>(`/api/customers/${customerId}/addresses`).then(setAddresses).catch(() => setAddresses([]));
   }, [customerId]);
 
   useEffect(() => { load().catch((e) => setError(e.message)); }, [load]);
 
-  /* ---------- the lists on the tabs: status, sort, ticks (11 Oct 2026) ---------- */
-  const invSort = useSort(invRows.filter((r) => invoiceMatches(r, invStatus)), {
-    number: (r) => r.invoice_number, date: (r) => date(r.invoice_date),
-    due: (r) => (r.due_date && !r.is_credit_note ? date(r.due_date) : null),
-    total: (r) => Number(r.grand_total_cents), balance: (r) => Number(r.balance_cents),
-    status: (r) => invoiceState(r),
+  /* ---------- the Transactions tab: one list, filters, sort, ticks (12 Oct 2026) ---------- */
+  const today = todayInJamaica();
+  const allTx = buildTransactions(invRows, payRows, date);
+  const monthStart = `${today.slice(0, 7)}-01`;
+  const lastMonthEnd = (() => {
+    const d = new Date(`${monthStart}T12:00:00Z`); d.setUTCDate(0); return d.toISOString().slice(0, 10);
+  })();
+  const lastMonthStart = `${lastMonthEnd.slice(0, 7)}-01`;
+  const inRange = (t: Tx) => (txRange === 'month' ? t.date >= monthStart && t.date <= today
+    : txRange === 'last' ? t.date >= lastMonthStart && t.date <= lastMonthEnd
+      : txRange === 'custom' ? (!txFrom || t.date >= txFrom) && (!txTo || t.date <= txTo) : true);
+  const ofType = (t: Tx) => (!txType ? true : txType === 'payment' ? t.kind === 'payment' || t.kind === 'reversal' : t.kind === txType);
+  const ofStatus = (t: Tx) => {
+    if (!txStatus) return true;
+    if (t.kind === 'invoice' || t.kind === 'credit') {
+      if (txStatus === 'unsent') return t.kind === 'invoice' && invoiceState(t.invoice!) === 'Open';
+      if (txStatus === 'account' || txStatus === 'reversed') return false;
+      return invoiceMatches(t.invoice!, txStatus);
+    }
+    if (txStatus === 'account') return t.kind === 'payment' && t.openCents > 0;
+    if (txStatus === 'reversed') return t.kind === 'reversal' || t.reversed !== 'none';
+    return false;
+  };
+  // Newest first until a heading is clicked; ties keep the order of entry, newest first.
+  const shownTx = allTx.filter((t) => ofType(t) && ofStatus(t) && inRange(t)).reverse();
+  const txSort = useSort(shownTx, {
+    date: (t) => t.date, type: (t) => KIND_WORDS[t.kind], number: (t) => t.number,
+    amount: (t) => t.effectCents, open: (t) => t.openCents, balance: (t) => t.balanceCents,
+    status: (t) => txStatusWords(t),
   });
-  const invTicks = useTicks(invSort.sorted.map((r) => r.invoice_id));
-  const picked = invTicks.picked;
-  const pickedRows = invSort.sorted.filter((r) => invTicks.has(r.invoice_id));
-  const pickedOwed = pickedRows.filter((r) => Number(r.balance_cents) > 0 && !r.is_credit_note && invoiceState(r) !== 'Cancelled');
+  const txTicks = useTicks(txSort.sorted.map((t) => t.key));
+  const tickedTx = txSort.sorted.filter((t) => txTicks.has(t.key));
+  const tickedDocs = tickedTx.filter((t) => t.kind === 'invoice' || t.kind === 'credit');
+  const tickedInvoices = tickedTx.filter((t) => t.kind === 'invoice');
+  const tickedOwed = tickedInvoices.filter((t) => t.openCents > 0);
+  const tickedPayRows = tickedTx.filter((t) => t.kind === 'payment' && t.reversed !== 'all')
+    .flatMap((t) => (t.rows ?? []).filter((r) => !r.reversed && Number(r.amount_cents) > 0).map((r) => r.id));
+  const filtered = !!(txType || txStatus || txRange);
 
   const ordRows = (h?.orders ?? []).filter((o) => (!ordStatus ? true
     : ordStatus === 'waiting' ? o.status === 'Pending' || o.status === 'Partially Delivered'
@@ -209,15 +312,6 @@ export default function CustomerRecord({ session }: { session: Session }) {
     how: (o) => o.delivery_mode, total: (o) => Number(o.grand_total_cents),
     status: (o) => (o.needs_review ? 'Needs approval' : o.status),
   });
-
-  const paySort = useSort(payRows.filter((p) => (!payStatus ? true
-    : payStatus === 'invoice' ? !!p.invoice_id && !p.is_reversal
-      : payStatus === 'account' ? !p.invoice_id && !p.is_reversal
-        : p.is_reversal || p.reversed)), {
-    date: (p) => p.payment_date, against: (p) => p.invoice_number ?? '',
-    how: (p) => p.method ?? '', reference: (p) => p.reference ?? '', amount: (p) => Number(p.amount_cents),
-  });
-  const payTicks = useTicks(paySort.sorted.filter((p) => !p.is_reversal && Number(p.amount_cents) > 0).map((p) => p.id));
 
   // Arriving from Invoices with "Receive payment" (?pay=id,id): the payment
   // form opens with those invoices ticked to be paid in full.
@@ -236,10 +330,11 @@ export default function CustomerRecord({ session }: { session: Session }) {
     setParams(p2, { replace: true });
   }, [payParam, invRows.length]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // The More menu closes on a click anywhere else.
+  // The More and New transaction menus close on a click anywhere else.
   useEffect(() => {
     const onDown = (e: MouseEvent) => {
       if (moreRef.current && !moreRef.current.contains(e.target as Node)) setMoreOpen(false);
+      if (newRef.current && !newRef.current.contains(e.target as Node)) setNewOpen(false);
     };
     document.addEventListener('mousedown', onDown);
     return () => document.removeEventListener('mousedown', onDown);
@@ -310,10 +405,11 @@ export default function CustomerRecord({ session }: { session: Session }) {
     });
   }
 
-  async function openChange(p: Payment) {
+  async function openChange(p: Payment, parts: Payment[] = [p], number: string | null = null) {
     setChange({
       p, amount: (Number(p.amount_cents) / 100).toFixed(2), date: p.payment_date, method: p.method ?? 'Cash',
       reference: p.reference ?? '', customerId: customerId!, invoiceId: p.invoice_id ?? '', reason: '',
+      parts, number,
     });
     if (allCustomers.length === 0) api.get<PickCustomer[]>('/api/customers').then(setAllCustomers).catch(() => {});
   }
@@ -354,53 +450,62 @@ export default function CustomerRecord({ session }: { session: Session }) {
     }, 'Could not save the details');
   }
 
-  /** Several open invoices: one PDF, or one email with that PDF attached. */
+  /** Ticked invoices and credit notes: one PDF, or one email with that PDF attached. */
+  const docIds = () => tickedDocs.map((t) => t.invoice!.invoice_id);
   const emailPicked = () => run(async () => {
     const r = await api.post<{ sentTo: string; invoiceNumbers: string[] }>(
-      '/api/invoices/email-batch', { invoiceIds: picked });
+      '/api/invoices/email-batch', { invoiceIds: docIds() });
     setMsg(`${r.invoiceNumbers.length} invoice${r.invoiceNumbers.length === 1 ? '' : 's'} `
       + `(${r.invoiceNumbers.join(', ')}) emailed to ${r.sentTo} in one PDF.`);
-    invTicks.clear();
+    txTicks.clear();
   }, 'Could not send the invoices');
   const downloadPicked = () => run(async () => {
-    await downloadPost('/api/invoices/batch.pdf', { invoiceIds: picked },
+    await downloadPost('/api/invoices/batch.pdf', { invoiceIds: docIds() },
       `invoices-${(h?.customer.name ?? 'customer').replace(/\W+/g, '-')}.pdf`);
   }, 'Could not build the PDF');
-  /** Receive payment for the ticked invoices: the form opens with them filled in. */
-  const payPicked = () => {
+  /** Take a payment opens with these invoices filled in to be paid in full. */
+  const payInvoices = (rows: Tx[]) => {
     const next: Record<string, string> = {};
-    for (const r of pickedOwed) next[r.invoice_id] = (Number(r.balance_cents) / 100).toFixed(2);
+    for (const t of rows) if (t.openCents > 0) next[t.invoice!.invoice_id] = (t.openCents / 100).toFixed(2);
     setAlloc(next);
     setPay((p) => ({ ...p, amount: '' }));
     setPayOpen(true);
-    setTab('payments');
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
   const markPickedSent = () => run(async () => {
-    const open_ = pickedRows.filter((r) => invoiceState(r) === 'Open');
-    for (const r of open_) await api.post(`/api/invoices/${r.invoice_id}/sent`, {});
+    const open_ = tickedInvoices.filter((t) => invoiceState(t.invoice!) === 'Open');
+    for (const t of open_) await api.post(`/api/invoices/${t.invoice!.invoice_id}/sent`, {});
     setMsg(`${open_.length} marked as sent.`);
   }, 'Could not mark them');
-  const exportInvoices = (rows: InvRow[]) => downloadCsv(`invoices-${(h?.customer.name ?? 'customer').replace(/\W+/g, '-')}`, [
-    ['Invoice', 'Date', 'Due', 'Type', 'Total', 'Paid', 'Balance', 'Status'],
-    ...rows.map((r) => [r.invoice_number, date(r.invoice_date), r.due_date ? date(r.due_date) : '',
-      r.is_credit_note ? 'Credit note' : 'Invoice', dollars(Number(r.grand_total_cents)),
-      dollars(Number(r.amount_paid_cents)), dollars(Number(r.balance_cents)), invoiceState(r)]),
-  ]);
-  const payPickedRows = () => paySort.sorted.filter((p) => payTicks.has(p.id));
   const printReceipts = () => run(async () => {
-    await downloadPost('/api/batch/receipts/print.pdf', { ids: payTicks.picked }, `Receipts-${payTicks.picked.length}.pdf`);
+    await downloadPost('/api/batch/receipts/print.pdf', { ids: tickedPayRows }, 'Receipts.pdf');
   }, 'Could not build the receipts');
   const emailReceipt = () => run(async () => {
-    const r = await api.post<{ sentTo: string; receiptNumber: string }>('/api/receipts/email', { paymentIds: payTicks.picked });
-    setMsg(`Receipt ${r.receiptNumber} for ${payTicks.picked.length} payment${payTicks.picked.length === 1 ? '' : 's'} emailed to ${r.sentTo}.`);
-    payTicks.clear();
+    const r = await api.post<{ sentTo: string; receiptNumber: string }>('/api/receipts/email', { paymentIds: tickedPayRows });
+    setMsg(`Receipt ${r.receiptNumber} emailed to ${r.sentTo}.`);
+    txTicks.clear();
   }, 'Could not email the receipt');
-  const exportPayments = (rows: PayRow[]) => downloadCsv(`payments-${(h?.customer.name ?? 'customer').replace(/\W+/g, '-')}`, [
-    ['Date', 'Against', 'How', 'Reference', 'Receipt', 'Amount', 'Reversed'],
-    ...rows.map((p) => [date(p.payment_date), p.invoice_number ?? 'On account', p.method ?? '', p.reference ?? '',
-      p.receipt_number ?? '', dollars(Number(p.amount_cents)), p.is_reversal ? 'reversal' : p.reversed ? 'yes' : '']),
+  const receiptFor = (t: Tx) => run(async () => {
+    const ids = (t.rows ?? []).filter((r) => Number(r.amount_cents) > 0).map((r) => r.id);
+    await downloadPost('/api/receipts.pdf', { paymentIds: ids }, `Receipt-${t.number || 'payment'}.pdf`);
+  }, 'Could not build the receipt');
+  const exportTx = (rows: Tx[]) => downloadCsv(`transactions-${(h?.customer.name ?? 'customer').replace(/\W+/g, '-')}`, [
+    ['Date', 'Type', 'No.', 'Description', 'Amount', 'Still open', 'Balance', 'Status'],
+    ...rows.map((t) => [t.date, KIND_WORDS[t.kind], t.number, txDescription(t), dollars(t.effectCents),
+      t.openCents ? dollars(t.kind === 'invoice' ? t.openCents : -t.openCents) : '',
+      t.balanceCents === null ? '' : dollars(t.balanceCents), txStatusWords(t)]),
   ]);
+  /** Change… on a payment: one row, or the part to change when it went against several invoices. */
+  const changeTx = (t: Tx) => {
+    const parts: Payment[] = (t.rows ?? []).filter((r) => !r.reversed && !r.is_reversal).map((r) => ({
+      id: r.id, payment_date: r.payment_date, amount_cents: String(r.amount_cents), method: r.method,
+      reference: r.reference, is_reversal: r.is_reversal, invoice_number: r.invoice_number,
+      invoice_id: r.invoice_id, reversed: r.reversed,
+    }));
+    if (parts.length === 0) return;
+    void openChange(parts[0], parts, t.number || null);
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
 
   const invoiceNow = () => run(async () => {
     const r = await api.post<{ invoiceNumber: string; deliveries: number; totalCents: number }>(
@@ -431,6 +536,16 @@ export default function CustomerRecord({ session }: { session: Session }) {
   const next = active
     .filter((s) => s.nextDeliveryDate)
     .sort((a, b) => String(a.nextDeliveryDate).localeCompare(String(b.nextDeliveryDate)))[0];
+
+  const wa = whatsappLink(c.whatsapp || c.phone);
+  const billing = addresses.find((a) => a.is_billing && a.active !== false);
+  const lineOf = (a: Address) => [a.address_line1, a.address_line2, a.city, a.parish].filter(Boolean).join(', ');
+  const billTo = billing ? lineOf(billing) : c.delivery_address;
+  const otherDelivery = addresses.filter((a) => a.is_delivery && a.active !== false).length;
+  const openInvoices = invRows.filter((i) => !i.is_credit_note && Number(i.balance_cents) > 0
+    && i.status !== 'Cancelled' && i.lifecycle !== 'Cancelled');
+  const openSum = openInvoices.reduce((t, i) => t + Number(i.balance_cents), 0);
+  const waitingCents = waiting.reduce((t, w) => t + Number(w.subtotalCents), 0);
 
   /* ---------- pieces, as plain functions returning JSX (never nested components) ---------- */
 
@@ -526,66 +641,189 @@ export default function CustomerRecord({ session }: { session: Session }) {
     <>
       <p style={{ marginTop: 0 }}><Link to="/customers">← Customers</Link></p>
 
-      <div className="panel-head record-head">
-        <div>
-          <h1 style={{ marginBottom: 2 }}>{c.name}</h1>
-          <p className="subtitle" style={{ marginBottom: 0 }}>
-            {/* Each part labelled. Bare, the account type and the price
-                list could both read "Corporate" side by side. */}
-            {[
-              c.account_type === 'Corporate' ? 'Business account'
-                : c.account_type ? `${c.account_type} account` : null,
-              c.contact_person ? `Contact: ${c.contact_person}` : null,
-              c.delivery_zone ? `${c.delivery_zone} zone` : 'No delivery zone',
-              c.price_tier_name ? `${c.price_tier_name} price list` : 'List price',
-              c.invoice_cycle === 'Weekly' ? 'Invoiced weekly'
-                : c.invoice_cycle === 'Monthly' ? 'Invoiced monthly'
-                  : c.payment_terms ? `Terms: ${c.payment_terms}` : null,
-              c.delivery_days?.length ? `Delivers ${c.delivery_days.join(', ')}` : null,
-              c.gct_exempt ? 'GCT exempt' : null,
-            ].filter(Boolean).join(' · ')}
-          </p>
-        </div>
-        <div className="record-actions">
-          <button type="button" className="secondary" disabled={busy}
-                  onClick={() => { setStatementOpen(true); setPayOpen(false); }}>
-            Statement…
-          </button>
-          <Link to={`/orders/new?customer=${c.id}`}>
-            <button type="button" className="secondary">New order</button>
-          </Link>
-          <button disabled={busy}
-                  onClick={() => setPayOpen(!payOpen)}>
-            {payOpen ? 'Close payment' : 'Take a payment'}
-          </button>
-          <div className="deskbar-menu" ref={moreRef}>
-            <button type="button" className="secondary" aria-haspopup="true"
-                    aria-expanded={moreOpen} onClick={() => setMoreOpen(!moreOpen)}>
-              More ▾
-            </button>
-            {moreOpen && (
-              <div className="deskbar-pop deskbar-pop-right" role="menu">
-                <button type="button" role="menuitem" className="pop-item pop-button"
-                        onClick={() => { setTab('details'); setMoreOpen(false); }}>
-                  <span>Edit details</span>
+      <section className="panel cust-head" aria-label={c.name}>
+        <div className="cust-main">
+          <div className="cust-top">
+            <div style={{ minWidth: 0 }}>
+              <h1 style={{ marginBottom: 0 }}>{c.name}</h1>
+              {/* Each part labelled. Bare, the account type and the price
+                  list could both read "Corporate" side by side. */}
+              <div className="cust-chips">
+                {[
+                  c.account_type === 'Corporate' ? 'Business account'
+                    : c.account_type ? `${c.account_type} account` : null,
+                  c.delivery_zone ? `${c.delivery_zone} zone` : 'No delivery zone',
+                  c.price_tier_name ? `${c.price_tier_name} price list` : 'List price',
+                  c.invoice_cycle === 'Weekly' ? 'Invoiced weekly'
+                    : c.invoice_cycle === 'Monthly' ? 'Invoiced monthly'
+                      : c.payment_terms ? `Terms: ${c.payment_terms}` : null,
+                  c.delivery_days?.length ? `Delivers ${c.delivery_days.join(', ')}` : null,
+                  c.gct_exempt ? 'GCT exempt' : null,
+                  c.active ? null : 'Closed account',
+                ].filter(Boolean).map((w) => <span key={w} className="chip neutral">{w}</span>)}
+              </div>
+            </div>
+            <div className="record-actions">
+              {/* One menu for everything that makes a transaction (Everton, 12 Oct 2026). */}
+              <div className="deskbar-menu" ref={newRef}>
+                <button type="button" className="go" aria-haspopup="true" aria-expanded={newOpen}
+                        onClick={() => { setNewOpen(!newOpen); setMoreOpen(false); }}>
+                  New transaction ▾
                 </button>
-                <Link role="menuitem" className="pop-item" to={`/quotes/new?customer=${c.id}`}>
-                  <span>New quote</span>
-                </Link>
-                <Link role="menuitem" className="pop-item" to={`/credit-notes?new=1&customer=${c.id}`}>
-                  <span>New credit note</span>
-                </Link>
-                {session.role === 'admin' && (
-                  <Link role="menuitem" className="pop-item" to="/customers">
-                    <span>Merge with a duplicate</span>
-                    <span className="pop-meta">on the customers list</span>
-                  </Link>
+                {newOpen && (
+                  <div className="deskbar-pop deskbar-pop-right" role="menu">
+                    <Link role="menuitem" className="pop-item" to={`/orders/new?customer=${c.id}`}>
+                      <span>New order</span>
+                    </Link>
+                    <button type="button" role="menuitem" className="pop-item pop-button"
+                            onClick={() => { setPayOpen(true); setNewOpen(false); }}>
+                      <span>Take a payment</span>
+                    </button>
+                    <button type="button" role="menuitem" className="pop-item pop-button"
+                            onClick={() => { setStatementOpen(true); setPayOpen(false); setNewOpen(false); }}>
+                      <span>Statement…</span>
+                      <span className="pop-meta">pick the dates, then PDF or email</span>
+                    </button>
+                    <Link role="menuitem" className="pop-item" to={`/quotes/new?customer=${c.id}`}>
+                      <span>New quote</span>
+                    </Link>
+                    <Link role="menuitem" className="pop-item" to={`/credit-notes?new=1&customer=${c.id}`}>
+                      <span>New credit note</span>
+                    </Link>
+                  </div>
                 )}
               </div>
+              <div className="deskbar-menu" ref={moreRef}>
+                <button type="button" className="secondary" aria-haspopup="true"
+                        aria-expanded={moreOpen} onClick={() => { setMoreOpen(!moreOpen); setNewOpen(false); }}>
+                  More ▾
+                </button>
+                {moreOpen && (
+                  <div className="deskbar-pop deskbar-pop-right" role="menu">
+                    {c.active && (
+                      <Link role="menuitem" className="pop-item" to={`/messages?customer=${c.id}`}>
+                        <span>Send a message</span>
+                        <span className="pop-meta">email, or WhatsApp</span>
+                      </Link>
+                    )}
+                    <button type="button" role="menuitem" className="pop-item pop-button"
+                            onClick={() => { setTab('details'); setMoreOpen(false); }}>
+                      <span>Edit details</span>
+                    </button>
+                    {session.role === 'admin' && (
+                      <Link role="menuitem" className="pop-item" to="/customers">
+                        <span>Merge with a duplicate</span>
+                        <span className="pop-meta">on the customers list</span>
+                      </Link>
+                    )}
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+
+          <div className="cust-contact">
+            <div>
+              <span className="k">Email</span>
+              <span>{c.email || <span className="muted">none on file</span>}</span>
+            </div>
+            <div>
+              <span className="k">Phone</span>
+              <span>
+                {c.phone || <span className="muted">none on file</span>}
+                {wa && <> <a href={wa} target="_blank" rel="noreferrer" className="small" style={{ marginLeft: 6 }}>WhatsApp</a></>}
+              </span>
+            </div>
+            {c.contact_person && (
+              <div>
+                <span className="k">Contact</span>
+                <span>{c.contact_person}</span>
+              </div>
             )}
+            <div>
+              <span className="k">Bill to</span>
+              <span>{billTo ?? <span className="muted">no address on file</span>}</span>
+            </div>
+            <div>
+              <span className="k">Deliver to</span>
+              <span>
+                {billing ? (c.delivery_address ?? <span className="muted">no address on file</span>) : (c.delivery_address ? 'Same as billing' : <span className="muted">no address on file</span>)}
+                {otherDelivery > 0 && <span className="muted small"> + {otherDelivery} other address{otherDelivery === 1 ? '' : 'es'}</span>}
+              </span>
+            </div>
+            <div>
+              <span className="k">Notes</span>
+              {c.notes
+                ? <span className="small">{c.notes}</span>
+                : <button type="button" className="as-link" onClick={() => setTab('details')}>Add notes</button>}
+            </div>
+            <div>
+              <span className="k">Portal</span>
+              <span>{c.portal_email ? 'Signed up' : <span className="muted">Not signed up</span>}</span>
+            </div>
+          </div>
+
+          <div className="cust-figs">
+            <div className="cust-fig">
+              <span className="k">Next delivery</span>
+              <span className="v">
+                {nextPending?.requested_delivery_date && (!next || String(nextPending.requested_delivery_date) <= String(next.nextDeliveryDate))
+                  ? when(nextPending.requested_delivery_date)
+                  : next ? when(next.nextDeliveryDate) : 'None booked'}
+              </span>
+              <span className="s">
+                {nextPending?.requested_delivery_date && (!next || String(nextPending.requested_delivery_date) <= String(next.nextDeliveryDate))
+                  ? `${nextPending.order_number}${nextPending.lines_summary ? `, ${nextPending.lines_summary.replace(/Alka Vida\s+/gi, '')}` : ''}`
+                  : next ? `${next.lineSummary}, ${PATTERN_WORDS[next.pattern]}` : 'nothing on order'}
+              </span>
+            </div>
+            <div className="cust-fig">
+              <span className="k">Standing orders</span>
+              <span className="v">{active.length ? `${active.length} running` : 'None'}</span>
+              <span className="s">{schedules.length > active.length ? `${schedules.length - active.length} paused` : active.map((x) => PATTERN_WORDS[x.pattern]).join(', ') || 'Repeat… on an order sets one up'}</span>
+            </div>
+            <div className="cust-fig">
+              <span className="k">5-gallon bottles</span>
+              <span className="v">{bottles ? `${bottles.closingHolding} with them` : '—'}</span>
+              <span className="s">{bottles ? `${bottles.delivered} out, ${bottles.returned} back` : 'no returnables'}</span>
+            </div>
           </div>
         </div>
-      </div>
+
+        <aside className="money-sum" aria-label="Money summary">
+          <div className="money-sum-title">Money summary</div>
+          <button type="button" className="sum-btn"
+                  onClick={() => { setTab('transactions'); setTxType('invoice'); setTxStatus('open'); setTxRange(''); }}>
+            <span className="sum-k"><span className="dot owe" aria-hidden="true" />{h.balanceCents < 0 ? 'In credit' : 'Open balance'}</span>
+            <span className="sum-v">{money(Math.abs(h.balanceCents))}</span>
+            <span className="sum-s">
+              {openInvoices.length} open invoice{openInvoices.length === 1 ? '' : 's'}
+              {openInvoices.length ? ` (${money(openSum)})` : ''}
+              {openSum - h.balanceCents > 0 ? `, less ${money(openSum - h.balanceCents)} credit` : ''}
+            </span>
+          </button>
+          <button type="button" className="sum-btn"
+                  onClick={() => { setTab('transactions'); setTxType('invoice'); setTxStatus('overdue'); setTxRange(''); }}>
+            <span className="sum-k"><span className="dot late" aria-hidden="true" />Overdue</span>
+            <span className={`sum-v${(h.overdueCents ?? 0) > 0 ? ' bad' : ''}`}>{money(h.overdueCents ?? 0)}</span>
+            <span className="sum-s">
+              {(h.overdueCents ?? 0) > 0
+                ? `${h.overdueInvoices} invoice${h.overdueInvoices === 1 ? '' : 's'} past the due date`
+                : 'nothing past its due date'}
+            </span>
+          </button>
+          {(onAccountCents > 0 || waiting.length > 0) && (
+            <div className="sum-lines">
+              {onAccountCents > 0 && (
+                <div><span>Paid, on account</span><span className="money">{money(onAccountCents)}</span></div>
+              )}
+              {waiting.length > 0 && (
+                <div><span>Delivered, not invoiced yet <span className="muted small">(before GCT)</span></span><span className="money">{money(waitingCents)}</span></div>
+              )}
+            </div>
+          )}
+        </aside>
+      </section>
 
       {error && <div className="notice error">{error}</div>}
       {msg && <div className="notice ok">{msg}</div>}
@@ -688,8 +926,21 @@ export default function CustomerRecord({ session }: { session: Session }) {
 
       {change && (
         <div className="panel">
-          <h2 style={{ marginTop: 0 }}>Change the payment of {money(Number(change.p.amount_cents))} on {when(change.p.payment_date)}</h2>
+          <h2 style={{ marginTop: 0 }}>
+            Change {change.number ? `payment ${change.number}` : 'the payment'} of {money(Number(change.p.amount_cents))} on {when(change.p.payment_date)}
+          </h2>
           <form onSubmit={submitChange}>
+            {change.parts.length > 1 && (
+              <div className="field">
+                <label htmlFor="ch-part">It went against several invoices. Which part?</label>
+                <select id="ch-part" value={change.p.id}
+                        onChange={(e) => { const q = change.parts.find((x) => x.id === e.target.value); if (q) void openChange(q, change.parts, change.number); }}>
+                  {change.parts.map((x) => (
+                    <option key={x.id} value={x.id}>{money(Number(x.amount_cents))} {x.invoice_number ? `against ${x.invoice_number}` : 'on the account'}</option>
+                  ))}
+                </select>
+              </div>
+            )}
             <div className="row">
               <div className="field">
                 <label htmlFor="ch-amt">Amount</label>
@@ -748,45 +999,6 @@ export default function CustomerRecord({ session }: { session: Session }) {
         </div>
       )}
 
-      <div className="figures">
-        <div className="fig">
-          <div className="fig-label">{h.balanceCents < 0 ? 'In credit' : 'Owes'}</div>
-          <div className="fig-value">{money(Math.abs(h.balanceCents))}</div>
-          <div className={`fig-sub${(h.overdueCents ?? 0) > 0 ? ' bad' : ''}`}>
-            {(h.overdueCents ?? 0) > 0
-              ? `${money(h.overdueCents ?? 0)} overdue (${h.overdueInvoices} invoice${h.overdueInvoices === 1 ? '' : 's'})`
-              : `${open.length} open invoice${open.length === 1 ? '' : 's'}${open.length ? ', none late' : ''}`}
-          </div>
-        </div>
-        <div className="fig">
-          <div className="fig-label">Next delivery</div>
-          <div className="fig-value" style={{ fontSize: next || nextPending ? 22 : 17 }}>
-            {nextPending?.requested_delivery_date && (!next || String(nextPending.requested_delivery_date) <= String(next.nextDeliveryDate))
-              ? when(nextPending.requested_delivery_date)
-              : next ? when(next.nextDeliveryDate) : 'None booked'}
-          </div>
-          <div className="fig-sub">
-            {nextPending?.requested_delivery_date && (!next || String(nextPending.requested_delivery_date) <= String(next.nextDeliveryDate))
-              ? `${nextPending.order_number}${nextPending.lines_summary ? `, ${nextPending.lines_summary.replace(/Alka Vida\s+/gi, '')}` : ''}`
-              : next ? `${next.lineSummary}, ${PATTERN_WORDS[next.pattern]}` : 'nothing on order'}
-          </div>
-        </div>
-        <div className="fig">
-          <div className="fig-label">Bottles held</div>
-          <div className="fig-value">{bottles ? bottles.closingHolding : '—'}</div>
-          <div className="fig-sub">
-            {bottles ? `${bottles.delivered} out, ${bottles.returned} back` : 'no returnables'}
-          </div>
-        </div>
-        <div className="fig">
-          <div className="fig-label">Portal</div>
-          <div className="fig-value" style={{ fontSize: 17 }}>
-            {c.portal_email ? 'Signed up' : 'Not signed up'}
-          </div>
-          <div className="fig-sub">{c.portal_email ?? 'cannot order online'}</div>
-        </div>
-      </div>
-
       <nav className="tabs" aria-label="Customer sections">
         {TABS.map(([key, label]) => (
           <button key={key} type="button" className={`tab${tab === key ? ' active' : ''}`}
@@ -796,8 +1008,8 @@ export default function CustomerRecord({ session }: { session: Session }) {
             {key === 'standing' && schedules.length > 0 && (
               <span className="tab-count">{schedules.length}</span>
             )}
-            {key === 'invoices' && open.length > 0 && (
-              <span className="tab-count">{open.length}</span>
+            {key === 'transactions' && openInvoices.length > 0 && (
+              <span className="tab-count">{openInvoices.length}</span>
             )}
           </button>
         ))}
@@ -834,17 +1046,6 @@ export default function CustomerRecord({ session }: { session: Session }) {
                   </p>
                 </div>
               )}
-            <div className="panel">
-              <div className="panel-head">
-                <h2 style={{ margin: 0, fontSize: 15 }}>Delivery and contact</h2>
-                <button type="button" className="as-link small"
-                        onClick={() => setTab('details')}>Edit</button>
-              </div>
-              <p style={{ margin: '8px 0 4px' }}>{c.delivery_address ?? <span className="muted">No address on file</span>}</p>
-              <p className="small" style={{ margin: 0 }}>{c.phone}</p>
-              <p className="small" style={{ margin: 0 }}>{c.email}</p>
-              {c.notes && <p className="muted small" style={{ margin: '8px 0 0' }}>{c.notes}</p>}
-            </div>
           </div>
         </div>
       )}
@@ -910,7 +1111,7 @@ export default function CustomerRecord({ session }: { session: Session }) {
         </>
       )}
 
-      {tab === 'invoices' && (
+      {tab === 'transactions' && (
         <>
           {(waiting.length > 0 || (c.invoice_cycle && c.invoice_cycle !== 'PerDelivery')) && (
             <div className="panel">
@@ -947,139 +1148,137 @@ export default function CustomerRecord({ session }: { session: Session }) {
             </div>
           )}
           <div className="panel phone-cards">
-            <h2 style={{ marginTop: 0 }}>Invoices</h2>
-            <div className="row">
-              <StatusSelect id="c-inv-st" value={invStatus} onChange={setInvStatus} options={INVOICE_FILTERS} />
+            <div className="tx-tools">
+              <BatchBar count={txTicks.picked.length} noun={['line', 'lines']} busy={busy}
+                        summary={tickedOwed.length ? `${money(tickedOwed.reduce((a, t) => a + t.openCents, 0))} still owed on them` : undefined}
+                        onClear={txTicks.clear}
+                        actions={[
+                          { label: 'Email invoices together (one PDF)', run: emailPicked,
+                            disabledWhy: tickedDocs.length ? null : 'Tick an invoice or credit note' },
+                          { label: 'Print invoices (one PDF)', run: downloadPicked,
+                            disabledWhy: tickedDocs.length ? null : 'Tick an invoice or credit note' },
+                          { label: 'Receive payment', run: () => payInvoices(tickedOwed),
+                            disabledWhy: tickedOwed.length ? null : 'Nothing owed on what is ticked' },
+                          { label: 'Mark as sent', run: markPickedSent,
+                            disabledWhy: tickedInvoices.some((t) => invoiceState(t.invoice!) === 'Open') ? null : 'No ticked invoice is waiting to be sent' },
+                          { label: 'Print receipts (one PDF)', run: printReceipts,
+                            disabledWhy: tickedPayRows.length ? null : 'Tick a payment' },
+                          { label: 'Email one receipt for them', run: emailReceipt,
+                            disabledWhy: tickedPayRows.length ? null : 'Tick a payment' },
+                          { label: 'Export to Excel', run: () => exportTx(tickedTx) },
+                        ]} />
             </div>
-            <BatchBar count={picked.length} noun={['invoice', 'invoices']} busy={busy}
-                      summary={pickedOwed.length ? `${money(pickedOwed.reduce((a, r) => a + Number(r.balance_cents), 0))} still owed on them` : undefined}
-                      onClear={invTicks.clear}
-                      actions={[
-                        { label: 'Email them together (one PDF)', run: emailPicked },
-                        { label: 'Print (one PDF)', run: downloadPicked },
-                        { label: 'Receive payment', run: payPicked, disabledWhy: pickedOwed.length ? null : 'Nothing owed on these' },
-                        { label: 'Mark as sent', run: markPickedSent,
-                          disabledWhy: pickedRows.some((r) => invoiceState(r) === 'Open') ? null : 'None of these is waiting to be sent' },
-                        { label: 'Export to Excel', run: () => exportInvoices(pickedRows) },
-                      ]} />
-            <table>
+            <div className="tx-filters">
+              <StatusSelect id="tx-type" label="Type" value={txType} onChange={setTxType} options={TX_TYPES} />
+              <StatusSelect id="tx-status" value={txStatus} onChange={setTxStatus} options={TX_STATUS} />
+              <StatusSelect id="tx-date" label="Date" value={txRange} onChange={setTxRange} options={TX_DATES} />
+              {txRange === 'custom' && (
+                <>
+                  <div className="field">
+                    <label htmlFor="tx-from">From</label>
+                    <input id="tx-from" type="date" value={txFrom} onChange={(e) => setTxFrom(e.target.value)} />
+                  </div>
+                  <div className="field">
+                    <label htmlFor="tx-to">To</label>
+                    <input id="tx-to" type="date" value={txTo} onChange={(e) => setTxTo(e.target.value)} />
+                  </div>
+                </>
+              )}
+              {filtered && (
+                <button type="button" className="as-link small tx-clear"
+                        onClick={() => { setTxType(''); setTxStatus(''); setTxRange(''); }}>Clear filters</button>
+              )}
+              <div className="tx-right">
+                <label className="check">
+                  <input type="checkbox" checked={showBal} onChange={(e) => setShowBal(e.target.checked)} />
+                  Running balance
+                </label>
+                <button type="button" className="secondary" disabled={txSort.sorted.length === 0}
+                        onClick={() => exportTx(txSort.sorted)}>Export</button>
+              </div>
+            </div>
+            <table className="tx-table">
               <thead>
                 <tr>
-                  <TickAllTh all={invTicks.all} some={invTicks.some} onToggle={invTicks.toggleAll} disabled={invSort.sorted.length === 0} />
-                  <SortTh label="Invoice" k="number" sort={invSort.sort} onSort={invSort.onSort} />
-                  <SortTh label="Date" k="date" sort={invSort.sort} onSort={invSort.onSort} />
-                  <SortTh label="Due" k="due" sort={invSort.sort} onSort={invSort.onSort} />
-                  <SortTh label="Total" k="total" sort={invSort.sort} onSort={invSort.onSort} className="num" />
-                  <SortTh label="Outstanding" k="balance" sort={invSort.sort} onSort={invSort.onSort} className="num" />
-                  <SortTh label="Status" k="status" sort={invSort.sort} onSort={invSort.onSort} />
+                  <TickAllTh all={txTicks.all} some={txTicks.some} onToggle={txTicks.toggleAll} disabled={txSort.sorted.length === 0} />
+                  <SortTh label="Date" k="date" sort={txSort.sort} onSort={txSort.onSort} />
+                  <SortTh label="Type" k="type" sort={txSort.sort} onSort={txSort.onSort} />
+                  <SortTh label="No." k="number" sort={txSort.sort} onSort={txSort.onSort} />
+                  <th>Description</th>
+                  <SortTh label="Amount" k="amount" sort={txSort.sort} onSort={txSort.onSort} className="num" />
+                  <SortTh label="Still open" k="open" sort={txSort.sort} onSort={txSort.onSort} className="num" />
+                  {showBal && <SortTh label="Balance" k="balance" sort={txSort.sort} onSort={txSort.onSort} className="num" />}
+                  <SortTh label="Status" k="status" sort={txSort.sort} onSort={txSort.onSort} />
+                  <th />
                 </tr>
               </thead>
               <tbody>
-                {invSort.sorted.map((i) => {
-                  const st = invoiceState(i);
+                {txSort.sorted.map((t) => {
+                  const words = txStatusWords(t);
+                  const due = txDue(t);
+                  const desc = txDescription(t);
                   return (
-                    <tr key={i.invoice_id}>
-                      <TickTd checked={invTicks.has(i.invoice_id)} onToggle={() => invTicks.toggle(i.invoice_id)} label={`Tick ${i.invoice_number}`} />
+                    <tr key={t.key} className={t.counts ? undefined : 'tx-void'}>
+                      <TickTd checked={txTicks.has(t.key)} onToggle={() => txTicks.toggle(t.key)} label={`Tick ${KIND_WORDS[t.kind]} ${t.number}`} />
+                      <td data-label="Date" className="tx-dup tx-nowrap">{when(t.date)}</td>
+                      <td data-label="Type" className="tx-dup">{KIND_WORDS[t.kind]}</td>
                       <td className="lead">
-                        <Link to={`/invoices/${i.invoice_id}`}>{i.invoice_number}</Link>
-                        <span className={`chip ${STATE_TONE[st]} phone-only`}>{st}</span>
+                        <span className="tx-nowrap">
+                          {t.invoice
+                            ? <Link to={`/invoices/${t.invoice.invoice_id}`}>{t.number}</Link>
+                            : <strong>{t.number || '—'}</strong>}
+                          <span className="phone-only muted small"> · {KIND_WORDS[t.kind]} · {when(t.date)}</span>
+                        </span>
+                        <span className={`chip ${txTone(t)} phone-only`}>{words}</span>
                       </td>
-                      <td data-label="Date">{when(i.invoice_date)}</td>
-                      <td data-label="Due">{i.due_date && !i.is_credit_note ? when(i.due_date) : '—'}</td>
-                      <td data-label="Total" className="num">{money(Number(i.grand_total_cents))}</td>
-                      <td data-label="Outstanding" className="num money">{money(Number(i.balance_cents))}</td>
-                      <td className="on-desktop"><span className={`chip ${STATE_TONE[st]}`}>{st}</span></td>
+                      <td data-label="What" className="small muted tx-desc">{desc || '—'}</td>
+                      <td data-label="Amount" className="num money">{money(t.effectCents)}</td>
+                      <td data-label="Still open" className={`num${t.openCents > 0 && words === 'Overdue' ? ' tx-late' : ''}`}>
+                        {t.openCents > 0 ? money(t.kind === 'invoice' ? t.openCents : -t.openCents) : <span className="muted">—</span>}
+                      </td>
+                      {showBal && (
+                        <td data-label="Balance" className="num money">{t.balanceCents === null ? <span className="muted">—</span> : money(t.balanceCents)}</td>
+                      )}
+                      <td className="on-desktop">
+                        <span className={`chip ${txTone(t)}`}>{words}</span>
+                        {due && <div className={`small ${words === 'Overdue' ? 'tx-late' : 'muted'}`}>{due}</div>}
+                      </td>
+                      <td className="num tx-acts">
+                        {t.kind === 'invoice' && t.openCents > 0 && (
+                          <button type="button" className="as-link small" disabled={busy} onClick={() => payInvoices([t])}>Receive payment</button>
+                        )}
+                        {t.kind === 'payment' && (
+                          <>
+                            <button type="button" className="as-link small" disabled={busy} onClick={() => receiptFor(t)}>Receipt</button>
+                            {t.reversed !== 'all' && (
+                              <button type="button" className="as-link small" disabled={busy} onClick={() => changeTx(t)}>Change</button>
+                            )}
+                          </>
+                        )}
+                        {t.invoice && (
+                          <Link className="small" to={`/invoices/${t.invoice.invoice_id}`}>View</Link>
+                        )}
+                      </td>
                     </tr>
                   );
                 })}
               </tbody>
             </table>
-            {invSort.sorted.length === 0 && <p className="muted">{invRows.length ? 'No invoice in that status.' : 'No invoices yet.'}</p>}
+            {txSort.sorted.length === 0 && (
+              <p className="muted">{allTx.length ? 'Nothing matches these filters.' : 'No invoices or payments yet.'}</p>
+            )}
+            {txSort.sorted.length > 0 && (
+              <div className="tx-foot small muted">
+                <span>{txSort.sorted.length} shown{txTicks.picked.length ? ` · ${txTicks.picked.length} ticked` : ''}</span>
+                <span>
+                  Still owed on what is shown: {money(txSort.sorted.reduce((a, t) => a + (!t.counts ? 0
+                    : t.kind === 'invoice' ? t.openCents : t.kind === 'payment' ? -t.openCents : 0), 0))}
+                </span>
+              </div>
+            )}
             {onAccountNotice()}
           </div>
-          <StatementView customerId={c.id} />
         </>
-      )}
-
-      {tab === 'payments' && (
-        <div className="panel phone-cards">
-          <div className="panel-head">
-            <h2>Payments</h2>
-            {!payOpen && (
-              <button type="button" onClick={() => setPayOpen(true)}>Take a payment</button>
-            )}
-          </div>
-          <div className="row">
-            <StatusSelect id="c-pay-st" label="Show" value={payStatus} onChange={setPayStatus} options={PAY_FILTERS} />
-          </div>
-          <BatchBar count={payTicks.picked.length} noun={['payment', 'payments']} busy={busy}
-                    summary={money(payPickedRows().reduce((a, p) => a + Number(p.amount_cents), 0))}
-                    onClear={payTicks.clear}
-                    actions={[
-                      { label: 'Print receipts (one PDF)', run: printReceipts },
-                      { label: 'Email one receipt for them', run: emailReceipt },
-                      { label: 'Export to Excel', run: () => exportPayments(payPickedRows()) },
-                    ]} />
-          <table>
-            <thead>
-              <tr>
-                <TickAllTh all={payTicks.all} some={payTicks.some} onToggle={payTicks.toggleAll} disabled={paySort.sorted.length === 0} />
-                <SortTh label="Date" k="date" sort={paySort.sort} onSort={paySort.onSort} />
-                <SortTh label="Against" k="against" sort={paySort.sort} onSort={paySort.onSort} />
-                <SortTh label="How" k="how" sort={paySort.sort} onSort={paySort.onSort} />
-                <SortTh label="Reference" k="reference" sort={paySort.sort} onSort={paySort.onSort} />
-                <SortTh label="Amount" k="amount" sort={paySort.sort} onSort={paySort.onSort} className="num" />
-                <th />
-              </tr>
-            </thead>
-            <tbody>
-              {paySort.sorted.map((p) => {
-                const tickable = !p.is_reversal && Number(p.amount_cents) > 0;
-                return (
-                  <tr key={p.id}>
-                    {tickable
-                      ? <TickTd checked={payTicks.has(p.id)} onToggle={() => payTicks.toggle(p.id)} label={`Tick the payment of ${money(Number(p.amount_cents))}`} />
-                      : <td className="tick-col" />}
-                    <td className="lead">
-                      <span>{when(p.payment_date)}</span>
-                      {p.is_reversal && <span className="chip bad">reversal</span>}
-                      {p.reversed && <span className="chip bad">reversed</span>}
-                    </td>
-                    <td data-label="Against">
-                      {p.invoice_number ?? <span className="muted">left on account{p.order_number ? ` (paid with ${p.order_number})` : ''}</span>}
-                    </td>
-                    <td data-label="How">{p.method ?? '—'}</td>
-                    <td data-label="Reference" className="small muted">{p.reference ?? '—'}{p.receipt_number ? ` · ${p.receipt_number}` : ''}</td>
-                    <td data-label="Amount" className="num money">{money(Number(p.amount_cents))}</td>
-                    <td className="num">
-                      {tickable && (
-                        <span className="row" style={{ gap: 10, justifyContent: 'flex-end' }}>
-                          <button type="button" className="as-link small" disabled={busy}
-                                  onClick={() => run(async () => {
-                                    await downloadPost('/api/receipts.pdf', { paymentIds: [p.id] }, `receipt-${p.id.slice(0, 8)}.pdf`);
-                                  }, 'Could not build the receipt')}>Receipt</button>
-                          {!p.reversed && (
-                            <button type="button" className="as-link small" disabled={busy}
-                                    onClick={() => {
-                                      const full = h.payments.find((x) => x.id === p.id) ?? {
-                                        id: p.id, payment_date: p.payment_date, amount_cents: String(p.amount_cents), method: p.method,
-                                        reference: p.reference, is_reversal: p.is_reversal, invoice_number: p.invoice_number,
-                                        invoice_id: p.invoice_id, reversed: p.reversed,
-                                      };
-                                      void openChange(full); window.scrollTo({ top: 0, behavior: 'smooth' });
-                                    }}>Change</button>
-                          )}
-                        </span>
-                      )}
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-          {paySort.sorted.length === 0 && <p className="muted">{payRows.length ? 'Nothing in that view.' : 'Nothing paid yet.'}</p>}
-          {onAccountNotice()}
-        </div>
       )}
 
       {tab === 'bottles' && (

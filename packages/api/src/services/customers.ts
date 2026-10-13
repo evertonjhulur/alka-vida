@@ -581,7 +581,8 @@ export async function customerHistory(db: Db, customerId: string) {
     `SELECT COALESCE(SUM(p.amount_cents), 0)::text AS c FROM payments p
      JOIN customer_orders o ON o.id = p.order_id
      WHERE p.customer_id = $1 AND p.invoice_id IS NULL AND p.status = 'Confirmed'
-       AND NOT p.is_reversal AND o.status NOT IN ('Delivered', 'Cancelled')`, [customerId],
+       AND NOT p.is_reversal AND o.status NOT IN ('Delivered', 'Cancelled')
+       AND NOT EXISTS (SELECT 1 FROM payments r WHERE r.reverses_payment_id = p.id)`, [customerId],
   );
   return {
     customer, orders, invoices, payments, balanceCents: num(balance.balance_cents),

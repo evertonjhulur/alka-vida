@@ -484,7 +484,7 @@ export default function Reports() {
             <tbody>
               {owed.map((o) => (
                 <tr key={o.customer_id}>
-                  <td><Link to={`/customers/${o.customer_id}?tab=invoices`}>{o.name}</Link></td>
+                  <td><Link to={`/customers/${o.customer_id}?tab=transactions`}>{o.name}</Link></td>
                   <td className="num">{money(Number(o.invoiced_cents))}</td>
                   <td className="num">{money(Number(o.paid_cents))}</td>
                   <td className="num"><strong>{Number(o.balance_cents) < 0 ? `${money(-Number(o.balance_cents))} in credit` : money(Number(o.balance_cents))}</strong></td>

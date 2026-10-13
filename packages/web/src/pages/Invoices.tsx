@@ -90,7 +90,7 @@ export default function Invoices() {
   }, 'Could not mark them');
   const oneCustomer = new Set(picked.map((r) => r.customer_id)).size === 1;
   const owedPicked = picked.filter((r) => Number(r.balance_cents) > 0 && !r.is_credit_note && invoiceState(r) !== 'Cancelled');
-  const receivePayment = () => navigate(`/customers/${picked[0].customer_id}?tab=payments&pay=${owedPicked.map((r) => r.invoice_id).join(',')}`);
+  const receivePayment = () => navigate(`/customers/${picked[0].customer_id}?tab=transactions&pay=${owedPicked.map((r) => r.invoice_id).join(',')}`);
 
   /** The list as it is filtered on screen, for Excel (team feedback, point 13). */
   function exportList(list: Row[] = shown) {
@@ -141,7 +141,7 @@ export default function Invoices() {
             <tbody>
               {waiting.map((w) => (
                 <tr key={w.customerId}>
-                  <td className="lead"><Link to={`/customers/${w.customerId}?tab=invoices`}>{w.customerName}</Link></td>
+                  <td className="lead"><Link to={`/customers/${w.customerId}?tab=transactions`}>{w.customerName}</Link></td>
                   <td data-label="Billed">{w.cycle === 'PerDelivery' ? 'Per delivery' : w.cycle}</td>
                   <td data-label="Deliveries">{w.deliveries}</td>
                   <td data-label="From">{when(w.firstDate)}{w.lastDate !== w.firstDate ? ` – ${when(w.lastDate)}` : ''}</td>
@@ -214,7 +214,7 @@ export default function Invoices() {
                 <tr key={r.invoice_id}>
                   <TickTd checked={ticks.has(r.invoice_id)} onToggle={() => ticks.toggle(r.invoice_id)} label={`Tick ${r.invoice_number}`} />
                   <td><Link to={`/invoices/${r.invoice_id}`}>{r.invoice_number}</Link></td>
-                  <td><Link to={`/customers/${r.customer_id}?tab=invoices`}>{r.customer_name}</Link></td>
+                  <td><Link to={`/customers/${r.customer_id}?tab=transactions`}>{r.customer_name}</Link></td>
                   <td>{when(r.invoice_date)}</td>
                   <td>{r.is_credit_note || !r.due_date ? '—' : when(r.due_date)}</td>
                   <td className="num">{money(Number(r.grand_total_cents))}</td>

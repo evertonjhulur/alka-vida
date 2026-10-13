@@ -378,8 +378,9 @@ describe('Sending', () => {
       allocations: [{ invoiceId: a.invoiceId, amountCents: a.grandTotalCents }],
     });
     const r = await emailReceipt(f.db, f.office, pay.paymentIds);
-    assert.match(r.receiptNumber, /^RC-/);
-    assert.match(sent.at(-1)!.subject, /receipt RC-/);
+    // Numbered when recorded since 12 Oct 2026 (RCT-), one number for every row.
+    assert.match(r.receiptNumber, /^RCT-\d{6}$/);
+    assert.match(sent.at(-1)!.subject, /receipt RCT-/);
     const again = await emailReceipt(f.db, f.office, pay.paymentIds);
     assert.equal(again.receiptNumber, r.receiptNumber, 'the same receipt keeps its number');
   });

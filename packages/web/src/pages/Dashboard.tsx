@@ -282,7 +282,7 @@ export default function Dashboard({ session }: { session: Session }) {
                           {days == null || days <= 0 ? 'not due' : `${days} days`}
                         </span>
                       </td>
-                      <td className="num actions"><Link to={`/customers/${c.customer_id}?tab=invoices`}>Statement</Link></td>
+                      <td className="num actions"><Link to={`/customers/${c.customer_id}?tab=transactions`}>Statement</Link></td>
                     </tr>
                   );
                 })}

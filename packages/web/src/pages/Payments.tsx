@@ -271,7 +271,7 @@ export default function Payments() {
                   <tr key={p.id}>
                     <td data-label="Received">{day(p.payment_date)}</td>
                     <td data-label="Customer">
-                      <Link to={`/customers/${p.customer_id}?tab=payments`}>{p.customer_name}</Link>
+                      <Link to={`/customers/${p.customer_id}?tab=transactions`}>{p.customer_name}</Link>
                       {p.reference && <div className="muted small">{p.reference}</div>}
                       {p.order_number && p.order_open && (
                         <div className="small" style={{ color: 'var(--info)' }}>paid with {p.order_number}: goes on its invoice when delivered</div>
@@ -456,7 +456,7 @@ function Received({ stamp }: { stamp: number }) {
                   {p.is_reversal && <> <span className="chip bad">reversal</span></>}
                   {p.reversed && <> <span className="chip bad">reversed</span></>}
                 </td>
-                <td data-label="Customer"><Link to={`/customers/${p.customer_id}?tab=payments`}>{p.customer_name}</Link></td>
+                <td data-label="Customer"><Link to={`/customers/${p.customer_id}?tab=transactions`}>{p.customer_name}</Link></td>
                 <td data-label="Against">
                   {p.invoice_id ? <Link to={`/invoices/${p.invoice_id}`}>{p.invoice_number}</Link>
                     : <span className="muted">on account{p.order_number ? ` (with ${p.order_number})` : ''}</span>}

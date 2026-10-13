@@ -487,7 +487,7 @@ export default function InvoiceDetail({ session }: { session: Session }) {
             </div>
           )}
           <p className="subtitle" style={{ marginBottom: 0 }}>
-            {i.customer ? <Link to={`/customers/${i.customer.id}?tab=invoices`}>{i.customer.name}</Link> : 'Customer'}
+            {i.customer ? <Link to={`/customers/${i.customer.id}?tab=transactions`}>{i.customer.name}</Link> : 'Customer'}
             {' · '}{origin}
           </p>
         </div>

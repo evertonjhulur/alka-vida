@@ -306,8 +306,18 @@ export async function renderReceiptPdf(db: Db, paymentIds: readonly string[]) {
   return { ...meta, pdf: await finished };
 }
 
-async function drawReceipt(doc: PDFKit.PDFDocument, db: Db, paymentIds: readonly string[]) {
-  if (paymentIds.length === 0) throw new RuleViolation('no payment to give a receipt for');
+async function drawReceipt(doc: PDFKit.PDFDocument, db: Db, chosenIds: readonly string[]) {
+  if (chosenIds.length === 0) throw new RuleViolation('no payment to give a receipt for');
+  // A receipt is for whole payments (12 Oct 2026): a payment spread over
+  // several invoices is several rows sharing one number, and its receipt
+  // shows them all, whichever row was picked.
+  const paymentIds = (await db.query<{ id: string }>(
+    `SELECT id FROM payments
+     WHERE id = ANY($1::uuid[])
+        OR (NOT is_reversal AND amount_cents > 0 AND receipt_number IN (
+              SELECT receipt_number FROM payments WHERE id = ANY($1::uuid[]) AND receipt_number IS NOT NULL))`,
+    [[...chosenIds]],
+  )).map((r) => r.id);
   const rows = await db.query<{
     id: string; customer_id: string; amount_cents: number; payment_date: string; method: string;
     reference: string | null; receipt_number: string | null; invoice_number: string | null;
@@ -324,15 +334,15 @@ async function drawReceipt(doc: PDFKit.PDFDocument, db: Db, paymentIds: readonly
   }
   if (rows.some((r) => r.is_reversal)) throw new RuleViolation('a reversal does not get a receipt');
 
-  let number = rows.find((r) => r.receipt_number)?.receipt_number ?? null;
-  if (!number) {
-    number = await db.tx(async (t) => {
-      const n = await nextNumber(t, 'receipt_number_seq', 'RC');
-      // One number for the receipt; stored on the first row only (it is unique).
-      await t.query(`UPDATE payments SET receipt_number = $2 WHERE id = $1`, [rows[0].id, n]);
-      return n;
-    });
+  // Every payment is numbered when it is recorded (migration 024); one
+  // recorded before that and somehow missed gets its number now.
+  const missing = rows.filter((r) => !r.receipt_number);
+  if (missing.length) {
+    const n = await db.tx((t) => nextNumber(t, 'receipt_number_seq', 'RCT'));
+    await db.query(`UPDATE payments SET receipt_number = $2 WHERE id = ANY($1::uuid[])`, [missing.map((r) => r.id), n]);
+    for (const r of missing) r.receipt_number = n;
   }
+  const number = [...new Set(rows.map((r) => r.receipt_number!))].join(', ');
   const customer = await billTo(db, rows[0].customer_id);
   const balance = await db.one<{ b: string }>(
     `SELECT COALESCE(balance_cents,0)::text AS b FROM customer_balances WHERE customer_id = $1`,
@@ -374,7 +384,7 @@ async function drawReceipt(doc: PDFKit.PDFDocument, db: Db, paymentIds: readonly
     .text(`${BRAND.company}  ·  All amounts in Jamaican dollars.`
       + `\nContact ${await contactEmail(db)} for any orders or queries.`, 50, doc.y, { align: 'center', width: 510 });
   return {
-    filename: `Receipt-${number}.pdf`, receiptNumber: number,
+    filename: `Receipt-${number.split(", ")[0]}.pdf`, receiptNumber: number,
     customerName: customer.name, customerEmail: customer.email, totalCents: total,
   };
 }
@@ -386,7 +396,7 @@ export async function emailReceipt(
   requireRole(actor, 'admin', 'user');
   if (!mailConfigured()) {
     throw new RuleViolation('email is not set up on this computer. The receipt can be downloaded '
-      + 'from their Payments tab and sent by hand.');
+      + 'from their Transactions tab and sent by hand.');
   }
   const doc = await renderReceiptPdf(db, paymentIds);
   const to = recipient(opts.to, doc.customerEmail, doc.customerName);
@@ -644,12 +654,20 @@ export async function printPurchaseOrders(db: Db, ids: readonly string[]) {
 
 /** One receipt per payment, any customers, in one PDF. Reversals have none. */
 export async function printReceipts(db: Db, paymentIds: readonly string[]) {
-  const ok = await db.query<{ id: string }>(
-    `SELECT id FROM payments WHERE id = ANY($1::uuid[]) AND NOT is_reversal AND amount_cents > 0
+  const ok = await db.query<{ id: string; receipt_number: string | null }>(
+    `SELECT id, receipt_number FROM payments WHERE id = ANY($1::uuid[]) AND NOT is_reversal AND amount_cents > 0
      ORDER BY payment_date, created_at`, [[...new Set(paymentIds)]],
   );
   if (ok.length === 0) throw new RuleViolation('none of those payments gets a receipt (reversals do not)');
-  return printEach(ok.map((r) => r.id), 'payment', `Receipts-${ok.length}.pdf`, (doc, id) => drawReceipt(doc, db, [id]));
+  // One receipt per payment number: the rows of one payment print together.
+  const seen = new Set<string>();
+  const firsts = ok.filter((r) => {
+    const k = r.receipt_number ?? r.id;
+    if (seen.has(k)) return false;
+    seen.add(k);
+    return true;
+  }).map((r) => r.id);
+  return printEach(firsts, 'payment', `Receipts-${firsts.length}.pdf`, (doc, id) => drawReceipt(doc, db, [id]));
 }
 
 /** Each customer gets one receipt email covering their payments in the batch. */

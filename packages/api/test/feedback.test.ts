@@ -336,6 +336,24 @@ describe('Talking to customers (points 8 and 23)', () => {
     assert.equal(d!.recipients[0].status, 'Sent');
   });
 
+  test('a message to one customer chosen by name goes to them alone, with no portal post (12 Oct 2026)', async () => {
+    // What the Send a message screen previews when customers are chosen by name.
+    const preview = await resolveList(f.db, { zones: ['__none__'] }, [f.customerId], []);
+    assert.deepEqual(preview.map((m) => m.id), [f.customerId]);
+    const postsBefore = (await listNews(f.db) as unknown[]).length;
+    const n = sent.length;
+    const b = await createBroadcast(f.db, f.office, {
+      subject: 'Your delivery day', body: 'From next week we come on Thursdays', purpose: 'Service',
+      customerIds: [f.customerId],
+    });
+    assert.equal(b.recipients, 1);
+    const d = await getBroadcast(f.db, b.id);
+    assert.deepEqual(d!.recipients.map((r) => r.customer_id), [f.customerId]);
+    assert.equal(d!.list_name, '1 chosen customer');
+    assert.equal(sent.length, n + 1);
+    assert.equal((await listNews(f.db) as unknown[]).length, postsBefore);
+  });
+
   test('WhatsApp numbers get the Jamaican country code', () => {
     assert.equal(whatsappDigits('876-555-1234'), '18765551234');
     assert.equal(whatsappDigits('555-1234'), '18765551234');

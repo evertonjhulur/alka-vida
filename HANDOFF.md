@@ -10,7 +10,8 @@ and Justin's testing findings the same day (reminders, tablet layout, sign-up ad
 security), then the UX review build of 11 Oct 2026 (shorter pinned menu with tabs, Statement…
 dialog, tidy-ups, customer Details in four parts), then the New sale screen of 11 Oct 2026
 (one screen, product then size, payment at the end, credit used first) and the lists round (status
-drop-downs, sort by heading, batch actions). See the last entries at the end.
+drop-downs, sort by heading, batch actions), then messages to customers chosen by name and the customer page redesign with payment numbers
+(12 Oct 2026). See the last entries at the end.
 
 ---
 
@@ -51,7 +52,7 @@ Working and verified end to end, in the browser as well as in tests:
 | Addresses | Line 1, line 2, town, parish. Composed into `delivery_address`, which stays what the stop and the invoice PDF read (migration 014). |
 | Employees & labour cost | Who works here, paid by the hour or by the trip, and the hours/trips recorded against them. Payroll totals for any date range. **Add from logins** creates a record per existing login — title from the role (`admin`→Manager, `user`→Employee, `driver`→Driver), rate left blank — and is safe to press twice. **Deliberately not wired into costing** (migration 015). A person is managed on their own record at `/employees/:id` — details, rate, and their own work history. |
 
-**Tests: 534 passing** (11 Oct 2026) — 68 pure domain (`packages/shared`), 466 API
+**Tests: 546 passing** (12 Oct 2026) — 68 pure domain (`packages/shared`), 474 API, 4 web (`packages/web/test`)
 (`packages/api`, against real PostgreSQL via PGlite).
 
 ```bash
@@ -1395,3 +1396,97 @@ from the PDF so several go in one document: `drawQuote`, `drawPo`,
 (documents.ts). `unappliedPayments` returns `order_number`, `order_open`.
 
 Tests: 534 passing (68 shared + 466 API); new `test/batches.test.ts` (5).
+
+### Messages to customers chosen by name, 12 Oct 2026
+
+Everton: he could only message a saved list, so one customer meant making a
+list first. Now **Send to** on Messages & news › Send a message has
+"Customers I choose by name…" (saved lists sit under a "Saved lists" group).
+Type a name or phone number (the same `CustomerPicker` as New order), add as
+many as wanted, × takes one off. Walk-ins and closed accounts cannot be
+chosen, as on lists; opening the screen for one says so.
+
+- No portal post: the "Also show it under News & offers" tick is hidden and
+  never sent for chosen customers (a post is seen by everyone).
+- One customer: the button reads "Email <name>", the confirm names them.
+- Who it goes to shows a WhatsApp button per chosen customer with the subject
+  and message typed in, so someone without an email can still be reached.
+  Those are not logged under Sent (only emails are).
+- Customer page › More › **Send a message** opens `/messages?customer=<id>`
+  with them chosen (active customers only).
+- Server unchanged: `createBroadcast` already took `customerIds`; the preview
+  uses `resolveList({ zones: ['__none__'] }, picked)` so only the chosen come
+  back. Sent shows it as "1 chosen customer".
+
+Tests: 535 passing (68 shared + 467 API); new test in feedback.test.ts.
+
+### Customer page redesign and payment numbers, 12 Oct 2026
+
+Everton, comparing with QuickBooks' customer page; mockups on the Design
+canvas "Alka Vida customer page" (1, and 2A for weekly/monthly customers).
+His rulings: open balance AND overdue shown together; Statement…, New order
+and Take a payment grouped in one action; More keeps the rest; one list of
+invoices and money received in place of the invoices list + statement;
+running balance as an optional tick; payments get numbers ("helps to
+identify if errors are made"); weekly/monthly customers keep the box of
+deliveries waiting for their invoice above the list (2A, not rows in it);
+the Payments tab goes.
+
+Screen (`pages/CustomerRecord.tsx`, styles under "Customer page, 12 Oct
+2026" at the end of styles.css):
+- Header panel: name, chips (account, zone, price list, terms/cycle, days),
+  green **New transaction ▾** (New order, Take a payment, Statement…, New
+  quote, New credit note), **More ▾** (Send a message, Edit details, Merge).
+  Contact grid: email, phone + WhatsApp link, contact, Bill to (the billing
+  address, else the main one), Deliver to (+ other addresses), notes,
+  portal. Strip: next delivery, standing orders, 5-gallon bottles.
+- **Money summary** (right): Open balance (or In credit) with "N open
+  invoices ($x), less $y credit"; Overdue in red when anything is late;
+  "Paid, on account" and "Delivered, not invoiced yet (before GCT)" lines.
+  Clicking Open balance / Overdue filters the list to those invoices.
+- Tabs: Overview, **Transactions**, Orders, Standing orders, Bottles,
+  Details. `?tab=invoices` and `?tab=payments` (old links, `&pay=`) open
+  Transactions; links elsewhere now say `?tab=transactions`. The Overview's
+  "Delivery and contact" card is gone (it is in the header).
+- Transactions: the waiting-for-invoice box (cycle customers) on top; then
+  Batch actions, Type / Status / Date (this month, last month, chosen dates)
+  filters, Running balance tick, Export. Columns Date, Type, No.,
+  Description, Amount (+ invoice, - payment/credit note, + reversal), Still
+  open, [Balance], Status, actions (Receive payment / Receipt / Change /
+  View). Newest first; every heading sorts. Phone: cards.
+- `web/src/lib/transactions.ts` (pure, tested in `web/test`): builds the
+  list. Counts what the statement counts (not cancelled; credit notes once
+  approved; confirmed payments, reversals stored negated). A payment over
+  several invoices is several rows sharing one number: ONE line here.
+  Change… on such a payment asks which part (each row is changed on its own,
+  as before).
+- `/api/invoices` also returns `credit_status`, `notes`, `order_numbers`.
+
+Payment numbers (migration **024**, `services/payments.ts`):
+- `payments.receipt_number` is now the payment's number, given when it is
+  recorded (`RCT-001000` on, sequence `receipt_number_seq`), no longer
+  unique per row. `insertPayment` gives one number to every row recorded
+  for the same customer in the same transaction (remembered per
+  transaction in a WeakMap keyed by the transaction and now(); NOT read back
+  from the table, or a split-off part of an older payment recorded in the
+  same transaction would lend its number to new money). A part split off
+  onto an invoice (`putAgainstInvoice`) keeps its payment's number
+  (`receiptNumber` input). Reversals carry the reversed payment's number.
+- Migration: drops the unique constraint, renames RC- to RCT-, numbers old
+  rows one per (customer, created_at), oldest first, moves the sequence on,
+  gives reversals their payment's number. Re-runnable (the test runs it again).
+- Receipts are for whole payments: `drawReceipt` takes in every row with
+  the chosen rows' numbers; `printReceipts` prints one receipt per number.
+
+Bug fixed on the way: a reversed payment left on the account was still
+counted as money on account (`unappliedPayments`, the customer's "on
+account" figure, the driver's "already paid", the invoice page) and could be
+put against a new invoice (`moneyOnAccount`). All now skip a payment that
+has a reversal. Test in `paymentnumbers.test.ts`.
+
+Not done: the Payments screen's "Payments received" list is still one line
+per row (it shows the number now); the Statement PDF still references the
+invoice a payment went against rather than its number.
+
+Tests: 546 (68 shared + 474 API + 4 web). New: `api/test/paymentnumbers.test.ts`
+(7), `web/test/transactions.test.ts` (4); `web` has a `test` script now.
