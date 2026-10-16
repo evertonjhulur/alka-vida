@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { api, type Session } from '../lib/api';
-import { money, date, when } from '../lib/format';
+import { money, date, todayInJamaica, when } from '../lib/format';
+import { askText } from '../components/Dialog';
 
 /**
  * Needs a decision: everything waiting on an administrator, in one list.
@@ -37,11 +38,13 @@ type Filter = 'all' | 'money' | 'accounts';
 
 const TYPE_LABEL: Record<string, string> = {
   Discount: 'Discount', CreditNote: 'Credit note', StopCorrection: 'Stop correction',
-  SameDayOrder: 'Same-day order', PaymentChange: 'Payment change',
+  SameDayOrder: 'Same-day order', PaymentChange: 'Payment change', SpecialDayOrder: 'Delivery day request',
 };
 const TYPE_TONE: Record<string, string> = {
-  Discount: 'warn', CreditNote: 'info', StopCorrection: 'neutral', SameDayOrder: 'info', PaymentChange: 'warn',
+  Discount: 'warn', CreditNote: 'info', StopCorrection: 'neutral', SameDayOrder: 'info', PaymentChange: 'warn', SpecialDayOrder: 'info',
 };
+/** An order waiting for its day: decided by date, or cancelled (15 Oct 2026). */
+const isDayRequest = (t: string) => t === 'SameDayOrder' || t === 'SpecialDayOrder';
 const METHOD_OK = (v: unknown) => String(v);
 /** A payment change, in words: "amount 450.00, dated 2026-09-30, to another customer". */
 function describeChange(p: Record<string, unknown> | null): string {
@@ -105,6 +108,8 @@ export default function Decisions({ session }: { session: Session }) {
   const [terms, setTerms] = useState({ priceTierId: '', deliveryZone: '', paymentTerms: '' });
   const [declineFor, setDeclineFor] = useState<string | null>(null);
   const [declineWhy, setDeclineWhy] = useState('');
+  /** The order whose day is being changed, and to what. */
+  const [dayFor, setDayFor] = useState<{ id: string; date: string } | null>(null);
 
   async function load() {
     const [a, b] = await Promise.all([
@@ -124,6 +129,22 @@ export default function Decisions({ session }: { session: Session }) {
       setError(e instanceof Error ? e.message : fallback);
     } finally { setBusy(false); }
   }
+
+  const decideDay = (r: Approval, how: { deliveryDate?: string; cancel?: boolean }) => act(async () => {
+    let notes: string | undefined;
+    if (how.cancel) {
+      const why = await askText(`Cancel ${r.entityLabel ?? 'this order'}${r.customerName ? ` for ${r.customerName}` : ''}?\n\nThe customer is emailed that it is cancelled.`,
+        { label: 'Reason, for the customer (optional)', confirmLabel: 'Cancel the order' });
+      if (why === null) return '';
+      notes = why.trim() || undefined;
+    }
+    await api.post(`/api/approvals/${r.id}/review`, {
+      decision: 'Approved', deliveryDate: how.deliveryDate ?? null, cancel: how.cancel === true, notes,
+    });
+    setDayFor(null);
+    return how.cancel ? `${r.entityLabel} cancelled; the customer is told.`
+      : `${r.entityLabel} booked for ${when(how.deliveryDate ?? null)}; the customer is told.`;
+  }, 'Could not record the decision');
 
   const review = (r: Approval, decision: 'Approved' | 'Rejected') => act(async () => {
     await api.post(`/api/approvals/${r.id}/review`, { decision });
@@ -193,13 +214,31 @@ export default function Decisions({ session }: { session: Session }) {
           <div className="small">Change to: {describeChange(r.payload)}</div>
         )}
         {r.requestType === 'SameDayOrder' && (
-          <div className="small">Approve to put it on today's round. Reject and it goes on their next delivery day instead (it is not cancelled).</div>
+          <div className="small">Deliver today puts it on today's round; Next delivery day moves it there. Or choose another date, or cancel it.</div>
+        )}
+        {r.requestType === 'SpecialDayOrder' && (
+          <div className="small">
+            They asked for {when(String((r.payload as { requestedDeliveryDate?: string } | null)?.requestedDeliveryDate ?? ''))}, which is not one of their delivery days.
+            Approve that day, choose another date, or cancel the order.
+          </div>
+        )}
+        {dayFor?.id === r.id && (
+          <form className="row" style={{ gap: 8, marginTop: 8, alignItems: 'flex-end' }}
+                onSubmit={(e) => { e.preventDefault(); if (dayFor.date) void decideDay(r, { deliveryDate: dayFor.date }); }}>
+            <div className="field" style={{ margin: 0 }}>
+              <label htmlFor={`day-${r.id}`}>Deliver on</label>
+              <input id={`day-${r.id}`} type="date" required min={todayInJamaica()} value={dayFor.date}
+                     onChange={(e) => setDayFor({ id: r.id, date: e.target.value })} />
+            </div>
+            <button className="approve-soft" disabled={busy || !dayFor.date}>Book it for that day</button>
+            <button type="button" className="secondary" onClick={() => setDayFor(null)}>Close</button>
+          </form>
         )}
       </div>
       <div className="decision-amount">
         {r.requestType === 'StopCorrection' ? (
           <span className="muted small">figures on the stop</span>
-        ) : r.requestType === 'SameDayOrder' || r.requestType === 'PaymentChange' ? (
+        ) : isDayRequest(r.requestType) || r.requestType === 'PaymentChange' ? (
           <strong>{money(r.amountCents)}</strong>
         ) : (
           <>
@@ -209,14 +248,22 @@ export default function Decisions({ session }: { session: Session }) {
         )}
       </div>
       <div className="decision-actions">
-        {isAdmin ? (
+        {isAdmin && isDayRequest(r.requestType) ? (
           <>
             <button className="approve-soft" disabled={busy} onClick={() => review(r, 'Approved')}>
-              {r.requestType === 'SameDayOrder' ? 'Deliver today' : 'Approve'}
+              {r.requestType === 'SameDayOrder' ? 'Deliver today' : 'Approve that day'}
             </button>
-            <button className="danger-soft" disabled={busy} onClick={() => review(r, 'Rejected')}>
-              {r.requestType === 'SameDayOrder' ? 'Next delivery day' : 'Reject'}
-            </button>
+            {r.requestType === 'SameDayOrder' && (
+              <button className="secondary" disabled={busy} onClick={() => review(r, 'Rejected')}>Next delivery day</button>
+            )}
+            <button className="secondary" disabled={busy}
+                    onClick={() => setDayFor(dayFor?.id === r.id ? null : { id: r.id, date: '' })}>Change the date</button>
+            <button className="danger-soft" disabled={busy} onClick={() => decideDay(r, { cancel: true })}>Cancel order</button>
+          </>
+        ) : isAdmin ? (
+          <>
+            <button className="approve-soft" disabled={busy} onClick={() => review(r, 'Approved')}>Approve</button>
+            <button className="danger-soft" disabled={busy} onClick={() => review(r, 'Rejected')}>Reject</button>
           </>
         ) : <span className="muted small">an administrator decides</span>}
       </div>

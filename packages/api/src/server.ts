@@ -52,6 +52,8 @@ import * as messaging from './services/messaging.ts';
 import * as paperwork from './services/paperwork.ts';
 import * as portal from './services/portal.ts';
 import * as auditlog from './services/auditlog.ts';
+import * as push from './services/push.ts';
+import { kickAlerts, startAlerts } from './services/alerts.ts';
 
 declare module 'fastify' {
   interface FastifyRequest {
@@ -84,6 +86,14 @@ export async function buildServer(db: Db) {
   // Quiet by default: the console window is user-facing, so only problems
   // should appear there. Set LOG_LEVEL=info to see every request.
   const app = Fastify({ logger: { level: process.env.LOG_LEVEL ?? 'warn' } });
+  // An order or a request just made: look for things to announce now.
+  app.addHook('onResponse', async (req, reply) => {
+    if (req.method === 'POST' && reply.statusCode < 300
+      && /^\/api\/(orders|counter-sale|approvals|credit-notes|invoices|payments|stops|registration|register|portal)/.test(req.url)) {
+      kickAlerts();
+    }
+  });
+
   // The app and its API are served from one address, so no other site needs
   // to call it. CORS_ORIGIN can still name one (a separate dev frontend).
   await app.register(cors, { origin: process.env.CORS_ORIGIN ?? false });
@@ -496,9 +506,13 @@ export async function buildServer(db: Db) {
       // Quotes a customer has said yes to, waiting to be turned into orders.
       const quotes = await db.one<{ n: string }>(
         `SELECT COUNT(*)::text AS n FROM quotations WHERE status = 'Accepted'`);
+      // Online orders nobody in the office has seen yet (15 Oct 2026).
+      const fresh = await db.one<{ n: string }>(
+        `SELECT COUNT(*)::text AS n FROM customer_orders
+         WHERE source = 'Portal' AND seen_at IS NULL AND status <> 'Cancelled'`);
       return {
         applications: Number(apps.n), approvals: Number(approvals.n),
-        acceptedQuotes: Number(quotes.n),
+        acceptedQuotes: Number(quotes.n), newOrders: Number(fresh.n),
       };
     });
 
@@ -952,6 +966,18 @@ export async function buildServer(db: Db) {
     return order;
   });
 
+  // Ready by hand, or not (15 Oct 2026).
+  app.post('/api/orders/:id/ready', { preHandler: allow('admin', 'user') },
+    async (req) => {
+      await orders.setOrderReady(db, actorOf(req), (req.params as { id: string }).id,
+        (req.body as { ready?: boolean })?.ready !== false);
+      return { ok: true };
+    });
+
+  // New online orders shown on the Orders screen stop counting as new.
+  app.post('/api/orders/seen', { preHandler: allow('admin', 'user') },
+    async (req) => orders.markOrdersSeen(db, actorOf(req), ((req.body ?? {}) as { ids?: string[] }).ids ?? []));
+
   // A pickup order being collected: billed now, from what is handed over.
   app.post('/api/orders/:id/collect', { preHandler: allow('admin', 'user') },
     async (req) => collectOrder(db, actorOf(req), {
@@ -1258,9 +1284,18 @@ export async function buildServer(db: Db) {
 
   app.post('/api/approvals/:id/review', { preHandler: allow('admin') },
     async (req) => {
-      const body = req.body as { decision: 'Approved' | 'Rejected'; notes?: string };
-      return approvals.reviewApproval(db, actorOf(req),
-        (req.params as { id: string }).id, body.decision, body.notes);
+      const body = req.body as { decision: 'Approved' | 'Rejected'; notes?: string; deliveryDate?: string | null; cancel?: boolean };
+      const r = await approvals.reviewApproval(db, actorOf(req),
+        (req.params as { id: string }).id, body.decision, body.notes,
+        { deliveryDate: body.deliveryDate ?? null, cancel: body.cancel === true });
+      // The customer hears the outcome of a waiting order (15 Oct 2026).
+      if (r.orderId && r.orderCancelled) {
+        void messaging.sendOrderCancelledEmail(db, r.orderId, body.notes ?? null).catch(() => {});
+      } else if (r.orderId) {
+        const o = await db.maybeOne<{ source: string }>(`SELECT source FROM customer_orders WHERE id = $1 AND review_reason IS NOT NULL`, [r.orderId]);
+        if (o) void messaging.sendDeliveryDayEmail(db, r.orderId).catch(() => {});
+      }
+      return r;
     });
 
   /* ---------------- suppliers ---------------- */
@@ -1516,6 +1551,34 @@ export async function buildServer(db: Db) {
         body.notes, { evenThoughStockMoved: body.evenThoughStockMoved === true });
     });
 
+  /* ---------------- push notifications (15 Oct 2026) ---------------- */
+
+  // The public half of this install's key, for the browser to subscribe with.
+  app.get('/api/push/key', { preHandler: allow('admin', 'user', 'driver') },
+    async () => ({ publicKey: (await push.vapidKeys(db)).publicKey }));
+  app.post('/api/push/subscribe', { preHandler: allow('admin', 'user', 'driver') },
+    async (req) => push.subscribe(db, actorOf(req), (req.body ?? {}) as never));
+  app.post('/api/push/unsubscribe', { preHandler: allow('admin', 'user', 'driver') },
+    async (req) => push.unsubscribe(db, actorOf(req), String(((req.body ?? {}) as { endpoint?: string }).endpoint ?? '')));
+  app.get('/api/push/devices', { preHandler: allow('admin', 'user', 'driver') },
+    async (req) => push.myDevices(db, actorOf(req)));
+  // The service worker asks for the notes to show (a push itself carries none).
+  app.get('/api/push/inbox', { preHandler: allow('admin', 'user', 'driver') },
+    async (req) => push.takeInbox(db, actorOf(req)));
+  app.post('/api/push/test', { preHandler: allow('admin', 'user', 'driver') },
+    async (req) => push.notifyUsers(db, [actorOf(req).id], {
+      title: 'Alka Vida notifications are on', body: 'This is how new orders and decisions will reach you.', url: '/#/', tag: 'test',
+    }));
+  // Admins: email me about Needs a decision, or not.
+  app.get('/api/me/alerts', { preHandler: allow('admin', 'user', 'driver') },
+    async (req) => db.one(`SELECT decision_emails, email FROM users WHERE id = $1`, [actorOf(req).id]));
+  app.patch('/api/me/alerts', { preHandler: allow('admin', 'user', 'driver') },
+    async (req) => {
+      const b = (req.body ?? {}) as { decisionEmails?: boolean };
+      await db.query(`UPDATE users SET decision_emails = $2 WHERE id = $1`, [actorOf(req).id, b.decisionEmails !== false]);
+      return { ok: true };
+    });
+
   /* ---------------- the audit log (15 Oct 2026) ---------------- */
 
   app.get('/api/audit-log', { preHandler: allow('admin') }, async (req) => {
@@ -1681,6 +1744,8 @@ if (import.meta.filename === process.argv[1]) {
   };
 
   await runStandingOrders('on startup');
+  // Push notifications and decision emails to staff (15 Oct 2026).
+  startAlerts(db);
   await runAutomatic('on startup');
   const timer = setInterval(() => {
     void runStandingOrders('hourly check').then(() => runAutomatic('hourly check'));

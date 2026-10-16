@@ -20,6 +20,7 @@ import DriverRoute from './pages/DriverRoute';
 import DriverStop from './pages/DriverStop';
 import Portal, { PortalInvoice } from './pages/Portal';
 import { PortalOrderDetail, PortalStandingDetail } from './pages/PortalOrders';
+import { ensureWorker } from './lib/push';
 import RawMaterials from './pages/RawMaterials';
 import Suppliers from './pages/Suppliers';
 import Pricing from './pages/Pricing';
@@ -80,7 +81,7 @@ const RULE = '—';
 /** The pages the Settings hub leads to; Settings stays lit on all of them. */
 const SETTINGS_PAGES = ['/settings/', '/pricing', '/products/', '/zones', '/auto-emails', '/employees', '/users'];
 
-interface PendingCounts { applications: number; approvals: number; acceptedQuotes?: number }
+interface PendingCounts { applications: number; approvals: number; acceptedQuotes?: number; newOrders?: number }
 
 /**
  * Navigation mirrors the Section 10 permission table exactly.
@@ -132,7 +133,7 @@ const NAV: NavItem[] = [
   { to: '/portal/profile', label: 'My profile', roles: ['customer'] },
 
   // Everybody's own password; with Sign out, not in any section.
-  { to: '/my-account', label: 'My password', roles: ['admin', 'user', 'driver'], placement: 'account' },
+  { to: '/my-account', label: 'My account & notifications', roles: ['admin', 'user', 'driver'], placement: 'account' },
 ];
 
 /** Tabs on the pages that bring several screens under one menu item. */
@@ -178,9 +179,16 @@ function Shell({ session }: { session: Session }) {
   const [menuOpen, setMenuOpen] = useState(false);
   useEffect(() => { setMenuOpen(false); }, [pathname]);
 
+  // The push worker, so a device that turned notifications on keeps getting them.
+  useEffect(() => { if (session.role !== 'customer') void ensureWorker(); }, [session.role]);
+
   useEffect(() => {
     if (!office) return;
-    api.get<PendingCounts>('/api/pending-counts').then(setPending).catch(() => {});
+    const read = () => api.get<PendingCounts>('/api/pending-counts').then(setPending).catch(() => {});
+    void read();
+    // Every minute too, so a new online order shows without moving screen (15 Oct 2026).
+    const t = setInterval(() => { if (document.visibilityState === 'visible') void read(); }, 60_000);
+    return () => clearInterval(t);
   }, [office, pathname]);
 
   const signOut = () => { api.logout().finally(() => { navigate('/login'); location.reload(); }); };
@@ -191,6 +199,11 @@ function Shell({ session }: { session: Session }) {
   const badgeFor = (n: NavItem) => {
     if (n.badge === 'decisions' && waiting > 0) {
       return <span className="nav-badge" title={`${waiting} waiting for you`}>{waiting}</span>;
+    }
+    // New online orders nobody has looked at (15 Oct 2026), before accepted quotes.
+    const fresh = pending.newOrders ?? 0;
+    if (n.badge === 'quotes' && fresh > 0) {
+      return <span className="nav-badge" title={`${fresh} new online order${fresh === 1 ? '' : 's'}`}>{fresh}</span>;
     }
     const q = pending.acceptedQuotes ?? 0;
     if (n.badge === 'quotes' && q > 0) {

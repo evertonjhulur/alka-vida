@@ -25,6 +25,7 @@ interface MyOrder {
   customer_po?: string | null; lines_summary?: string | null;
   is_recurring?: boolean; parent_recurring_id?: string | null;
   remaining_summary?: string | null;
+  ready_at?: string | null; load_logged_at?: string | null; review_reason?: string | null;
 }
 
 interface Schedule {
@@ -46,6 +47,7 @@ interface OrderDetail {
   grand_total_cents: number; gct_exempt: boolean; is_recurring: boolean; parent_recurring_id: string | null;
   recurrence_pattern: string | null; empties_expected: number | null; fulfilled_on: string | null;
   sheet_started: boolean;
+  ready_at?: string | null; load_logged_at?: string | null; review_reason?: string | null;
   lines: Line[];
   invoices: Array<{ invoice_id: string; invoice_number: string; invoice_date: string;
     grand_total_cents: number; balance_cents: number; status: string }>;
@@ -86,14 +88,17 @@ function longDate(iso: string | null | undefined): string {
 
 /** Where an order stands, in the customer's words. */
 export function customerStatus(o: { status: string; delivery_mode: string; needs_review?: boolean | null;
-  sheet_started?: boolean | null; sheet_status?: string | null; requested_delivery_date?: string | null }): string {
+  sheet_started?: boolean | null; sheet_status?: string | null; requested_delivery_date?: string | null;
+  ready_at?: string | null; load_logged_at?: string | null; review_reason?: string | null }): string {
   if (o.status === 'Cancelled') return 'Cancelled';
   if (o.status === 'Delivered') return o.delivery_mode === 'Pickup' ? 'Collected' : 'Delivered';
   if (o.status === 'Partially Delivered') return 'Partially delivered';
-  if (o.needs_review) return 'Being confirmed';
+  if (o.needs_review) return o.review_reason === 'SpecialDay' ? 'Waiting for us to confirm the day' : 'Being confirmed';
   if (o.sheet_started && (o.sheet_status == null || o.sheet_status === 'Open')) return 'Out for delivery';
-  if (o.delivery_mode === 'Pickup') return o.requested_delivery_date ? `To collect ${when(o.requested_delivery_date)}` : 'To collect';
-  return o.requested_delivery_date ? `Booked for ${when(o.requested_delivery_date)}` : 'Order received';
+  const ready = !!o.ready_at || (!!o.load_logged_at && (o.sheet_status == null || o.sheet_status === 'Open'));
+  const d = o.requested_delivery_date ? ` ${when(o.requested_delivery_date)}` : '';
+  if (o.delivery_mode === 'Pickup') return ready ? 'Ready to collect' : `Order received · to collect${d}`;
+  return ready ? `Ready · for delivery${d}` : `Order received · for${d || ' your next delivery day'}`;
 }
 const isPending = (o: { status: string }) => o.status === 'Pending' || o.status === 'Partially Delivered';
 const canChange = (o: { status: string; sheet_started?: boolean | null; sheet_status?: string | null }) =>

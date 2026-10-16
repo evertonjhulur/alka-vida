@@ -11,7 +11,7 @@ import { audit, businessTimeNow, businessToday, getSetting, nextNumber, num, req
 import type { Cents, DeliveryMode, PaymentMethod, RecurrencePattern } from '@alka/shared';
 import {
   computeTotals, computeLineTotal, totalBottles, RuleViolation, composeAddress,
-  addDays, nextRunDate,
+  addDays, nextRunDate, weekdayOf,
 } from '@alka/shared';
 
 export interface OrderLineInput {
@@ -47,6 +47,11 @@ export interface CreateOrderInput {
    * instead of going straight onto today's round. Set by sameDayCheck.
    */
   needsReview?: boolean;
+  /**
+   * Why it waits (15 Oct 2026): SameDay (after the cut-off) or SpecialDay
+   * (a portal customer asked for a day that is not one of theirs).
+   */
+  reviewReason?: 'SameDay' | 'SpecialDay' | null;
   isRecurring?: boolean;
   recurrencePattern?: RecurrencePattern | null;
   parentRecurringId?: string | null;
@@ -180,6 +185,14 @@ export async function resolveLines(
   return resolved;
 }
 
+/** "Sat 17 Oct" for a yyyy-mm-dd. */
+function readableDay(iso: string | null | undefined): string {
+  if (!iso) return 'no date';
+  const d = new Date(`${String(iso).slice(0, 10)}T12:00:00Z`);
+  return Number.isNaN(d.getTime()) ? String(iso)
+    : d.toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short', timeZone: 'UTC' });
+}
+
 export async function createOrder(
   db: Db,
   actor: Actor,
@@ -223,9 +236,11 @@ export async function createOrder(
           source, delivery_mode, discount_percent,
           subtotal_cents, discount_amount_cents, gct_cents, grand_total_cents,
           discount_fixed_cents, gct_exempt, address_id, quotation_id,
-          customer_po, needs_review, empties_expected, pay_when)
+          customer_po, needs_review, empties_expected, pay_when, review_reason, seen_at)
        VALUES ($1,$2,COALESCE($3::date, business_today()),$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,
-               $17,$18,$19,$20,$21,$22,$23,$24)
+               $17,$18,$19,$20,$21,$22,$23,$24,$25,
+               -- An online order is new to the office until someone sees it.
+               CASE WHEN $10 = 'Portal' THEN NULL ELSE now() END)
        RETURNING id`,
       [
         orderNumber, input.customerId, input.orderDate ?? null,
@@ -238,6 +253,7 @@ export async function createOrder(
         input.customerPo?.trim() || null, input.needsReview === true, empties,
         input.payWhen === 'Now' || input.payWhen === 'On delivery' || input.payWhen === 'On account'
           ? input.payWhen : null,
+        input.needsReview ? (input.reviewReason === 'SpecialDay' ? 'SpecialDay' : 'SameDay') : null,
       ],
     );
 
@@ -259,21 +275,25 @@ export async function createOrder(
     // recurring orders. Pickup orders never touch a delivery sheet at all,
     // and nor does a late same-day order until the office approves it.
     if (input.needsReview) {
+      const special = input.reviewReason === 'SpecialDay';
       const req = await t.one<{ id: string }>(
         `INSERT INTO approval_requests
            (request_type, entity_type, entity_id, entity_label, customer_id,
             amount_cents, reason, requested_by_id, payload)
-         VALUES ('SameDayOrder','CustomerOrder',$1,$2,$3,$4,$5,$6,$7::jsonb)
+         VALUES ($8,'CustomerOrder',$1,$2,$3,$4,$5,$6,$7::jsonb)
          RETURNING id`,
         [order.id, orderNumber, input.customerId, totals.grandTotal,
-         `Wanted today (${input.requestedDeliveryDate}), placed after the same-day cut-off`,
+         special
+           ? `Asked for ${readableDay(input.requestedDeliveryDate)}, which is not one of their delivery days`
+           : `Wanted today (${input.requestedDeliveryDate}), placed after the same-day cut-off`,
          actor.id,
-         JSON.stringify({ requestedDeliveryDate: input.requestedDeliveryDate, source: input.source ?? 'Admin' })],
+         JSON.stringify({ requestedDeliveryDate: input.requestedDeliveryDate, source: input.source ?? 'Admin' }),
+         special ? 'SpecialDayOrder' : 'SameDayOrder'],
       );
-      warnings.push(
-        `${orderNumber} is for today but came in after the same-day cut-off, so it is waiting `
-        + 'under Needs a decision. Approve it there to put it on today\'s round.',
-      );
+      warnings.push(special
+        ? `${orderNumber} is for ${readableDay(input.requestedDeliveryDate)}, not one of their delivery days, so it is waiting under Needs a decision.`
+        : `${orderNumber} is for today but came in after the same-day cut-off, so it is waiting `
+          + 'under Needs a decision. Approve it there to put it on today\'s round.');
       void req;
     } else if (input.deliveryMode === 'Delivery') {
       const placement = await placeOnDeliverySheet(t, order.id, input.customerId,
@@ -329,6 +349,34 @@ export interface PortalOrderInput {
  * (their own days, else their zone's run days, else any day), counting from
  * tomorrow once the cut-off has passed. That needs no approval at all.
  */
+/**
+ * The weekdays an order to this customer, at this address, normally goes out
+ * (15 Oct 2026): another of their addresses in another zone follows that
+ * zone's run days; otherwise the customer's own delivery days, else their
+ * zone's run days. Empty means any day.
+ */
+export async function deliveryDaysFor(
+  t: Queryable, customerId: string, addressId: string | null,
+): Promise<string[]> {
+  const c = await t.one<{ delivery_days: string[] | null; delivery_zone: string | null }>(
+    `SELECT delivery_days, delivery_zone FROM customers WHERE id = $1`, [customerId],
+  );
+  const zoneDays = async (zone: string | null) => (zone
+    ? ((await t.maybeOne<{ run_days: string[] | null }>(
+      `SELECT run_days FROM delivery_zones WHERE name = $1`, [zone]))?.run_days ?? []).filter(Boolean)
+    : []);
+  const own = (c.delivery_days ?? []).filter(Boolean);
+  if (addressId) {
+    const target = await deliveryTarget(t, customerId, addressId);
+    if (target.delivery_zone && target.delivery_zone !== c.delivery_zone) {
+      const z = await zoneDays(target.delivery_zone);
+      if (z.length) return z;
+    }
+  }
+  if (own.length) return own;
+  return zoneDays(c.delivery_zone);
+}
+
 export async function sameDayCheck(
   t: Queryable, actor: Actor, customerId: string, mode: DeliveryMode,
   requested: string | null, addressId: string | null = null,
@@ -343,17 +391,7 @@ export async function sameDayCheck(
     const needsReview = requested === today && afterCutoff && actor.role !== 'admin';
     return { date: requested, needsReview, afterCutoff, cutoff };
   }
-  const target = await deliveryTarget(t, customerId, addressId);
-  const c = await t.one<{ delivery_days: string[] | null }>(
-    `SELECT delivery_days FROM customers WHERE id = $1`, [customerId],
-  );
-  let days: string[] = (c.delivery_days ?? []).filter(Boolean);
-  if (days.length === 0 && target.delivery_zone) {
-    const z = await t.maybeOne<{ run_days: string[] | null }>(
-      `SELECT run_days FROM delivery_zones WHERE name = $1`, [target.delivery_zone],
-    );
-    days = (z?.run_days ?? []).filter(Boolean);
-  }
+  const days = await deliveryDaysFor(t, customerId, addressId);
   const from = afterCutoff ? addDays(today, 1) : today;
   return { date: nextRunDate(from, days), needsReview: false, afterCutoff, cutoff };
 }
@@ -388,6 +426,13 @@ export async function createPortalOrder(
   }
   const addressId = deliveryMode === 'Delivery' ? (input.addressId || null) : null;
   const when = await sameDayCheck(db, actor, customerId, deliveryMode, requested, addressId);
+  // A delivery asked for on a day that is not one of theirs is a request,
+  // decided under Needs a decision (Everton, 15 Oct 2026).
+  let reviewReason: 'SameDay' | 'SpecialDay' | null = when.needsReview ? 'SameDay' : null;
+  if (deliveryMode === 'Delivery' && requested) {
+    const days = await deliveryDaysFor(db, customerId, addressId);
+    if (days.length && !days.includes(weekdayOf(requested))) reviewReason = 'SpecialDay';
+  }
 
   return createOrder(db, actor, {
     customerId,
@@ -400,7 +445,8 @@ export async function createPortalOrder(
     })),
     deliveryMode,
     requestedDeliveryDate: when.date,
-    needsReview: when.needsReview,
+    needsReview: reviewReason !== null,
+    reviewReason,
     notes: input.notes?.trim() || null,
     customerPo: input.customerPo?.trim() || null,
     addressId,
@@ -471,7 +517,7 @@ export async function cancelOwnOrder(
     await t.query(
       `UPDATE approval_requests SET status = 'Rejected', review_notes = 'Cancelled by the customer',
               reviewed_date = now()
-       WHERE entity_id = $1 AND request_type = 'SameDayOrder' AND status = 'Pending'`,
+       WHERE entity_id = $1 AND request_type IN ('SameDayOrder','SpecialDayOrder') AND status = 'Pending'`,
       [orderId],
     );
     await audit(t, actor, 'update', 'CustomerOrder', orderId, order.order_number, {
@@ -819,6 +865,34 @@ export const ORDER_EVENTS = `(
              AND ((s9.stop_outcome = 'Rescheduled' AND s9.rescheduled_to IS NOT NULL)
                   OR (s9.stop_outcome = 'Delivered' AND s9.remainder_to IS NOT NULL))) ev)`;
 
+/**
+ * Mark an order ready by hand, or take that back (15 Oct 2026). A delivery is
+ * also Ready once its round's load is logged; this is for a collection, or a
+ * delivery the office has prepared before the load is entered.
+ */
+export async function setOrderReady(db: Db, actor: Actor, orderId: string, ready: boolean): Promise<void> {
+  requireRole(actor, 'admin', 'user');
+  await db.tx(async (t) => {
+    const o = await t.one<{ status: string; order_number: string }>(
+      `SELECT status, order_number FROM customer_orders WHERE id = $1 FOR UPDATE`, [orderId]);
+    if (o.status !== 'Pending' && ready) throw new RuleViolation(`${o.order_number} is ${o.status.toLowerCase()}`);
+    await t.query(
+      `UPDATE customer_orders SET ready_at = CASE WHEN $2 THEN now() END, ready_by_name = CASE WHEN $2 THEN $3 END,
+              seen_at = COALESCE(seen_at, now())
+       WHERE id = $1`, [orderId, ready, actor.name]);
+    await audit(t, actor, 'update', 'CustomerOrder', orderId, o.order_number, { markedReady: ready });
+  });
+}
+
+/** Online orders the office has now seen on the Orders screen: they stop counting as new. */
+export async function markOrdersSeen(db: Db, actor: Actor, ids: readonly string[]): Promise<{ marked: number }> {
+  requireRole(actor, 'admin', 'user');
+  if (!ids.length) return { marked: 0 };
+  const r = await db.query<{ id: string }>(
+    `UPDATE customer_orders SET seen_at = now() WHERE id = ANY($1::uuid[]) AND seen_at IS NULL RETURNING id`, [[...ids]]);
+  return { marked: r.length };
+}
+
 /** Orders for the office list, newest first. */
 export async function listOrders(
   db: Db,
@@ -849,6 +923,8 @@ export async function listOrders(
             st.id AS stop_id, st.stop_outcome, ds.id AS sheet_id, ds.zone AS sheet_zone,
             ds.delivery_date AS sheet_date, ds.status AS sheet_status,
             (ds.started_at IS NOT NULL) AS sheet_started,
+            -- The office logged the truck load for its round: Ready (15 Oct 2026).
+            (SELECT rl.loaded_at FROM round_loads rl WHERE rl.delivery_sheet_id = ds.id) AS load_logged_at,
             ${ORDER_EVENTS} AS events,
             CASE WHEN o.status = 'Partially Delivered' THEN (
               SELECT string_agg(

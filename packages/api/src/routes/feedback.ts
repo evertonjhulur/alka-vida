@@ -9,9 +9,10 @@
 import type { FastifyInstance } from 'fastify';
 import type { Db } from '../db/index.ts';
 import type { Actor } from '../services/core.ts';
-import { getSetting, requireRole } from '../services/core.ts';
+import { businessTimeNow, businessToday, getSetting, requireRole } from '../services/core.ts';
+import * as orders from '../services/orders.ts';
 import type { Session } from '../lib/auth.ts';
-import { ForbiddenError, RuleViolation } from '@alka/shared';
+import { ForbiddenError, RuleViolation, addDays, weekdayOf } from '@alka/shared';
 import * as portal from '../services/portal.ts';
 import * as messaging from '../services/messaging.ts';
 import * as payments from '../services/payments.ts';
@@ -75,6 +76,21 @@ export function registerFeedbackRoutes(
   });
 
   app.get('/api/portal/profile', customerOnly, async (req) => portal.getMyProfile(db, me(req as Req)));
+
+  // The customer's delivery days for an address, and the next few dates on
+  // them (15 Oct 2026): the portal offers only these; another day is a request.
+  app.get('/api/portal/delivery-days', customerOnly, async (req) => {
+    const q = req.query as { addressId?: string };
+    const days = await orders.deliveryDaysFor(db, me(req as Req), q.addressId || null);
+    const cutoff = (await getSetting(db, 'same_day_cutoff', '10:00')).trim() || '10:00';
+    const today = businessToday();
+    const from = businessTimeNow() >= cutoff.padStart(5, '0') ? addDays(today, 1) : today;
+    const next: string[] = [];
+    for (let d = from, i = 0; next.length < 6 && i < 60; d = addDays(d, 1), i++) {
+      if (days.length === 0 || days.includes(weekdayOf(d))) next.push(d);
+    }
+    return { days, next, cutoff };
+  });
 
   app.patch('/api/portal/profile', customerOnly, async (req) => {
     await portal.updateMyProfile(db, actorOf(req as Req), me(req as Req), req.body as never);

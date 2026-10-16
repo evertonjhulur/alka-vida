@@ -193,7 +193,11 @@ export async function myOrderDetail(db: Db, customerId: string, orderId: string)
             o.fulfilled_on::text AS fulfilled_on, ${ORDER_EVENTS} AS events,
             EXISTS (SELECT 1 FROM delivery_stops s JOIN delivery_sheets d ON d.id = s.delivery_sheet_id
                      WHERE s.order_id = o.id AND d.status = 'Open' AND d.started_at IS NOT NULL
-                       AND s.stop_outcome = 'Pending') AS sheet_started
+                       AND s.stop_outcome = 'Pending') AS sheet_started,
+            o.ready_at, o.review_reason,
+            (SELECT max(rl.loaded_at) FROM delivery_stops s JOIN round_loads rl ON rl.delivery_sheet_id = s.delivery_sheet_id
+               JOIN delivery_sheets d ON d.id = s.delivery_sheet_id
+              WHERE s.order_id = o.id AND d.status = 'Open' AND s.stop_outcome = 'Pending') AS load_logged_at
      FROM customer_orders o WHERE o.id = $1`, [orderId],
   );
   if (!o || o.customer_id !== customerId) throw new RuleViolation('that order could not be found on your account');

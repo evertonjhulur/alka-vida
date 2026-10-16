@@ -54,7 +54,7 @@ Working and verified end to end, in the browser as well as in tests:
 | Addresses | Line 1, line 2, town, parish. Composed into `delivery_address`, which stays what the stop and the invoice PDF read (migration 014). |
 | Employees & labour cost | Who works here, paid by the hour or by the trip, and the hours/trips recorded against them. Payroll totals for any date range. **Add from logins** creates a record per existing login — title from the role (`admin`→Manager, `user`→Employee, `driver`→Driver), rate left blank — and is safe to press twice. **Deliberately not wired into costing** (migration 015). A person is managed on their own record at `/employees/:id` — details, rate, and their own work history. |
 
-**Tests: 558 passing** (15 Oct 2026) — 68 pure domain (`packages/shared`), 474 API, 4 web (`packages/web/test`)
+**Tests: 564 passing** (15 Oct 2026, evening) — 68 pure domain (`packages/shared`), 474 API, 4 web (`packages/web/test`)
 (`packages/api`, against real PostgreSQL via PGlite).
 
 ```bash
@@ -105,6 +105,7 @@ decision behind them:
 | 022 | 10 Oct follow-up: last-minute additions to a confirmed load, reconfirmed by the driver (`round_load_additions`, `round_load_lines.added_bottles`) |
 | 021 | 10 Oct follow-up: the driver confirms the load the office logged (`round_loads.driver_confirmed_*`) |
 | 020 | Everton's round of 10 Oct: payment after delivery (`after_stop_id`), truck loading and returns (`round_loads`, `round_load_lines`), collection stops (`round_collections`), stock-ledger types TruckLoad / TruckReturn / CustomerReturn, settings `document_footer` and `take_card_payments` |
+| 025 | 15 Oct follow-up: `customer_orders.ready_at/ready_by_name/seen_at/review_reason`, request type SpecialDayOrder, `push_subscriptions`, `staff_notifications`, `staff_alerts_sent`, `users.decision_emails`, setting `alerts_since` |
 | 018 | Everton's round of 7 Oct: email ticks + unsubscribe token, walk-in flag, news pictures, "Payment Only" stops and partial deliveries, empties expected, the 5-gallon bottle product flag and bottles sold, PO "Partially Received - Closed" |
 
 ---
@@ -1590,3 +1591,65 @@ Tests: 558 (68 shared + 486 API + 4 web). New `api/test/oct15.test.ts` (12);
 Not done / to watch: the settlement review's oldest-first preview and the
 real settlement agree because both read the ledger, but a payment taken in
 the office between review and settlement changes where the money goes.
+
+### How staff hear about orders, 15 Oct 2026 (evening)
+
+His question: "how is the staff alerted when an order is placed by a customer?"
+Answer was: they weren't. His rulings: every order (office or portal) comes in
+**Pending**; it is **Ready** once the office logs the truck load for its round
+(or someone marks it ready, e.g. a collection); push and email to admins for
+everything in Needs a decision; a declined delivery-day request is either
+moved to a date the admin picks or cancelled.
+
+**Order stages** (`web/src/lib/orderStatus.ts`): Pending, Ready, Out for
+Delivery, Partially Delivered, Delivered, Cancelled. Ready = `ready_at` set
+(⋯ › Mark ready / Mark ready to collect; "Not ready yet" undoes it) OR the
+order's open round has a `round_loads` row (`load_logged_at` in listOrders,
+customer history and the portal detail). The Status column shows the stage
+chip with the old words ("On a round", "Needs approval"…) underneath.
+
+**Orders overview tiles** above the list: New orders (Pending; "N new
+online"), Ready, Out for Delivery, Delivered (today). A click filters to it.
+**Menu count** on Orders: online orders with `seen_at IS NULL`
+(`/api/pending-counts` → `newOrders`, shown before accepted quotes; refreshed
+every minute too). The Orders screen marks what it shows as seen
+(`POST /api/orders/seen`) and puts a yellow "New" chip on them for that visit.
+Office-entered orders are seen on creation.
+
+**Portal delivery days.** `orders.deliveryDaysFor(customer, address)`:
+another address in another zone → that zone's run days; else the customer's
+own days; else their zone's run days; none = any day. Place an order shows
+"Next delivery day" + the next dates on their days, and "Another day… needs
+our OK" (`GET /api/portal/delivery-days`). `createPortalOrder` marks a
+delivery on any other weekday `needsReview` with `reviewReason: 'SpecialDay'`
+→ approval request **SpecialDayOrder**, not put on a round. Collections are
+any day. Needs a decision shows Approve that day / Change the date / Cancel
+order (same-day orders also get Change the date and Cancel):
+`reviewApproval(..., { deliveryDate, cancel })`. The customer is emailed
+`sendDeliveryDayEmail` (booked for <day>) or the cancellation email.
+
+**Push notifications** (`services/push.ts`, `services/alerts.ts`,
+`web/public/sw.js`, `web/src/lib/push.ts`, `components/NotificationsCard.tsx`):
+- No library. VAPID key pair made on first use and kept in system_settings
+  (`vapid_public_key`, `vapid_private_pem`) — nothing to set on Railway.
+- The push is an EMPTY knock (no payload, so no encryption); the service
+  worker fetches `GET /api/push/inbox` with the person's cookie and shows
+  their unread notes; with none unread it re-shows the latest (same tag) so
+  a phone always has something to show. 404/410 forgets the device.
+- Turn on: My account & notifications › Notifications (and a "Turn on
+  notifications" nudge on Today until on or dismissed). Admins also have
+  "Email me about Needs a decision" (`users.decision_emails`).
+- `runAlerts` every 15 s (and kicked after POSTs): new portal orders → push
+  to admins + office; pending approval_requests and customer_applications →
+  push + email to admins; load additions → push to the round's driver.
+  `staff_alerts_sent` makes each once; only events after `alerts_since`.
+  An order waiting for a decision is announced once, as the decision.
+- Needs https or localhost; iPhone needs iOS 16.4+ and Add to Home Screen
+  (`manifest.webmanifest`). Not testable in the sandbox's headless browser
+  (permission always denied there): the server side is tested, including
+  verifying the VAPID signature; try it for real on the Railway site.
+
+Also fixed: the Today screen's Needs a decision card called every non-discount
+request a "Credit note".
+
+Tests: 564 (68 + 492 + 4). New `api/test/alerts.test.ts` (6).

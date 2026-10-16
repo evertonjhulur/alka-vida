@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api, type Session } from '../lib/api';
 import { money, date, todayInJamaica, BUSINESS_TIMEZONE, when } from '../lib/format';
+import { NotifyPrompt } from '../components/NotificationsCard';
 
 interface Aging {
   currentCents: number; d30Cents: number; d60Cents: number;
@@ -67,6 +68,12 @@ const applicantName = (a: Application) => (a.account_type === 'Corporate'
  * that is LATE rather than merely large, rounds still running rather than
  * rounds that exist, and the things genuinely blocked on a decision.
  */
+/** Each kind of request, in words (15 Oct 2026: delivery-day requests showed as "Credit note"). */
+const DECISION_WORDS: Record<string, string> = {
+  StopCorrection: 'Stop correction', SameDayOrder: 'Same-day order', PaymentChange: 'Payment change',
+  SpecialDayOrder: 'Delivery day request',
+};
+
 export default function Dashboard({ session }: { session: Session }) {
   const [d, setD] = useState<DashboardData | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -158,6 +165,7 @@ export default function Dashboard({ session }: { session: Session }) {
   return (
     <div className="dash">
       <h1>{greeting()}, {firstName}</h1>
+      <NotifyPrompt session={session} />
       <p className="subtitle">{today()} — Alka Vida operations</p>
 
       <div className="figures">
@@ -321,14 +329,15 @@ export default function Dashboard({ session }: { session: Session }) {
                   <strong>
                     {a.request_type === 'Discount'
                       ? `${a.discount_percent ?? ''}% discount`
-                      : `Credit note ${money(Number(a.amount_cents))}`}
+                      : a.request_type === 'CreditNote' ? `Credit note ${money(Number(a.amount_cents))}`
+                        : `${DECISION_WORDS[a.request_type] ?? a.request_type}${Number(a.amount_cents) ? ` ${money(Number(a.amount_cents))}` : ''}`}
                   </strong>
                   {a.customer_name ? ` — ${a.customer_name}` : ''}
                   <div className="muted small">
                     {a.entity_label ?? ''}{a.raised_by ? ` · raised by ${a.raised_by}` : ''}
                   </div>
                 </span>
-                <Link to="/approvals">Approve</Link>
+                <Link to="/decisions">Decide</Link>
               </li>
             ))}
 

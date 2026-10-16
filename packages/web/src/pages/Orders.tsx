@@ -3,7 +3,7 @@ import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { api } from '../lib/api';
 import { askText } from '../components/Dialog';
 import { BatchBar, MultiStatusSelect, SortTh, TickAllTh, TickTd, passes, useSort, useTicks } from '../components/ListTools';
-import { OPEN_STAGES, ORDER_STAGES, orderStage } from '../lib/orderStatus';
+import { OPEN_STAGES, ORDER_STAGES, STAGE_WORDS, orderStage, type OrderStage } from '../lib/orderStatus';
 import { downloadCsv, dollars } from '../lib/csv';
 import { payMethods, useTakeCard } from '../lib/payments';
 import { money, date, day, relDay, toCents, todayInJamaica } from '../lib/format';
@@ -34,6 +34,9 @@ interface Order {
   /** Moves and part deliveries (7 Oct 2026, points 8 and 9). */
   events?: Array<{ kind: string; from: string; to: string; reason: string | null }>;
   remaining_summary?: string | null;
+  /** Pending until the round's load is logged or it is marked ready (15 Oct 2026). */
+  ready_at?: string | null; load_logged_at?: string | null; seen_at?: string | null;
+  fulfilled_on?: string | null;
 }
 interface Addr { id: string; label: string; address_line1: string | null; is_delivery: boolean }
 interface Product {
@@ -56,6 +59,10 @@ type When = 'any' | 'today' | 'week' | 'late' | 'range';
 type Panel = 'collect' | 'repeat' | 'offround' | 'cancel';
 
 const GCT_RATE = 0.15;
+
+const STAGE_TONE: Record<OrderStage, string> = {
+  pending: 'warn', ready: 'info', out: 'info', part: 'warn', delivered: 'ok', cancelled: 'muted',
+};
 
 const OUTCOME: Record<string, string> = {
   'Customer Not Home': 'not home', Refused: 'refused', Rescheduled: 'rescheduled', Other: 'not delivered',
@@ -151,7 +158,19 @@ export default function Orders() {
     // found too; otherwise the latest 500 are filtered here.
     const q = when === 'range' && (range.from || range.to)
       ? `&from=${range.from}&to=${range.to}&dateBy=${range.by}` : '';
-    setOrders(await api.get<Order[]>(`/api/orders?limit=500${q}`));
+    const list = await api.get<Order[]>(`/api/orders?limit=500${q}`);
+    setOrders(list);
+    // New online orders on screen now count as seen: the menu count clears.
+    const unseen = list.filter((o) => o.source === 'Portal' && !o.seen_at && o.status !== 'Cancelled').map((o) => o.id);
+    if (unseen.length) void api.post('/api/orders/seen', { ids: unseen }).catch(() => {});
+  }
+  async function markReady(o: Order, ready: boolean) {
+    setMenuFor(null); setBusy(true); setError(null); setMsg(null);
+    try {
+      await api.post(`/api/orders/${o.id}/ready`, { ready });
+      setMsg(ready ? `${o.order_number} is marked Ready.` : `${o.order_number} is back to Pending.`);
+      await load();
+    } catch (e) { setError(e instanceof Error ? e.message : 'Could not change it'); } finally { setBusy(false); }
   }
   useEffect(() => { load().catch((e) => setError(e.message)); }, [when, range.from, range.to, range.by]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -347,6 +366,18 @@ export default function Orders() {
     }
     return true;
   };
+  const stageCount = (sg: OrderStage) => orders.filter((o) => orderStage(o) === sg).length;
+  const deliveredToday = orders.filter((o) => o.status === 'Delivered'
+    && date(o.fulfilled_on ?? o.requested_delivery_date ?? o.order_date) === today).length;
+  const unseenOnline = orders.filter((o) => o.source === 'Portal' && !o.seen_at && o.status !== 'Cancelled').length;
+  const only = (sg: OrderStage) => show.length === 1 && show[0] === sg;
+  const tiles: Array<{ key: string; stage: OrderStage; n: number; label: string; sub?: string; on: boolean }> = [
+    { key: 'pending', stage: 'pending', n: stageCount('pending'), label: 'New orders',
+      sub: unseenOnline ? `${unseenOnline} new online` : 'not prepared yet', on: only('pending') },
+    { key: 'ready', stage: 'ready', n: stageCount('ready'), label: 'Ready', sub: 'load logged or marked ready', on: only('ready') },
+    { key: 'out', stage: 'out', n: stageCount('out'), label: 'Out for Delivery', sub: 'on the road', on: only('out') },
+    { key: 'delivered', stage: 'delivered', n: deliveredToday, label: 'Delivered', sub: 'today', on: only('delivered') && when === 'today' },
+  ];
   // Only unfinished orders ticked: soonest first, as the old Waiting list was.
   const openOnly = show.length > 0 && show.every((v) => (OPEN_STAGES as string[]).includes(v));
   const shown = orders
@@ -403,6 +434,14 @@ export default function Orders() {
         {onRound && (
           <button role="menuitem" className="pop-item pop-button"
                   onClick={() => openPanel(o, 'offround')}>Take it off the round</button>
+        )}
+        {orderStage(o) === 'pending' && (
+          <button role="menuitem" className="pop-item pop-button" onClick={() => markReady(o, true)}>
+            {o.delivery_mode === 'Pickup' ? 'Mark ready to collect' : 'Mark ready'}
+          </button>
+        )}
+        {orderStage(o) === 'ready' && o.ready_at && !o.load_logged_at && (
+          <button role="menuitem" className="pop-item pop-button" onClick={() => markReady(o, false)}>Not ready yet</button>
         )}
         <div className="pop-rule" />
         <button role="menuitem" className="pop-item pop-button pop-danger"
@@ -670,6 +709,22 @@ export default function Orders() {
         </div>
       )}
 
+      {/* The overview (Everton, 15 Oct 2026): a count for each, and a click shows them. */}
+      <div className="order-tiles" role="group" aria-label="Orders at a glance">
+        {tiles.map((t) => (
+          <button key={t.key} type="button"
+                  className={`order-tile ${t.key}${t.on ? ' on' : ''}`} aria-pressed={t.on}
+                  onClick={() => {
+                    setShow([t.stage]); setLimit(50);
+                    setWhen(t.key === 'delivered' ? 'today' : 'any');
+                  }}>
+            <span className="order-tile-n">{t.n}</span>
+            <span className="order-tile-label">{t.label}</span>
+            {t.sub && <span className="order-tile-sub">{t.sub}</span>}
+          </button>
+        ))}
+      </div>
+
       <div className="panel" style={{ padding: 0 }}>
         <div className="list-filters">
           <div className="field">
@@ -772,7 +827,21 @@ export default function Orders() {
                     </td>
                     <td data-label="Delivery date">{o.delivery_mode === 'Counter' ? day(o.order_date) : day(o.requested_delivery_date)}</td>
                     <td data-label="How">{howLabel(o)}</td>
-                    <td data-label="Status"><span className={`chip ${st.tone}`}>{st.label}</span></td>
+                    <td data-label="Status">
+                      {(() => {
+                        const sg = orderStage(o);
+                        const words = STAGE_WORDS[sg];
+                        // The stage, and underneath where it stands in words, when that says more.
+                        const more = st.label.toLowerCase() !== words.toLowerCase() && sg !== 'delivered' && sg !== 'cancelled' ? st.label : null;
+                        return (
+                          <>
+                            <span className={`chip ${STAGE_TONE[sg]}`}>{words}</span>
+                            {o.source === 'Portal' && !o.seen_at && o.status !== 'Cancelled' && <span className="chip new-chip">New</span>}
+                            {more && <div className={`small stage-more ${st.tone === 'bad' ? 'bad' : ''}`}>{more}</div>}
+                          </>
+                        );
+                      })()}
+                    </td>
                     <td data-label="Total" className="num">{money(Number(o.grand_total_cents))}</td>
                     <td className="num order-actions">
                       {pending ? (

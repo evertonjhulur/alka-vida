@@ -102,6 +102,10 @@ export default function Portal({ session }: { session: Session }) {
   /** 5-gallon empties they will hand over; '' until they say. */
   const [empties, setEmpties] = useState('');
   const [bottle, setBottle] = useState<Priced | null>(null);
+  /** Their delivery days for the chosen address, and the next dates on them (15 Oct 2026). */
+  const [dd, setDd] = useState<{ days: string[]; next: string[] } | null>(null);
+  /** "Another day": a date that is not theirs, sent for approval. */
+  const [otherDay, setOtherDay] = useState(false);
 
   const [pf, setPf] = useState<Record<string, string | boolean>>({});
   const [addrEdit, setAddrEdit] = useState<{ id: string | null; v: typeof BLANK_ADDR } | null>(null);
@@ -196,6 +200,11 @@ export default function Portal({ session }: { session: Session }) {
   }
 
   useEffect(() => { load().catch((e) => setError(e.message)); }, [customerId]);
+  useEffect(() => {
+    if (!customerId) return;
+    api.get<{ days: string[]; next: string[] }>(`/api/portal/delivery-days${addressId ? `?addressId=${addressId}` : ''}`)
+      .then(setDd).catch(() => setDd(null));
+  }, [customerId, addressId]);
 
   const unitOf = (p: Priced) => (p.bottles_per_case > 0 ? 'case' : 'bottle');
   void unitOf;
@@ -283,7 +292,9 @@ export default function Portal({ session }: { session: Session }) {
         + (mode === 'Pickup'
           ? 'We will have it ready for you to collect.'
           : order.needsReview
-            ? `It came in after our ${cutoff} cut-off for same-day delivery, so we will check it and confirm the day with you shortly.`
+            ? (otherDay && wanted && dd && !dd.days.includes(['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][new Date(`${wanted}T12:00:00Z`).getUTCDay()])
+              ? `You asked for ${when(wanted)}, which is not one of your delivery days, so we will check and confirm the day with you shortly.`
+              : `It came in after our ${cutoff} cut-off for same-day delivery, so we will check it and confirm the day with you shortly.`)
             : order.deliveryDate ? `It is booked for delivery on ${when(order.deliveryDate)}.`
               : 'It will go out on the next round for your area.')
         + (fullFives > 0 && empties !== '' ? ` Empties to be returned: ${Math.max(0, Math.round(Number(empties)) || 0)}.` : '')
@@ -291,7 +302,7 @@ export default function Portal({ session }: { session: Session }) {
         + (order.standingError ? ` We could not make it a standing order: ${order.standingError}` : ''),
       );
       setQty({});
-      setWanted(''); setNotes(''); setPo(''); setEmpties(''); setRepeat('');
+      setWanted(''); setNotes(''); setPo(''); setEmpties(''); setRepeat(''); setOtherDay(false);
       await load();
       setTab('orders');
     } catch (err) {
@@ -532,11 +543,51 @@ export default function Portal({ session }: { session: Session }) {
                 </div>
               </div>
             )}
-            <div className="two" style={{ marginTop: 10 }}>
-              <div className="field">
-                <label htmlFor="wd">{mode === 'Pickup' ? 'When will you collect?' : 'Delivery date (optional)'}</label>
-                <input id="wd" type="date" value={wanted} min={todayInJamaica()} onChange={(e) => setWanted(e.target.value)} />
+            {mode === 'Delivery' && dd && dd.days.length > 0 && (
+              // Only their own delivery days (Everton, 15 Oct 2026). Another
+              // day can be asked for; it waits for the office to agree.
+              <div className="field" style={{ marginTop: 10 }}>
+                <span className="label">Delivery day <span className="muted">· you are delivered on {dd.days.join(', ')}</span></span>
+                <div className="day-choices" role="radiogroup" aria-label="Delivery day">
+                  <button type="button" role="radio" aria-checked={!wanted && !otherDay}
+                          className={!wanted && !otherDay ? 'active' : ''}
+                          onClick={() => { setWanted(''); setOtherDay(false); }}>
+                    Next delivery day<span className="small">{dd.next[0] ? when(dd.next[0]) : ''}</span>
+                  </button>
+                  {dd.next.slice(1, 5).map((d) => (
+                    <button key={d} type="button" role="radio" aria-checked={wanted === d && !otherDay}
+                            className={wanted === d && !otherDay ? 'active' : ''}
+                            onClick={() => { setWanted(d); setOtherDay(false); }}>
+                      {when(d)}
+                    </button>
+                  ))}
+                  <button type="button" role="radio" aria-checked={otherDay} className={`other${otherDay ? ' active' : ''}`}
+                          onClick={() => { setOtherDay(true); setWanted(''); }}>
+                    Another day…<span className="small">needs our OK</span>
+                  </button>
+                </div>
+                {otherDay && (
+                  <div style={{ marginTop: 8 }}>
+                    <label htmlFor="wd-other">Which day?</label>
+                    <input id="wd-other" type="date" value={wanted} min={todayInJamaica()} style={{ maxWidth: 220 }}
+                           onChange={(e) => setWanted(e.target.value)} />
+                    {wanted && !dd.days.includes(['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][new Date(`${wanted}T12:00:00Z`).getUTCDay()]) && (
+                      <div className="notice warn" style={{ margin: '8px 0 0' }}>
+                        {when(wanted)} is not one of your delivery days. We will check whether we can come then
+                        and confirm with you; until then the order waits with us.
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
+            )}
+            <div className="two" style={{ marginTop: 10 }}>
+              {(mode === 'Pickup' || !dd || dd.days.length === 0) ? (
+                <div className="field">
+                  <label htmlFor="wd">{mode === 'Pickup' ? 'When will you collect?' : 'Delivery date (optional)'}</label>
+                  <input id="wd" type="date" value={wanted} min={todayInJamaica()} onChange={(e) => setWanted(e.target.value)} />
+                </div>
+              ) : <div />}
               <div className="field">
                 <label htmlFor="po">Your PO number (optional)</label>
                 <input id="po" value={po} placeholder="if your accounts team needs one"
@@ -556,7 +607,8 @@ export default function Portal({ session }: { session: Session }) {
             ) : (
               <p className="muted small" style={{ margin: 0 }}>
                 {mode === 'Pickup' ? 'We will have it ready for you.'
-                  : `Left blank, it goes on your next delivery day. Same-day orders by ${cutoff}.`}
+                  : dd && dd.days.length ? `Same-day orders by ${cutoff}.`
+                    : `Left blank, it goes on your next delivery day. Same-day orders by ${cutoff}.`}
               </p>
             )}
           </section>

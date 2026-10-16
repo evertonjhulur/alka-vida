@@ -232,7 +232,7 @@ export default function TopBar({
             </div>
             {session.role !== 'customer' && (
               <Link role="menuitem" className="pop-item" to="/my-account">
-                <span>My password</span>
+                <span>My account &amp; notifications</span>
               </Link>
             )}
             <button type="button" role="menuitem" className="pop-item pop-button"

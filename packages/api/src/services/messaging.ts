@@ -309,6 +309,42 @@ export async function sendOrderCancelledEmail(
     `Alka Vida order ${o.order_number} cancelled`, mail, 'order cancelled');
 }
 
+/**
+ * The office decided the day of an order that waited under Needs a decision
+ * (a same-day order after the cut-off, or a day that is not theirs: 15 Oct
+ * 2026). Tells the customer the day it is coming. Keyed by order and date, so
+ * a second change of date is told too.
+ */
+export async function sendDeliveryDayEmail(db: Db, orderId: string): Promise<{ sent: boolean; reason?: string }> {
+  if (!mailConfigured()) return { sent: false, reason: 'email is not set up' };
+  const o = await db.maybeOne<{
+    order_number: string; customer_id: string; name: string; email: string | null; status: string;
+    delivery_mode: string; requested_delivery_date: string | null;
+  }>(
+    `SELECT o.order_number, o.customer_id, c.name, c.email, o.status, o.delivery_mode,
+            o.requested_delivery_date::text AS requested_delivery_date
+     FROM customer_orders o JOIN customers c ON c.id = o.customer_id WHERE o.id = $1`, [orderId],
+  );
+  if (!o || o.status === 'Cancelled' || !o.requested_delivery_date) return { sent: false, reason: 'nothing to tell' };
+  if (!o.email?.trim()) return { sent: false, reason: 'no email for this customer' };
+  if (!(await customerWants(db, o.customer_id, 'orders'))) return { sent: false, reason: 'they have turned these off' };
+  const key = `${o.order_number}:${o.requested_delivery_date}`;
+  if (await alreadySent(db, 'DeliveryDay', key)) return { sent: false, reason: 'already sent' };
+  const day = fmtDate(o.requested_delivery_date);
+  const mail = await customerEmail(db, o.customer_id, 'orders', {
+    preheader: `Order ${o.order_number} is booked for ${day}`,
+    heading: o.delivery_mode === 'Pickup' ? 'Your collection day is confirmed' : 'Your delivery day is confirmed',
+    subheading: `Order ${o.order_number}`,
+    greeting: `Good day ${o.name},`,
+    intro: `We have looked at order ${o.order_number}. It is booked for ${day}.`,
+    items: await orderItems(db, orderId),
+    button: { label: 'See your order', url: portalLink('orders') },
+    outro: 'If that day does not suit you, reply to this email or give us a call.',
+  });
+  return sendLogged(db, 'DeliveryDay', key, o.customer_id, o.email.trim(),
+    `Alka Vida order ${o.order_number}: ${day}`, mail, 'delivery day confirmed');
+}
+
 /* ------------------------------------------------------------------ */
 /* News & offers                                                       */
 /* ------------------------------------------------------------------ */

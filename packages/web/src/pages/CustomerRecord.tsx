@@ -33,7 +33,7 @@ interface Order {
   delivery_mode: string; source: string; grand_total_cents: string;
   requested_delivery_date?: string | null; fulfilled_on?: string | null;
   customer_po?: string | null; needs_review?: boolean; lines_summary?: string | null;
-  sheet_started?: boolean | null;
+  sheet_started?: boolean | null; ready_at?: string | null; load_logged_at?: string | null;
   events?: Array<{ kind: string; from: string; to: string; reason: string | null }>;
 }
 interface Invoice {

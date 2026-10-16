@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { api, type Session } from '../lib/api';
+import NotificationsCard from '../components/NotificationsCard';
 
 const ROLE_LABEL: Record<string, string> = {
   admin: 'Administrator',
@@ -89,6 +90,7 @@ export default function MyAccount({ session }: { session: Session }) {
           )}
         </form>
       </div>
+      {session.role !== 'customer' && <NotificationsCard session={session} />}
     </>
   );
 }
