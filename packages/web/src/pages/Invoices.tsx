@@ -3,7 +3,7 @@ import { Link, useNavigate } from 'react-router-dom';
 import { api, downloadPost } from '../lib/api';
 import { money, date, when } from '../lib/format';
 import { INVOICE_FILTERS, STATE_TONE, invoiceMatches, invoiceState } from '../lib/invoiceState';
-import { BatchBar, SortTh, StatusSelect, TickAllTh, TickTd, sendSummary, useSort, useTicks } from '../components/ListTools';
+import { BatchBar, SortTh, MultiStatusSelect, passes, TickAllTh, TickTd, sendSummary, useSort, useTicks } from '../components/ListTools';
 import { downloadCsv, dollars } from '../lib/csv';
 import StatementDialog from '../components/StatementDialog';
 
@@ -39,7 +39,7 @@ export default function Invoices() {
       setRows(await api.get<Row[]>('/api/invoices'));
     } catch (e) { setError(e instanceof Error ? e.message : 'Could not raise them'); } finally { setBusy(false); }
   }
-  const [status, setStatus] = useState('');
+  const [status, setStatus] = useState<string[]>([]);
   const [search, setSearch] = useState('');
   const [from, setFrom] = useState('');
   const [to, setTo] = useState('');
@@ -53,7 +53,7 @@ export default function Invoices() {
   const q = search.trim().toLowerCase();
   const filtered = rows.filter((r) => (q === '' || r.invoice_number.toLowerCase().includes(q)
       || (r.customer_name ?? '').toLowerCase().includes(q))
-    && invoiceMatches(r, status)
+    && passes(status, (v) => invoiceMatches(r, v))
     && (!from || date(r.invoice_date) >= from) && (!to || date(r.invoice_date) <= to));
   const { sorted: shown, sort, onSort } = useSort(filtered, {
     number: (r) => r.invoice_number, customer: (r) => r.customer_name, date: (r) => date(r.invoice_date),
@@ -165,7 +165,7 @@ export default function Invoices() {
           <input id="q" placeholder="invoice number or customer…" style={{ width: '100%' }}
                  value={search} onChange={(e) => setSearch(e.target.value)} />
         </div>
-        <StatusSelect id="st" value={status} onChange={setStatus} options={INVOICE_FILTERS} />
+        <MultiStatusSelect id="st" value={status} onChange={setStatus} options={INVOICE_FILTERS} />
         <div className="field">
           <label htmlFor="ifrom">From</label>
           <input id="ifrom" type="date" value={from} onChange={(e) => setFrom(e.target.value)} />

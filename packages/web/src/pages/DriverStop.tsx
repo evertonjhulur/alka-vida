@@ -756,6 +756,11 @@ export default function DriverStop() {
             <span>Left unallocated</span>
             <span>{money(Math.max(collectedCents - allocatedCents, 0))}</span>
           </div>
+          {collectedCents - allocatedCents > 0 && (
+            <p className="muted small" style={{ margin: '4px 0 8px' }}>
+              Not split, it goes to their oldest open invoice first when the office settles the round.
+            </p>
+          )}
 
           {overAllocated && (
             <div className="notice warn">

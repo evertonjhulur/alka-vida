@@ -22,7 +22,7 @@ import { audit, businessToday, contactEmail, documentFooter, requireRole, num, s
 import { RuleViolation, GCT_RATE } from '@alka/shared';
 import { resolveLines } from './orders.ts';
 import { getInvoiceDetail } from './invoices.ts';
-import { getStatement, invoicesInStatus, type StatementFilter, type StatementStatus } from './ledger.ts';
+import { getStatement, invoicesInStatuses, type StatementFilter, type StatementStatus } from './ledger.ts';
 import { customerEmail } from './emailkit.ts';
 import { bottleAccount } from './bottles.ts';
 
@@ -622,11 +622,11 @@ export async function renderStatementPdf(
   db: Db,
   customerId: string,
   opts: { from?: string | null; to?: string | null; filter?: StatementFilter;
-          status?: StatementStatus | string | null } = {},
+          status?: StatementStatus | string | string[] | null } = {},
 ): Promise<StatementDocument> {
   const statement = await getStatement(db, customerId, opts);
   // Narrowed to invoices in one state: the age analysis follows it.
-  const onlyIds = statement.status ? await invoicesInStatus(db, customerId, statement.status) : null;
+  const onlyIds = statement.statuses.length ? await invoicesInStatuses(db, customerId, statement.statuses) : null;
 
   // The billing address when one is marked, the main address otherwise.
   const bt = await billTo(db, customerId);
@@ -989,7 +989,7 @@ export async function emailStatement(
   actor: Actor,
   customerId: string,
   opts: { from?: string | null; to?: string | null;
-          filter?: StatementFilter; status?: StatementStatus | null;
+          filter?: StatementFilter; status?: StatementStatus | string | string[] | null;
           sendTo?: string | null; note?: string | null;
           subject?: string | null; heading?: string | null;
           category?: 'statements' | 'reminders' | null } = {},

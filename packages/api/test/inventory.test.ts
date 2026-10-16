@@ -406,11 +406,11 @@ describe('Stock counts (InventoryAudit)', () => {
   });
 
   /**
-   * Confirming writes the counted figure outright rather than applying a
-   * difference, so a count confirmed after stock has moved puts the moved
-   * stock back. These pin the refusal, and the deliberate way past it.
+   * Since 15 Oct 2026 stock that moved after a count is carried forward on
+   * top of the counted figure rather than refused: the count is the truth AT
+   * ITS MOMENT, and what happened afterwards still happened.
    */
-  test('stock moving after a count blocks the confirm, naming what moved', async () => {
+  test('stock moving after a count is carried forward, not overwritten', async () => {
     const count = await recordCount(f.db, f.office, { notes: 'counted for the test',
       itemType: 'RawMaterial', itemId: capId, countedQty: 900,
     });
@@ -419,16 +419,16 @@ describe('Stock counts (InventoryAudit)', () => {
       rawMaterialId: capId, quantity: 100, reason: 'went out after the count',
     });
 
-    await assert.rejects(
-      () => reconcileCount(f.db, f.admin, count.id),
-      /moved since this count.*100 went out/s,
-      'a stale count must not silently overwrite a real movement',
+    const r = await reconcileCount(f.db, f.admin, count.id);
+    assert.equal(r.carriedForward, -100);
+    assert.equal(r.overrodeMovements, false);
+    const after = await f.db.one<{ q: number; status: string; notes: string }>(
+      `SELECT rm.quantity_on_hand q, ia.status, ia.notes FROM raw_materials rm, inventory_audits ia
+       WHERE rm.id = $1 AND ia.id = $2`, [capId, count.id],
     );
-
-    const still = await f.db.one<{ status: string }>(
-      `SELECT status FROM inventory_audits WHERE id = $1`, [count.id],
-    );
-    assert.equal(still.status, 'Open', 'a refused confirm leaves the count open');
+    assert.equal(Number(after.q), 800, 'the 900 counted, less the 100 that went out after');
+    assert.equal(after.status, 'Reconciled');
+    assert.match(after.notes, /1 movement\(s\) after the count carried forward/);
   });
 
   test('what moved since the count can be listed before deciding', async () => {
@@ -460,7 +460,7 @@ describe('Stock counts (InventoryAudit)', () => {
        WHERE rm.id = $1 AND ia.id = $2`, [capId, count.id],
     );
     assert.equal(Number(after.q), 700, 'the counted figure is what stock becomes');
-    assert.match(after.notes, /Confirmed over 1 movement/,
+    assert.match(after.notes, /Applied over 1 movement/,
       'the override is on the count itself, not only in the audit log');
   });
 

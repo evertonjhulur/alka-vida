@@ -10,12 +10,16 @@ import { ask, askText } from '../components/Dialog';
  * One count sheet for everything: finished goods counted as full cases plus
  * loose bottles, raw materials in units. Type what is on the floor against
  * any line; the difference shows as you type, and any line that is out must
- * say why before it saves. Nothing changes stock until an administrator
- * applies the count. The variance report downloads the counts with their
- * differences and explanations.
+ * say why before it saves. Saving applies the count to stock straight away
+ * (Everton, 15 Oct 2026), and the sheet can be dated to an earlier day for a
+ * physical count entered afterwards: it is measured against the end of that
+ * day, and what moved since is carried forward. The variance report
+ * downloads the counts with their differences and explanations.
  */
 
 interface Snapshot {
+  /** Set when the figures are as at the close of an earlier day. */
+  asAt?: string | null;
   finishedGoods: Array<{
     productId: string; name: string; bottlesPerCase: number; bottles: number; cases: number | null; loose: number;
   }>;
@@ -65,15 +69,17 @@ export default function StockCount({ session }: { session: Session }) {
   const [show, setShow] = useState<'FinishedGoods' | 'RawMaterial'>('FinishedGoods');
   const [range, setRange] = useState({ from: '', to: '' });
   const [problems, setProblems] = useState<Record<string, string>>({});
+  /** The day the floor was counted: today, or an earlier day entered afterwards. */
+  const [countDate, setCountDate] = useState(todayInJamaica());
 
   async function load() {
-    setSnap(await api.get<Snapshot>('/api/stock/snapshot'));
+    setSnap(await api.get<Snapshot>(`/api/stock/snapshot${countDate !== todayInJamaica() ? `?asOf=${countDate}` : ''}`));
     const q = new URLSearchParams();
     if (range.from) q.set('from', range.from);
     if (range.to) q.set('to', range.to);
     setAudits(await api.get<Audit[]>(`/api/audits?${q.toString()}`));
   }
-  useEffect(() => { load().catch((e) => setError(e.message)); }, [range.from, range.to]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { load().catch((e) => setError(e.message)); }, [range.from, range.to, countDate]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const entry = (id: string) => entries[id] ?? BLANK;
   const setEntry = (id: string, patch: Partial<Entry>) => setEntries({ ...entries, [id]: { ...entry(id), ...patch } });
@@ -113,14 +119,16 @@ export default function StockCount({ session }: { session: Session }) {
           : { itemType: t.kind, itemId: t.id, countedQty: Number(e.units) || 0,
               damagedQty: Number(e.damaged) || 0, notes: e.note || null };
       });
-      const r = await api.post<{ saved: Array<{ itemId: string }>; problems: Array<{ itemId: string; message: string }> }>(
-        '/api/audits/batch', { counts });
+      const r = await api.post<{ saved: Array<{ itemId: string; adjusted: number | null }>; problems: Array<{ itemId: string; message: string }> }>(
+        '/api/audits/batch', { counts, countDate, apply: true });
       const left: Record<string, Entry> = {};
       for (const p of r.problems) left[p.itemId] = entry(p.itemId);
       setEntries(left);
       setProblems(Object.fromEntries(r.problems.map((p) => [p.itemId, p.message])));
-      setMsg(`${r.saved.length} count${r.saved.length === 1 ? '' : 's'} saved. Stock has NOT changed yet — `
-        + `${session.role === 'admin' ? 'apply them below' : 'an administrator applies them'} once checked.`
+      const moved = r.saved.filter((x) => (x.adjusted ?? 0) !== 0).length;
+      setMsg(`${r.saved.length} count${r.saved.length === 1 ? '' : 's'} saved and applied to stock`
+        + `${countDate !== todayInJamaica() ? ` as at ${when(countDate)}` : ''}. `
+        + (moved ? `${moved} item${moved === 1 ? '' : 's'} adjusted.` : 'Nothing needed adjusting.')
         + (r.problems.length ? ` ${r.problems.length} could not be saved; see the lines marked.` : ''));
       await load();
     } catch (err) {
@@ -181,8 +189,8 @@ export default function StockCount({ session }: { session: Session }) {
     <>
       <h1>Stock count</h1>
       <p className="subtitle">
-        Type what is physically there against any line. Nothing moves until the count is applied,
-        so a miscount can be put right first.
+        Type what is physically there against any line. Saving updates stock for every line counted.
+        Counted on an earlier day? Choose that date: anything that moved since is carried forward.
       </p>
 
       {error && <div className="notice error">{error}</div>}
@@ -227,6 +235,11 @@ export default function StockCount({ session }: { session: Session }) {
       <div className="panel">
         <div className="panel-head">
           <h2>Count sheet</h2>
+          <div className="field count-date" style={{ margin: 0 }}>
+            <label htmlFor="count-date">Date of count</label>
+            <input id="count-date" type="date" value={countDate} max={todayInJamaica()}
+                   onChange={(e) => setCountDate(e.target.value || todayInJamaica())} />
+          </div>
           <div className="seg" role="group" aria-label="What to count">
             <button type="button" className={show === 'FinishedGoods' ? 'active' : ''} onClick={() => setShow('FinishedGoods')}>Finished goods</button>
             <button type="button" className={show === 'RawMaterial' ? 'active' : ''} onClick={() => setShow('RawMaterial')}>Raw materials</button>
@@ -235,7 +248,7 @@ export default function StockCount({ session }: { session: Session }) {
         {!snap ? <p className="muted">Loading…</p> : show === 'FinishedGoods' ? (
           <table className="count-sheet">
             <thead>
-              <tr><th>Product</th><th className="num">System has</th><th>Full cases</th><th>Loose bottles</th>
+              <tr><th>Product</th><th className="num">{snap?.asAt ? `System had on ${when(snap.asAt)}` : 'System has'}</th><th>Full cases</th><th>Loose bottles</th>
                 <th>Damaged</th><th className="num">Difference</th><th>Why it is out</th></tr>
             </thead>
             <tbody>
@@ -268,7 +281,7 @@ export default function StockCount({ session }: { session: Session }) {
         ) : (
           <table className="count-sheet">
             <thead>
-              <tr><th>Material</th><th className="num">System has</th><th>Counted</th><th>Damaged</th>
+              <tr><th>Material</th><th className="num">{snap?.asAt ? `System had on ${when(snap.asAt)}` : 'System has'}</th><th>Counted</th><th>Damaged</th>
                 <th className="num">Difference</th><th>Why it is out</th></tr>
             </thead>
             <tbody>
@@ -301,8 +314,13 @@ export default function StockCount({ session }: { session: Session }) {
               : `${typed.length} line${typed.length === 1 ? '' : 's'} counted`}
             {unexplained.length > 0 && <strong style={{ color: 'var(--bad)' }}> · {unexplained.length} still need a reason</strong>}
           </span>
-          <button disabled={busy || typed.length === 0 || unexplained.length > 0} onClick={saveSheet}>
-            {busy ? 'Saving…' : `Save ${typed.length || ''} count${typed.length === 1 ? '' : 's'}`}
+          <button disabled={busy || typed.length === 0 || unexplained.length > 0} onClick={async () => {
+            if (countDate !== todayInJamaica() && !await ask(
+              `Save this count as at ${when(countDate)}?\n\nStock is set to what was counted that day, plus whatever has moved since.`,
+              { confirmLabel: 'Save and update stock' })) return;
+            void saveSheet();
+          }}>
+            {busy ? 'Saving…' : `Save ${typed.length || ''} count${typed.length === 1 ? '' : 's'} and update stock`}
           </button>
         </div>
       </div>
@@ -325,10 +343,10 @@ export default function StockCount({ session }: { session: Session }) {
           </div>
           <span className="muted small">{audits.length} count{audits.length === 1 ? '' : 's'}, {off.length} out</span>
         </div>
-        {session.role !== 'admin' && (
+        {session.role !== 'admin' && audits.some((a) => a.status === 'Open') && (
           <div className="notice info">
-            Counts can be recorded by anyone in the office, but only an administrator
-            can apply one to stock — it writes off real value.
+            Counts saved on the count sheet update stock at once. An older count still
+            marked Not applied is applied by an administrator.
           </div>
         )}
         <table>

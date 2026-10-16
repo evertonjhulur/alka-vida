@@ -35,6 +35,82 @@ export function StatusSelect({
   );
 }
 
+/**
+ * The status drop-down with several ticked at once (Everton, 15 Oct 2026:
+ * "multiselect for the status dropdowns in all the status fields").
+ *
+ * `value` is the list ticked; an empty list means any status. The options
+ * are the same [value, words] pairs as StatusSelect's; one whose value is ''
+ * (or 'all') is the "Any status" choice, which clears the ticks.
+ */
+export function MultiStatusSelect({
+  id, value, onChange, options, label = 'Status', anyLabel,
+}: {
+  id: string;
+  value: readonly string[];
+  onChange: (v: string[]) => void;
+  options: ReadonlyArray<readonly [string, string]>;
+  label?: string;
+  anyLabel?: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const box = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const close = (e: MouseEvent) => { if (!box.current?.contains(e.target as Node)) setOpen(false); };
+    const esc = (e: KeyboardEvent) => { if (e.key === 'Escape') setOpen(false); };
+    document.addEventListener('mousedown', close);
+    document.addEventListener('keydown', esc);
+    return () => { document.removeEventListener('mousedown', close); document.removeEventListener('keydown', esc); };
+  }, [open]);
+
+  const anyOpt = options.find(([v]) => v === '' || v === 'all');
+  const any = anyLabel ?? anyOpt?.[1] ?? 'Any status';
+  const choices = options.filter(([v]) => v !== '' && v !== 'all');
+  const picked = choices.filter(([v]) => value.includes(v));
+  const words = (w: string) => w.replace(/^[·\s]+/, '');
+  const summary = picked.length === 0 ? any
+    : picked.length <= 2 ? picked.map(([, w]) => words(w)).join(', ')
+      : `${picked.length} chosen`;
+  const toggle = (v: string) => onChange(value.includes(v) ? value.filter((x) => x !== v) : [...value, v]);
+
+  return (
+    <div className="field multi-select" ref={box}>
+      <label htmlFor={id}>{label}</label>
+      <button id={id} type="button" className="multi-select-btn" aria-haspopup="true" aria-expanded={open}
+              title={picked.map(([, w]) => words(w)).join(', ') || any}
+              onClick={() => setOpen(!open)}>
+        <span>{summary}</span><span aria-hidden="true">▾</span>
+      </button>
+      {open && (
+        <div className="deskbar-pop multi-select-pop" role="group" aria-label={label}>
+          <label className="multi-select-item any">
+            <input type="checkbox" checked={value.length === 0} onChange={() => onChange([])} />
+            <span>{any}</span>
+          </label>
+          {choices.map(([v, w]) => (
+            <label key={v} className={`multi-select-item${w.startsWith('·') ? ' sub' : ''}`}>
+              <input type="checkbox" checked={value.includes(v)} onChange={() => toggle(v)} />
+              <span>{words(w)}</span>
+            </label>
+          ))}
+          {value.length > 0 && (
+            <div className="multi-select-foot">
+              <button type="button" className="as-link small" onClick={() => onChange([])}>Clear</button>
+              <button type="button" className="as-link small" onClick={() => setOpen(false)}>Done</button>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** True when a row passes a multi-status filter: nothing ticked, or any one ticked matches. */
+export function passes(ticked: readonly string[], matches: (v: string) => boolean): boolean {
+  return ticked.length === 0 || ticked.some(matches);
+}
+
 /* ---------------- sorting by heading ---------------- */
 
 export type SortDir = 'asc' | 'desc';

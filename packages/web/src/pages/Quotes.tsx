@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { api, download, downloadPost } from '../lib/api';
-import { BatchBar, SortTh, StatusSelect, TickAllTh, TickTd, sendSummary, useSort, useTicks } from '../components/ListTools';
+import { BatchBar, SortTh, MultiStatusSelect, passes, TickAllTh, TickTd, sendSummary, useSort, useTicks } from '../components/ListTools';
 import { downloadCsv, dollars } from '../lib/csv';
 import { money, statusTone, todayInJamaica, when } from '../lib/format';
 import CustomerPicker, { type PickerCustomer } from '../components/CustomerPicker';
@@ -64,7 +64,7 @@ export default function Quotes() {
 function QuoteList() {
   const [rows, setRows] = useState<QuoteRow[]>([]);
   // Out with the customer first, as before; any status from the drop-down.
-  const [show, setShow] = useState('waiting');
+  const [show, setShow] = useState<string[]>(['Draft', 'Sent']);
   const [find, setFind] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
@@ -76,8 +76,7 @@ function QuoteList() {
   const needle = find.trim().toLowerCase();
   const filtered = rows.filter((q) => {
     const st = statusOf(q);
-    if (show === 'waiting' && !['Draft', 'Sent'].includes(st)) return false;
-    if (show && show !== 'waiting' && st !== show) return false;
+    if (!passes(show, (v) => st === v)) return false;
     return !needle || q.quote_number.toLowerCase().includes(needle) || q.customer_name.toLowerCase().includes(needle);
   });
   const { sorted: shown, sort, onSort } = useSort(filtered, {
@@ -120,8 +119,8 @@ function QuoteList() {
             <input id="q-find" type="search" placeholder="Number or customer" value={find}
                    onChange={(e) => setFind(e.target.value)} style={{ minWidth: 220 }} />
           </div>
-          <StatusSelect id="q-st" value={show} onChange={setShow} options={[
-            ['', 'Any status'], ['waiting', 'Out with the customer'], ['Draft', 'Draft, not sent'],
+          <MultiStatusSelect id="q-st" value={show} onChange={setShow} options={[
+            ['', 'Any status'], ['Draft', 'Draft, not sent'],
             ['Sent', 'Waiting for their answer'], ['Accepted', 'Accepted, make the order'], ['Converted', 'Order made'],
             ['Declined', 'Declined'], ['Expired', 'Expired'],
           ]} />

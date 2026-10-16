@@ -529,7 +529,11 @@ export async function customerHistory(db: Db, customerId: string) {
                                || p.name, ', ' ORDER BY p.name)
                FROM order_line_items oli JOIN products p ON p.id = oli.product_id
               WHERE oli.order_id = o.id) AS lines_summary,
-            ${ORDER_EVENTS} AS events
+            ${ORDER_EVENTS} AS events,
+            -- On a round the driver has started, i.e. out for delivery (15 Oct 2026).
+            EXISTS (SELECT 1 FROM delivery_stops s JOIN delivery_sheets d ON d.id = s.delivery_sheet_id
+                     WHERE s.order_id = o.id AND d.status = 'Open' AND d.started_at IS NOT NULL
+                       AND s.stop_outcome = 'Pending') AS sheet_started
      FROM customer_orders o WHERE customer_id = $1
      ORDER BY order_date DESC, order_number DESC LIMIT 60`,
     [customerId],

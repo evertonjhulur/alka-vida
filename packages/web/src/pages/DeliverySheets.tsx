@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../lib/api';
-import { SortTh, StatusSelect, useSort } from '../components/ListTools';
+import { SortTh, MultiStatusSelect, passes, useSort } from '../components/ListTools';
 import { money, date, todayInJamaica, when } from '../lib/format';
 
 interface Sheet {
@@ -38,7 +38,7 @@ export default function DeliverySheets() {
   const [busy, setBusy] = useState(false);
   /** Blank means every date. A day is picked from the calendar. */
   const [day, setDay] = useState('');
-  const [phase, setPhase] = useState<Phase | 'all'>('all');
+  const [phase, setPhase] = useState<string[]>([]);
   /** Standing orders due on the chosen day but not raised yet (point 16). */
   const [expected, setExpected] = useState<Expected[]>([]);
 
@@ -75,7 +75,7 @@ export default function DeliverySheets() {
   const dayOf = (s: Sheet) => String(s.delivery_date).slice(0, 10);
   const daysWithSheets = [...new Set(sheets.map(dayOf))].sort().reverse();
   const onDay = day ? sheets.filter((s) => dayOf(s) === day) : sheets;
-  const filtered = phase === 'all' ? onDay : onDay.filter((s) => phaseOf(s) === phase);
+  const filtered = onDay.filter((s) => passes(phase, (v) => phaseOf(s) === v));
   // Click a heading to sort (11 Oct 2026); until then, as they come.
   const { sorted: shown, sort, onSort } = useSort(filtered, {
     date: (s) => dayOf(s), zone: (s) => s.zone, driver: (s) => s.driver_name ?? '',
@@ -156,7 +156,7 @@ export default function DeliverySheets() {
 
       <div className="panel">
         <div className="row">
-          <StatusSelect id="rd-st" value={phase} onChange={(v) => setPhase(v as Phase | 'all')}
+          <MultiStatusSelect id="rd-st" value={phase} onChange={setPhase}
                         options={[['all', 'Any status'], ...PHASES.map((p) => [p.key, p.label] as const)]} />
         </div>
         <table>
@@ -209,7 +209,7 @@ export default function DeliverySheets() {
         </table>
         {shown.length === 0 && (
           <p className="muted">
-            {phase !== 'all' && onDay.length > 0
+            {phase.length > 0 && onDay.length > 0
               ? 'No round in that state. Choose All to see the rest.'
               : day
                 ? 'No round on that day. Pick another date, or show every day.'

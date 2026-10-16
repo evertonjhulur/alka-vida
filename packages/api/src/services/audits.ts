@@ -9,9 +9,13 @@
  *   usable      - counted_qty - damaged_qty
  *   discrepancy - usable - system_qty   (negative = shrinkage)
  *
- * Counting alone changes nothing. An audit sits Open until it is explicitly
- * reconciled, and only reconciliation moves stock - so a miscount can be
- * corrected before it touches the books.
+ * Since 15 Oct 2026 (Everton) saving a count applies it to stock at once,
+ * for anyone in the office who may record one, and a count can be dated in
+ * the past (a physical count entered afterwards). A dated count is measured
+ * against what the system held at the END of that day; whatever moved after
+ * it (deliveries, production, receipts) is carried forward on top of the
+ * counted figure, never overwritten. A count saved with `apply: false` still
+ * sits Open until an administrator applies it, as before.
  */
 
 import type { Db, Queryable } from '../db/index.ts';
@@ -30,6 +34,47 @@ export interface CountInput {
   countedLoose?: number | null;
   damagedQty?: number;
   notes?: string | null;
+  /**
+   * The day the floor was counted (yyyy-mm-dd), today if left out. A past
+   * day is measured at the close of that day in Jamaica; not a future one.
+   */
+  countDate?: string | null;
+  /** Apply to stock as soon as it is saved (the count sheet sends true). */
+  apply?: boolean;
+}
+
+/**
+ * When a count dated `day` was taken: now for today, the last moment of the
+ * day for an earlier one. Refuses a day still to come.
+ */
+async function countMoment(t: Queryable, day: string | null | undefined): Promise<{ day: string; at: string }> {
+  const today = (await t.one<{ d: string }>(`SELECT business_today()::text AS d`)).d;
+  const d = (day ?? '').trim() || today;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(d)) throw new RuleViolation('the count date is not a date');
+  if (d > today) throw new RuleViolation('a count cannot be dated in the future');
+  if (d === today) {
+    const r = await t.one<{ at: string }>(`SELECT now()::text AS at`);
+    return { day: d, at: r.at };
+  }
+  const r = await t.one<{ at: string }>(
+    `SELECT ((($1::date + 1)::timestamp AT TIME ZONE 'America/Jamaica') - interval '1 millisecond')::text AS at`, [d],
+  );
+  return { day: d, at: r.at };
+}
+
+/** Net stock movement (+ in, - out) for an item after a moment. */
+async function netMovedAfter(
+  t: Queryable, itemType: 'RawMaterial' | 'FinishedGoods', itemId: string, at: string,
+): Promise<{ net: number; count: number }> {
+  const r = await t.one<{ net: string | null; n: number }>(
+    `SELECT COALESCE(SUM(CASE WHEN direction = 'out' THEN -quantity ELSE quantity END), 0)::text AS net,
+            COUNT(*)::int AS n
+     FROM inventory_transactions
+     WHERE item_type = $1 AND item_id = $2 AND txn_date > $3::timestamptz
+       AND direction IN ('in','out')`,
+    [itemType, itemId, at],
+  );
+  return { net: Math.round(Number(r.net ?? 0) * 1000) / 1000, count: num(r.n) };
 }
 
 /** Record a physical count. Stock is NOT changed until reconciliation. */
@@ -40,10 +85,12 @@ export async function recordCount(
 ): Promise<{
   id: string; itemName: string; systemQty: number;
   usableQty: number; discrepancy: number;
+  applied: boolean; adjusted: number | null;
 }> {
   requireRole(actor, 'admin', 'user');
 
   return db.tx(async (t) => {
+    const when = await countMoment(t, input.countDate);
     // Finished goods are counted the way they sit on the floor: full cases,
     // then any loose bottles from the run (team feedback, point 20).
     let counted = Number(input.countedQty ?? 0);
@@ -65,7 +112,11 @@ export async function recordCount(
       throw new RuleViolation('damaged units cannot exceed the number counted');
     }
 
-    const { name, systemQty } = await currentStock(t, input.itemType, input.itemId);
+    const { name, systemQty: nowQty } = await currentStock(t, input.itemType, input.itemId);
+    // What the system held when the floor was counted: today, what it holds
+    // now; an earlier day, now less whatever has moved since that day closed.
+    const since = await netMovedAfter(t, input.itemType, input.itemId, when.at);
+    const systemQty = Math.round((nowQty - since.net) * 1000) / 1000;
     const usable = counted - damaged;
     const discrepancy = usable - systemQty;
     // A difference has to be explained before it is saved (point 20): that
@@ -80,20 +131,28 @@ export async function recordCount(
     const row = await t.one<{ id: string }>(
       `INSERT INTO inventory_audits
          (item_type, item_id, item_name, system_qty, counted_qty,
-          damaged_qty, discrepancy, notes, counted_cases, counted_loose, counted_by)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+          damaged_qty, discrepancy, notes, counted_cases, counted_loose, counted_by,
+          audit_date, counted_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::date,$13::timestamptz)
        RETURNING id`,
       [input.itemType, input.itemId, name, systemQty,
-       counted, damaged, discrepancy, input.notes?.trim() || null, cases, loose, actor.name],
+       counted, damaged, discrepancy, input.notes?.trim() || null, cases, loose, actor.name,
+       when.day, when.at],
     );
     input = { ...input, countedQty: counted };
 
     await writeAudit(t, actor, 'create', 'InventoryAudit', row.id, name, {
       itemType: input.itemType, systemQty, countedQty: counted,
-      damagedQty: damaged, discrepancy, stockChanged: false,
+      damagedQty: damaged, discrepancy, countDate: when.day, stockChanged: false,
     });
 
-    return { id: row.id, itemName: name, systemQty, usableQty: usable, discrepancy };
+    // Saved and applied in one step (15 Oct 2026).
+    let adjusted: number | null = null;
+    if (input.apply) {
+      adjusted = (await applyCount(t, actor, row.id, undefined, {})).adjusted;
+    }
+
+    return { id: row.id, itemName: name, systemQty, usableQty: usable, discrepancy, applied: !!input.apply, adjusted };
   });
 }
 
@@ -138,21 +197,20 @@ export async function movementsSinceCount(db: Db, auditId: string): Promise<{
 }
 
 /**
- * Apply a count to stock. Admin only - this writes off real value.
+ * Apply an open count to stock. Admin only - this writes off real value.
+ * (A count saved from the count sheet is applied as it is saved instead.)
  *
  * A shortage draws FIFO from the oldest open batches, so the write-off is
  * valued at what the missing stock actually cost. An overage is added as a
  * new batch priced at the current blended average, which is an estimate and
  * is labelled as one on the transaction.
  *
- * REFUSED IF STOCK MOVED SINCE THE COUNT WAS TAKEN. Because the counted
- * figure is written outright rather than added to, a count confirmed after a
- * delivery has gone out would put the delivered stock back - the movement
- * keeps its history, but the quantity ends as though it never happened. The
- * fix for a stale count is to count again, so that is the default. Passing
- * `evenThoughStockMoved` overrides it for the case where the counter really
- * did see the floor after those movements; the override is recorded on the
- * count and in the audit trail, because it means a deliberate overwrite.
+ * STOCK THAT MOVED AFTER THE COUNT IS CARRIED FORWARD (15 Oct 2026). It used
+ * to be refused, because the counted figure was written outright and would
+ * have put delivered stock back. Now the target is the counted figure plus
+ * the movements since the count was taken, which is what makes a count dated
+ * in the past possible. `evenThoughStockMoved` still forces the old outright
+ * overwrite, and is recorded on the count and in the audit trail.
  */
 export async function reconcileCount(
   db: Db,
@@ -160,107 +218,103 @@ export async function reconcileCount(
   auditId: string,
   notes?: string,
   opts: { evenThoughStockMoved?: boolean } = {},
-): Promise<{ adjusted: number; valueCents: number; overrodeMovements: boolean }> {
+): Promise<{ adjusted: number; valueCents: number; overrodeMovements: boolean; carriedForward: number }> {
   requireRole(actor, 'admin');
+  return db.tx((t) => applyCount(t, actor, auditId, notes, opts));
+}
 
-  return db.tx(async (t) => {
-    const a = await t.one<{
-      id: string; item_type: 'RawMaterial' | 'FinishedGoods'; item_id: string;
-      item_name: string; counted_qty: number; damaged_qty: number; status: string;
-      counted_at: string;
-    }>(
-      `SELECT id, item_type, item_id, item_name, counted_qty, damaged_qty, status,
-              counted_at
-       FROM inventory_audits WHERE id = $1 FOR UPDATE`, [auditId],
-    );
-    if (a.status === 'Reconciled') {
-      throw new RuleViolation('this count has already been reconciled');
-    }
+/**
+ * Apply a count to stock, inside a transaction. Called by an administrator
+ * applying an open count, and by saving a count with `apply` (anyone who may
+ * record one: Everton, 15 Oct 2026).
+ *
+ * Works to a TARGET, so it also repairs drift: the counted usable figure,
+ * plus whatever has moved since the count was taken (carried forward, never
+ * overwritten). `evenThoughStockMoved` keeps the old override - set stock to
+ * the counted figure outright - for a count known to be fresher than the
+ * movements recorded after its time.
+ */
+async function applyCount(
+  t: Queryable,
+  actor: Actor,
+  auditId: string,
+  notes: string | undefined,
+  opts: { evenThoughStockMoved?: boolean },
+): Promise<{ adjusted: number; valueCents: number; overrodeMovements: boolean; carriedForward: number }> {
+  const a = await t.one<{
+    id: string; item_type: 'RawMaterial' | 'FinishedGoods'; item_id: string;
+    item_name: string; counted_qty: number; damaged_qty: number; status: string;
+    counted_at: string;
+  }>(
+    `SELECT id, item_type, item_id, item_name, counted_qty, damaged_qty, status,
+            counted_at::text AS counted_at
+     FROM inventory_audits WHERE id = $1 FOR UPDATE`, [auditId],
+  );
+  if (a.status === 'Reconciled') {
+    throw new RuleViolation('this count has already been reconciled');
+  }
 
-    const moved = await t.query<{ direction: string; quantity: string; reference_type: string }>(
-      `SELECT direction, quantity, reference_type
-       FROM inventory_transactions
-       WHERE item_type = $1 AND item_id = $2 AND txn_date > $3
-       ORDER BY txn_date`,
-      [a.item_type, a.item_id, a.counted_at],
-    );
+  const moved = await netMovedAfter(t, a.item_type, a.item_id, a.counted_at);
+  const overrodeMovements = moved.count > 0 && !!opts.evenThoughStockMoved;
+  const carried = overrodeMovements ? 0 : moved.net;
 
-    if (moved.length > 0 && !opts.evenThoughStockMoved) {
-      const inQty = moved.filter((m) => m.direction !== 'out')
-        .reduce((s, m) => s + num(m.quantity), 0);
-      const outQty = moved.filter((m) => m.direction === 'out')
-        .reduce((s, m) => s + num(m.quantity), 0);
-      const kinds = [...new Set(moved.map((m) => m.reference_type))].join(', ');
-      const parts = [
-        outQty > 0 ? `${outQty} went out` : null,
-        inQty > 0 ? `${inQty} came in` : null,
-      ].filter(Boolean).join(' and ');
+  // Re-read stock now rather than trusting the figure captured at count
+  // time: deliveries and production may have moved it in between.
+  const { systemQty } = await currentStock(t, a.item_type, a.item_id);
+  const usable = num(a.counted_qty) - num(a.damaged_qty);
+  const target = Math.max(0, Math.round((usable + carried) * 1000) / 1000);
+  const delta = Math.round((target - systemQty) * 1000) / 1000;
 
-      throw new RuleViolation(
-        `${a.item_name} has moved since this count was taken — ${parts} (${kinds}). ` +
-        'Confirming would set stock to the counted figure and overwrite those movements. ' +
-        'Count again, or confirm anyway if you counted after they happened.',
-      );
-    }
-    const overrodeMovements = moved.length > 0;
+  let valueCents = 0;
 
-    // Re-read stock now rather than trusting the figure captured at count
-    // time: deliveries and production may have moved it in between.
-    const { systemQty } = await currentStock(t, a.item_type, a.item_id);
-    const usable = num(a.counted_qty) - num(a.damaged_qty);
-    const delta = usable - systemQty;
-
-    let valueCents = 0;
-
-    if (a.item_type === 'RawMaterial') {
-      // Always run: even when the headline quantity already matches, the FIFO
-      // layers underneath may not, and the count is what settles it.
-      valueCents = await adjustRawMaterial(t, a.item_id, a.item_name, usable, auditId);
-    } else if (delta !== 0) {
-      await t.query(
-        `INSERT INTO finished_goods_stock (product_id, quantity_on_hand)
-         VALUES ($1,$2)
-         ON CONFLICT (product_id) DO UPDATE
-           SET quantity_on_hand = GREATEST(
-                 finished_goods_stock.quantity_on_hand + EXCLUDED.quantity_on_hand, 0)`,
-        [a.item_id, delta],
-      );
-      await t.query(
-        `INSERT INTO inventory_transactions
-           (item_type, item_id, item_name, quantity, direction,
-            reference, reference_type, notes)
-         VALUES ('FinishedGoods',$1,$2,$3,$4,$5,'Adjustment',$6)`,
-        [a.item_id, a.item_name, Math.abs(delta), delta > 0 ? 'in' : 'out',
-         `Stock count ${auditId}`, notes ?? 'Reconciled from physical count'],
-      );
-    }
-
-    // An override is written onto the count itself, not just the audit log:
-    // whoever reads this count later needs to see that it was applied over
-    // movements rather than to a settled figure.
-    const trail = [
-      notes ? `\n${notes}` : '',
-      overrodeMovements
-        ? `\nConfirmed over ${moved.length} movement(s) made after the count was taken.`
-        : '',
-    ].join('');
-
+  if (a.item_type === 'RawMaterial') {
+    // Always run: even when the headline quantity already matches, the FIFO
+    // layers underneath may not, and the count is what settles it.
+    valueCents = await adjustRawMaterial(t, a.item_id, a.item_name, target, auditId);
+  } else if (delta !== 0) {
     await t.query(
-      `UPDATE inventory_audits
-       SET status = 'Reconciled', system_qty = $2, discrepancy = $3,
-           notes = COALESCE(notes,'') || $4, reconciled_by = $5, reconciled_at = now()
-       WHERE id = $1`,
-      [auditId, systemQty, delta, trail, actor.name],
+      `INSERT INTO finished_goods_stock (product_id, quantity_on_hand)
+       VALUES ($1,$2)
+       ON CONFLICT (product_id) DO UPDATE
+         SET quantity_on_hand = GREATEST(
+               finished_goods_stock.quantity_on_hand + EXCLUDED.quantity_on_hand, 0)`,
+      [a.item_id, delta],
     );
+    await t.query(
+      `INSERT INTO inventory_transactions
+         (item_type, item_id, item_name, quantity, direction,
+          reference, reference_type, notes)
+       VALUES ('FinishedGoods',$1,$2,$3,$4,$5,'Adjustment',$6)`,
+      [a.item_id, a.item_name, Math.abs(delta), delta > 0 ? 'in' : 'out',
+       `Stock count ${auditId}`, notes ?? 'Reconciled from physical count'],
+    );
+  }
 
-    await writeAudit(t, actor, 'adjust', 'InventoryAudit', auditId, a.item_name, {
-      itemType: a.item_type, systemQty, usableCounted: usable,
-      adjustment: delta, valueCents, notes: notes ?? null,
-      overrodeMovements, movementsOverwritten: moved.length,
-    });
+  // What the count found against what was held when it was taken; the
+  // movements since are not part of the difference.
+  const discrepancy = Math.round((usable - (systemQty - carried)) * 1000) / 1000;
+  const trail = [
+    notes ? `\n${notes}` : '',
+    overrodeMovements
+      ? `\nApplied over ${moved.count} movement(s) made after the count was taken.`
+      : moved.count > 0 ? `\n${moved.count} movement(s) after the count carried forward.` : '',
+  ].join('');
 
-    return { adjusted: delta, valueCents, overrodeMovements };
+  await t.query(
+    `UPDATE inventory_audits
+     SET status = 'Reconciled', system_qty = $2, discrepancy = $3,
+         notes = NULLIF(COALESCE(notes,'') || $4, ''), reconciled_by = $5, reconciled_at = now()
+     WHERE id = $1`,
+    [auditId, Math.round((systemQty - carried) * 1000) / 1000, discrepancy, trail, actor.name],
+  );
+
+  await writeAudit(t, actor, 'adjust', 'InventoryAudit', auditId, a.item_name, {
+    itemType: a.item_type, systemQty, usableCounted: usable,
+    adjustment: delta, valueCents, notes: notes ?? null,
+    carriedForward: carried, movementsSinceCount: moved.count, overrodeMovements,
   });
+
+  return { adjusted: delta, valueCents, overrodeMovements, carriedForward: carried };
 }
 
 /**
@@ -405,7 +459,30 @@ export async function listAudits(
  * separately rather than as a fraction of a case. Raw materials as plain
  * units, with how many cases of each product that uses them they would make.
  */
-export async function stockSnapshot(db: Db) {
+export async function stockSnapshot(db: Db, asOf?: string | null) {
+  // As at the close of an earlier day (15 Oct 2026): today's figures less
+  // whatever has moved since, so a count entered afterwards compares with
+  // what the system held then.
+  const back = new Map<string, number>();
+  let asAt: string | null = null;
+  if (asOf) {
+    const when = await countMoment(db, asOf);
+    if (when.day !== (await db.one<{ d: string }>(`SELECT business_today()::text AS d`)).d) {
+      asAt = when.day;
+      const moved = await db.query<{ item_type: string; item_id: string; net: string }>(
+        `SELECT item_type, item_id,
+                SUM(CASE WHEN direction = 'out' THEN -quantity ELSE quantity END)::text AS net
+         FROM inventory_transactions
+         WHERE txn_date > $1::timestamptz AND direction IN ('in','out')
+           AND item_type IN ('RawMaterial','FinishedGoods')
+         GROUP BY item_type, item_id`, [when.at],
+      );
+      for (const m of moved) back.set(`${m.item_type}:${m.item_id}`, Number(m.net));
+    }
+  }
+  const then = (type: string, id: string, now: number) =>
+    Math.round((now - (back.get(`${type}:${id}`) ?? 0)) * 1000) / 1000;
+
   const goods = await db.query<{
     product_id: string; name: string; size: string | null; bottles_per_case: number; bottles: number;
     is_returnable: boolean; last_counted: string | null;
@@ -438,9 +515,10 @@ export async function stockSnapshot(db: Db) {
      FROM bom_line_items b JOIN products p ON p.id = b.product_id WHERE p.active`,
   );
   return {
+    asAt,
     finishedGoods: goods.map((g) => {
       const bpc = num(g.bottles_per_case);
-      const bottles = num(g.bottles);
+      const bottles = then('FinishedGoods', g.product_id, num(g.bottles));
       return {
         productId: g.product_id, name: g.name, size: g.size, bottlesPerCase: bpc,
         bottles, isReturnable: g.is_returnable,
@@ -451,7 +529,7 @@ export async function stockSnapshot(db: Db) {
       };
     }),
     rawMaterials: materials.map((m) => {
-      const onHand = num(m.quantity_on_hand);
+      const onHand = then('RawMaterial', m.id, num(m.quantity_on_hand));
       const makes = bom.filter((b) => b.raw_material_id === m.id && num(b.quantity) > 0).map((b) => {
         const perCase = num(b.quantity) * (num(b.bottles_per_case) > 0 ? num(b.bottles_per_case) : 1);
         return {

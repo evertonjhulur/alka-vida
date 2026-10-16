@@ -19,6 +19,7 @@ import Reports from './pages/Reports';
 import DriverRoute from './pages/DriverRoute';
 import DriverStop from './pages/DriverStop';
 import Portal, { PortalInvoice } from './pages/Portal';
+import { PortalOrderDetail, PortalStandingDetail } from './pages/PortalOrders';
 import RawMaterials from './pages/RawMaterials';
 import Suppliers from './pages/Suppliers';
 import Pricing from './pages/Pricing';
@@ -48,6 +49,7 @@ import Quotes from './pages/Quotes';
 import QuoteAccept from './pages/QuoteAccept';
 import CreditNotes from './pages/CreditNotes';
 import AutoEmails from './pages/AutoEmails';
+import AuditLog from './pages/AuditLog';
 import Messages from './pages/Messages';
 import Reminders from './pages/Reminders';
 import MoneySettings from './pages/MoneySettings';
@@ -123,8 +125,8 @@ const NAV: NavItem[] = [
   // The portal, as separate modules rather than tabs inside one screen.
   { to: '/portal/home', label: 'Home', roles: ['customer'] },
   { to: '/portal/order', label: 'Place an order', roles: ['customer'] },
-  { to: '/portal/orders', label: 'My orders', roles: ['customer'] },
-  { to: '/portal/repeats', label: 'Standing orders', roles: ['customer'] },
+  // Order History: orders and standing orders in one place (15 Oct 2026).
+  { to: '/portal/orders', label: 'Order History', roles: ['customer'], also: ['/portal/standing', '/portal/repeats'] },
   { to: '/portal/account', label: 'Statements & invoices', roles: ['customer'], also: ['/portal/invoices'] },
   { to: '/portal/quotes', label: 'Quotes', roles: ['customer'] },
   { to: '/portal/profile', label: 'My profile', roles: ['customer'] },
@@ -322,6 +324,7 @@ function Shell({ session }: { session: Session }) {
           <Route path="/auto-emails" element={<><BackToSettings /><AutoEmails session={session} /></>} />
           <Route path="/settings" element={<SettingsHub session={session} pending={pending} />} />
           <Route path="/settings/money" element={<><BackToSettings /><MoneySettings session={session} /></>} />
+          <Route path="/settings/audit-log" element={<><BackToSettings /><AuditLog session={session} /></>} />
           <Route path="/messages" element={<><SectionTabs tabs={CUSTOMERS} /><Messages session={session} /></>} />
           <Route path="/reminders" element={<Reminders />} />
           <Route path="/payments" element={<Payments />} />
@@ -347,6 +350,8 @@ function Shell({ session }: { session: Session }) {
           {/* Four modules, one screen behind them. */}
           <Route path="/portal" element={<Navigate to="/portal/home" replace />} />
           <Route path="/portal/invoices/:invoiceId" element={<PortalInvoice />} />
+          <Route path="/portal/orders/:orderId" element={<PortalOrderDetail />} />
+          <Route path="/portal/standing/:scheduleId" element={<PortalStandingDetail />} />
           <Route path="/portal/:tab" element={<Portal session={session} />} />
           <Route path="/users" element={<><BackToSettings />{session.role === 'admin' && <SectionTabs tabs={PEOPLE} />}<Users session={session} /></>} />
           <Route path="/zones" element={<><BackToSettings /><Zones session={session} /></>} />

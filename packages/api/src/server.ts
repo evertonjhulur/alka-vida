@@ -50,6 +50,8 @@ import * as trucks from './services/trucks.ts';
 import { registerTruckRoutes } from './routes/trucks.ts';
 import * as messaging from './services/messaging.ts';
 import * as paperwork from './services/paperwork.ts';
+import * as portal from './services/portal.ts';
+import * as auditlog from './services/auditlog.ts';
 
 declare module 'fastify' {
   interface FastifyRequest {
@@ -455,6 +457,21 @@ export async function buildServer(db: Db) {
       return { ok: true };
     });
 
+  // How often, and the next date (Order History, 15 Oct 2026).
+  app.post('/api/portal/recurring/:id/update', { preHandler: allow('customer') },
+    async (req) => {
+      const body = (req.body ?? {}) as { pattern?: RecurrencePattern; nextDeliveryDate?: string | null };
+      await recurring.updateOwnSchedule(db, actorOf(req), portalCustomer(req),
+        (req.params as { id: string }).id, body);
+      return { ok: true };
+    });
+
+  app.get('/api/portal/recurring/:id', { preHandler: allow('customer') },
+    async (req) => portal.myScheduleDetail(db, portalCustomer(req), (req.params as { id: string }).id));
+
+  app.get('/api/portal/orders/:id', { preHandler: allow('customer') },
+    async (req) => portal.myOrderDetail(db, portalCustomer(req), (req.params as { id: string }).id));
+
   app.post('/api/portal/recurring/:id/cancel', { preHandler: allow('customer') },
     async (req) => {
       const body = (req.body ?? {}) as { reason?: string };
@@ -736,7 +753,7 @@ export async function buildServer(db: Db) {
       };
       return documents.emailStatement(db, actorOf(req), (req.params as { id: string }).id,
         { from: body.from, to: body.to, filter: body.filter, sendTo: body.sendTo,
-          status: ledger.asStatementStatus(body.status) });
+          status: ledger.asStatementStatuses(body.status) });
     });
 
   // The statement as a document. A customer may download their own, the same
@@ -822,6 +839,21 @@ export async function buildServer(db: Db) {
         if (!s.customerId) throw new ForbiddenError('this login is not linked to a customer');
         created = await orders.createPortalOrder(db, actorOf(req), s.customerId,
           req.body as orders.PortalOrderInput);
+        // "Make this a standing order" on Place an order (15 Oct 2026): the
+        // order is safe first; a repeat that cannot be set up is reported.
+        const repeat = (req.body as { repeat?: string }).repeat;
+        if (repeat && (['Weekly', 'Biweekly', 'Monthly'] as string[]).includes(repeat)) {
+          try {
+            const r = await recurring.startOwnSchedule(db, actorOf(req), s.customerId, created.id,
+              { pattern: repeat as RecurrencePattern });
+            await recurring.generateDueOrders(db, actorOf(req)).catch(() => null);
+            void messaging.sendOrderPlacedEmail(db, created.id).catch(() => {});
+            return { ...created, standing: { pattern: repeat, nextDeliveryDate: r.nextDeliveryDate } };
+          } catch (err) {
+            void messaging.sendOrderPlacedEmail(db, created.id).catch(() => {});
+            return { ...created, standingError: (err as Error).message };
+          }
+        }
       } else {
         const body = req.body as orders.CreateOrderInput;
         // Office staff entering an order for today after the cut-off: it
@@ -1483,6 +1515,18 @@ export async function buildServer(db: Db) {
       return audits.reconcileCount(db, actorOf(req), (req.params as { id: string }).id,
         body.notes, { evenThoughStockMoved: body.evenThoughStockMoved === true });
     });
+
+  /* ---------------- the audit log (15 Oct 2026) ---------------- */
+
+  app.get('/api/audit-log', { preHandler: allow('admin') }, async (req) => {
+    const q = req.query as Record<string, string | undefined>;
+    const list = (v?: string) => (v ?? '').split(',').map((x) => x.trim()).filter(Boolean);
+    return auditlog.listAuditLog(db, actorOf(req), {
+      from: q.from, to: q.to, userId: q.user, types: list(q.types), actions: list(q.actions),
+      q: q.q, before: q.before, limit: Number(q.limit) || undefined,
+    });
+  });
+  app.get('/api/audit-log/filters', { preHandler: allow('admin') }, async (req) => auditlog.auditLogFilters(db, actorOf(req)));
 
   /* ---------------- reports ---------------- */
 

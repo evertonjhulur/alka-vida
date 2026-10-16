@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api, downloadPost, idempotencyKey } from '../lib/api';
-import { BatchBar, SortTh, StatusSelect, TickAllTh, TickTd, sendSummary, useSort, useTicks } from '../components/ListTools';
+import { BatchBar, SortTh, MultiStatusSelect, passes, TickAllTh, TickTd, sendSummary, useSort, useTicks } from '../components/ListTools';
 import { downloadCsv, dollars } from '../lib/csv';
 import { payMethods, useTakeCard } from '../lib/payments';
 import { money, toCents, day } from '../lib/format';
@@ -344,7 +344,7 @@ function Received({ stamp }: { stamp: number }) {
   const [rows, setRows] = useState<Paid[]>([]);
   const [from, setFrom] = useState(startOfMonth());
   const [to, setTo] = useState('');
-  const [state, setState] = useState('');
+  const [state, setState] = useState<string[]>([]);
   const [how, setHow] = useState('');
   const [find, setFind] = useState('');
   const [busy, setBusy] = useState(false);
@@ -359,10 +359,9 @@ function Received({ stamp }: { stamp: number }) {
   }, [from, to, stamp]);
 
   const needle = find.trim().toLowerCase();
-  const filtered = rows.filter((p) => (!state ? true
-    : state === 'invoice' ? !!p.invoice_id && !p.is_reversal
-      : state === 'account' ? !p.invoice_id && !p.is_reversal
-        : p.is_reversal || p.reversed)
+  const filtered = rows.filter((p) => passes(state, (v) => (v === 'invoice' ? !!p.invoice_id && !p.is_reversal
+    : v === 'account' ? !p.invoice_id && !p.is_reversal
+      : p.is_reversal || p.reversed))
     && (!how || p.method === how)
     && (!needle || p.customer_name.toLowerCase().includes(needle)
       || (p.reference ?? '').toLowerCase().includes(needle) || (p.invoice_number ?? '').toLowerCase().includes(needle)));
@@ -398,7 +397,7 @@ function Received({ stamp }: { stamp: number }) {
           <label htmlFor="pr-find">Find</label>
           <input id="pr-find" type="search" placeholder="Customer, reference or invoice" value={find} onChange={(e) => setFind(e.target.value)} />
         </div>
-        <StatusSelect id="pr-state" label="Show" value={state} onChange={setState} options={PAID_FILTERS} />
+        <MultiStatusSelect id="pr-state" label="Show" value={state} onChange={setState} options={PAID_FILTERS} />
         <div className="field">
           <label htmlFor="pr-how">How</label>
           <select id="pr-how" value={how} onChange={(e) => setHow(e.target.value)}>

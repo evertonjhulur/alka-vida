@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { api, download, downloadPost } from '../lib/api';
-import { BatchBar, SortTh, StatusSelect, TickAllTh, TickTd, sendSummary, useSort, useTicks } from '../components/ListTools';
+import { BatchBar, SortTh, MultiStatusSelect, passes, TickAllTh, TickTd, sendSummary, useSort, useTicks } from '../components/ListTools';
 import { downloadCsv, dollars } from '../lib/csv';
 import { money, toCents, when, day, todayInJamaica } from '../lib/format';
 import { ask } from '../components/Dialog';
@@ -82,11 +82,10 @@ export default function PurchaseOrders() {
   const supplier = suppliers.find((s) => s.id === supplierId);
 
   /* ---- the list: status, sort, batch actions (11 Oct 2026) ---- */
-  const [poStatus, setPoStatus] = useState('');
+  const [poStatus, setPoStatus] = useState<string[]>([]);
   const [poFind, setPoFind] = useState('');
   const poNeedle = poFind.trim().toLowerCase();
-  const poFiltered = orders.filter((p) => (!poStatus ? true
-    : poStatus === 'coming' ? ['Draft', 'Sent', 'Partially Received'].includes(p.status) : p.status === poStatus)
+  const poFiltered = orders.filter((p) => passes(poStatus, (v) => p.status === v)
     && (!poNeedle || p.po_number.toLowerCase().includes(poNeedle) || p.supplier_name.toLowerCase().includes(poNeedle)));
   const poSort = useSort(poFiltered, {
     number: (p) => p.po_number, supplier: (p) => p.supplier_name, date: (p) => String(p.order_date).slice(0, 10),
@@ -383,8 +382,8 @@ export default function PurchaseOrders() {
                 <label htmlFor="po-find">Find</label>
                 <input id="po-find" type="search" placeholder="PO number or supplier" value={poFind} onChange={(e) => setPoFind(e.target.value)} />
               </div>
-              <StatusSelect id="po-st" value={poStatus} onChange={setPoStatus} options={[
-                ['', 'Any status'], ['coming', 'Still to come'], ['Draft', 'Draft'], ['Sent', 'Sent'],
+              <MultiStatusSelect id="po-st" value={poStatus} onChange={setPoStatus} options={[
+                ['', 'Any status'], ['Draft', 'Draft'], ['Sent', 'Sent'],
                 ['Partially Received', 'Partially received'], ['Received', 'Received'],
                 ['Partially Received - Closed', 'Partially received - closed'], ['Cancelled', 'Cancelled'],
               ]} />

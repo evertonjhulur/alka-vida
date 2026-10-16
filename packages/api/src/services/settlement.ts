@@ -10,6 +10,11 @@
  *     auto-split running in parallel. Adding either would reintroduce the
  *     duplicate phantom credit bug.
  *
+ *     Money the driver did not split goes to the customer's OLDEST open
+ *     invoice first (Everton, 15 Oct 2026). That is worked out here, before
+ *     the plan, as more allocation inputs - so planPayments is still the one
+ *     path, and still emits the whole list in one pass.
+ *
  *  2. Cash variance is a DRIVER ACCOUNTABILITY CHECK ONLY. It compares
  *     physical cash handed in against what the driver recorded collecting.
  *     It never creates, adjusts or influences any Payment or Invoice, and it
@@ -48,12 +53,50 @@ export interface SettlementStopRow {
   /** expected - collected, per stop, so a discrepancy traces to one stop. */
   varianceCents: Cents;
   allocations: Array<{ invoiceId: string | null; invoiceNumber: string | null; amountCents: Cents }>;
+  /**
+   * Where the money the driver did NOT split will go at settlement: the
+   * oldest open invoice first (15 Oct 2026). Anything left after every open
+   * invoice is paid stays on the account (invoiceId null).
+   */
+  autoApplied: Array<{ invoiceId: string | null; invoiceNumber: string | null; amountCents: Cents }>;
   /** Everything this customer still owes, so the cash can be applied here. */
   openInvoices: Array<{
     invoiceId: string; invoiceNumber: string; balanceCents: Cents;
     grandTotalCents: Cents; invoiceDate: string; status: string;
   }>;
   settled: boolean;
+}
+
+/**
+ * Money collected at a stop that the driver did not split (Everton, 15 Oct
+ * 2026): it goes to the customer's oldest open invoice first, then the next,
+ * and so on. When the only open invoice is this delivery's own, that is
+ * where it goes. Anything left once every open invoice is covered is
+ * returned as nothing - planPayments leaves it on the account, as before.
+ *
+ * `already` is what is going to each invoice in this same settlement
+ * (the driver's own split, and earlier stops for the same customer), so an
+ * invoice is never paid past its balance.
+ */
+export async function oldestFirst(
+  t: Queryable,
+  customerId: string,
+  amountCents: Cents,
+  already: ReadonlyMap<string, Cents> = new Map(),
+): Promise<Array<{ invoiceId: string; invoiceNumber: string; amountCents: Cents }>> {
+  if (!(amountCents > 0)) return [];
+  const open = await openInvoicesForCustomer(t, customerId); // oldest first
+  const out: Array<{ invoiceId: string; invoiceNumber: string; amountCents: Cents }> = [];
+  let left = amountCents;
+  for (const inv of open) {
+    if (left <= 0) break;
+    const room = num(inv.balanceCents) - (already.get(inv.invoiceId) ?? 0);
+    if (room <= 0) continue;
+    const take = Math.min(room, left);
+    out.push({ invoiceId: inv.invoiceId, invoiceNumber: inv.invoiceNumber, amountCents: take });
+    left -= take;
+  }
+  return out;
 }
 
 /**
@@ -93,6 +136,9 @@ export async function getSettlementReview(
   );
 
   const rows: SettlementStopRow[] = [];
+  // What earlier unsettled stops on this round will already put against each
+  // invoice, so two stops for one customer do not both claim the same balance.
+  const going = new Map<string, Cents>();
   for (const s of stops) {
     const expected = await amountOwedForStop(db, s.id);
     const collected = num(s.payment_amount_cents);
@@ -114,6 +160,23 @@ export async function getSettlementReview(
       [s.id],
     );
 
+    let autoApplied: SettlementStopRow['autoApplied'] = [];
+    if (!s.settled_at) {
+      const split = allocations.filter((a) => a.invoice_id)
+        .reduce((sum, a) => sum + num(a.amount_cents), 0);
+      for (const a of allocations) {
+        if (a.invoice_id) going.set(a.invoice_id, (going.get(a.invoice_id) ?? 0) + num(a.amount_cents));
+      }
+      const unsplit = Math.max(collected - split, 0);
+      const auto = await oldestFirst(db, s.customer_id, unsplit, going);
+      for (const a of auto) going.set(a.invoiceId, (going.get(a.invoiceId) ?? 0) + a.amountCents);
+      const placed = auto.reduce((sum, a) => sum + a.amountCents, 0);
+      autoApplied = [
+        ...auto,
+        ...(unsplit - placed > 0 ? [{ invoiceId: null, invoiceNumber: null, amountCents: unsplit - placed }] : []),
+      ];
+    }
+
     rows.push({
       stopId: s.id,
       customerName: s.customer_name,
@@ -133,6 +196,7 @@ export async function getSettlementReview(
         invoiceNumber: a.invoice_number,
         amountCents: num(a.amount_cents),
       })),
+      autoApplied,
       openInvoices: (await openInvoicesForCustomer(db, s.customer_id)).map((i) => ({
         invoiceId: i.invoiceId,
         invoiceNumber: i.invoiceNumber,
@@ -370,10 +434,22 @@ export async function settleStop(
     [stopId],
   );
 
+  // Whatever the driver did not split goes to the oldest open invoice first
+  // (15 Oct 2026). It joins the driver's split as more allocation inputs, so
+  // the plan below is still the one place payments come from.
+  const collected = num(stop.payment_amount_cents);
+  const split = new Map<string, Cents>();
+  for (const a of allocations) split.set(a.invoice_id, (split.get(a.invoice_id) ?? 0) + num(a.amount_cents));
+  const splitTotal = [...split.values()].reduce((sum, v) => sum + v, 0);
+  const inputs = new Map(split);
+  for (const a of await oldestFirst(t, stop.customer_id, Math.max(collected - splitTotal, 0), split)) {
+    inputs.set(a.invoiceId, (inputs.get(a.invoiceId) ?? 0) + a.amountCents);
+  }
+
   // ONE uniform plan covering attached and unattached portions alike.
   const plan = planPayments(
-    num(stop.payment_amount_cents),
-    allocations.map((a) => ({ invoiceId: a.invoice_id, amountCents: num(a.amount_cents) })),
+    collected,
+    [...inputs].map(([invoiceId, amountCents]) => ({ invoiceId, amountCents })),
   );
 
   const paymentIds: string[] = [];

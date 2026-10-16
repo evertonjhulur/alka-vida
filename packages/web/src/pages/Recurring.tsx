@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { api } from '../lib/api';
 import { date, when } from '../lib/format';
 import { ask, askText } from '../components/Dialog';
-import { SortTh, StatusSelect, useSort } from '../components/ListTools';
+import { SortTh, MultiStatusSelect, passes, useSort } from '../components/ListTools';
 
 interface Schedule {
   id: string; orderNumber: string; customerId: string; customerName: string;
@@ -104,7 +104,7 @@ export default function Recurring() {
   }
 
   // Status drop-down and sortable headings (11 Oct 2026).
-  const [state, setState] = useState('');
+  const [state, setState] = useState<string[]>([]);
   const activeSort = useSort(rows.filter((r) => !r.paused), {
     customer: (r) => r.customerName, what: (r) => r.lineSummary, often: (r) => r.pattern,
     next: (r) => (r.nextDeliveryDate ? date(r.nextDeliveryDate) : null), raised: (r) => r.occurrencesRaised,
@@ -112,8 +112,8 @@ export default function Recurring() {
   const pausedSort = useSort(rows.filter((r) => r.paused), {
     customer: (r) => r.customerName, often: (r) => r.pattern, raised: (r) => r.occurrencesRaised, why: (r) => r.lastNote ?? '',
   });
-  const active = state === 'paused' ? [] : activeSort.sorted;
-  const paused = state === 'active' ? [] : pausedSort.sorted;
+  const active = passes(state, (v) => v === 'active') ? activeSort.sorted : [];
+  const paused = passes(state, (v) => v === 'paused') ? pausedSort.sorted : [];
 
   return (
     <>
@@ -157,11 +157,11 @@ export default function Recurring() {
       )}
 
       <div className="row">
-        <StatusSelect id="so-st" value={state} onChange={setState}
+        <MultiStatusSelect id="so-st" value={state} onChange={setState}
                       options={[['', 'Any status'], ['active', 'Active'], ['paused', 'Paused']]} />
       </div>
 
-      {state !== 'paused' && <div className="panel">
+      {passes(state, (v) => v === 'active') && <div className="panel">
         <div className="row" style={{ justifyContent: 'space-between' }}>
           <h2 style={{ marginTop: 0 }}>Active ({active.length})</h2>
           <button disabled={busy} onClick={generate}>

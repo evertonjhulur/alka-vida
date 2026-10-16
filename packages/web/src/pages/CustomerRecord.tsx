@@ -6,7 +6,8 @@ import { money, date, statusTone, toCents, todayInJamaica, when } from '../lib/f
 import StatementDialog from '../components/StatementDialog';
 import CustomerForm, { customerToForm, formToPayload, BLANK_CUSTOMER, type CustomerFormValues } from '../components/CustomerForm';
 import { AddressesPanel, SpecialPricesPanel } from '../components/CustomerExtras';
-import { BatchBar, SortTh, StatusSelect, TickAllTh, TickTd, useSort, useTicks } from '../components/ListTools';
+import { BatchBar, MultiStatusSelect, SortTh, StatusSelect, TickAllTh, TickTd, passes, useSort, useTicks } from '../components/ListTools';
+import { ORDER_STAGES, orderStage } from '../lib/orderStatus';
 import { STATE_TONE, invoiceMatches, invoiceState } from '../lib/invoiceState';
 import { downloadCsv, dollars } from '../lib/csv';
 import { buildTransactions, type Tx } from '../lib/transactions';
@@ -32,6 +33,7 @@ interface Order {
   delivery_mode: string; source: string; grand_total_cents: string;
   requested_delivery_date?: string | null; fulfilled_on?: string | null;
   customer_po?: string | null; needs_review?: boolean; lines_summary?: string | null;
+  sheet_started?: boolean | null;
   events?: Array<{ kind: string; from: string; to: string; reason: string | null }>;
 }
 interface Invoice {
@@ -73,10 +75,8 @@ interface PayRow {
   reference: string | null; receipt_number: string | null; invoice_id: string | null;
   invoice_number: string | null; is_reversal: boolean; reversed: boolean; order_number: string | null;
 }
-const ORDER_FILTERS = [
-  ['', 'Any status'], ['waiting', 'Waiting (not delivered yet)'], ['part', 'Part delivered'],
-  ['Delivered', 'Delivered'], ['Cancelled', 'Cancelled'], ['review', 'Needs approval'],
-] as const;
+/** The same five statuses as the Orders screen (15 Oct 2026). */
+const ORDER_FILTERS: ReadonlyArray<readonly [string, string]> = [['', 'Any status'], ...ORDER_STAGES];
 /** The Transactions tab (12 Oct 2026): one list of invoices, payments and credit notes. */
 const TX_TYPES = [
   ['', 'All transactions'], ['invoice', 'Invoices'], ['payment', 'Payments received'], ['credit', 'Credit notes'],
@@ -221,10 +221,10 @@ export default function CustomerRecord({ session }: { session: Session }) {
   const [invRows, setInvRows] = useState<InvRow[]>([]);
   const [payRows, setPayRows] = useState<PayRow[]>([]);
   const [addresses, setAddresses] = useState<Address[]>([]);
-  const [ordStatus, setOrdStatus] = useState('');
+  const [ordStatus, setOrdStatus] = useState<string[]>([]);
   /** The Transactions tab's filters (12 Oct 2026). */
-  const [txType, setTxType] = useState('');
-  const [txStatus, setTxStatus] = useState('');
+  const [txType, setTxType] = useState<string[]>([]);
+  const [txStatus, setTxStatus] = useState<string[]>([]);
   const [txRange, setTxRange] = useState('');
   const [txFrom, setTxFrom] = useState('');
   const [txTo, setTxTo] = useState('');
@@ -274,9 +274,9 @@ export default function CustomerRecord({ session }: { session: Session }) {
   const inRange = (t: Tx) => (txRange === 'month' ? t.date >= monthStart && t.date <= today
     : txRange === 'last' ? t.date >= lastMonthStart && t.date <= lastMonthEnd
       : txRange === 'custom' ? (!txFrom || t.date >= txFrom) && (!txTo || t.date <= txTo) : true);
-  const ofType = (t: Tx) => (!txType ? true : txType === 'payment' ? t.kind === 'payment' || t.kind === 'reversal' : t.kind === txType);
-  const ofStatus = (t: Tx) => {
-    if (!txStatus) return true;
+  const ofType = (t: Tx) => passes(txType, (v) => (v === 'payment' ? t.kind === 'payment' || t.kind === 'reversal' : t.kind === v));
+  const ofStatus = (t: Tx) => passes(txStatus, (v) => ofOneStatus(t, v));
+  const ofOneStatus = (t: Tx, txStatus: string) => {
     if (t.kind === 'invoice' || t.kind === 'credit') {
       if (txStatus === 'unsent') return t.kind === 'invoice' && invoiceState(t.invoice!) === 'Open';
       if (txStatus === 'account' || txStatus === 'reversed') return false;
@@ -300,12 +300,9 @@ export default function CustomerRecord({ session }: { session: Session }) {
   const tickedOwed = tickedInvoices.filter((t) => t.openCents > 0);
   const tickedPayRows = tickedTx.filter((t) => t.kind === 'payment' && t.reversed !== 'all')
     .flatMap((t) => (t.rows ?? []).filter((r) => !r.reversed && Number(r.amount_cents) > 0).map((r) => r.id));
-  const filtered = !!(txType || txStatus || txRange);
+  const filtered = !!(txType.length || txStatus.length || txRange);
 
-  const ordRows = (h?.orders ?? []).filter((o) => (!ordStatus ? true
-    : ordStatus === 'waiting' ? o.status === 'Pending' || o.status === 'Partially Delivered'
-      : ordStatus === 'part' ? o.status === 'Partially Delivered'
-        : ordStatus === 'review' ? !!o.needs_review : o.status === ordStatus));
+  const ordRows = (h?.orders ?? []).filter((o) => passes(ordStatus, (v) => orderStage(o) === v));
   const ordSort = useSort(ordRows, {
     number: (o) => o.order_number,
     date: (o) => date(o.fulfilled_on ?? o.requested_delivery_date ?? o.order_date),
@@ -793,7 +790,7 @@ export default function CustomerRecord({ session }: { session: Session }) {
         <aside className="money-sum" aria-label="Money summary">
           <div className="money-sum-title">Money summary</div>
           <button type="button" className="sum-btn"
-                  onClick={() => { setTab('transactions'); setTxType('invoice'); setTxStatus('open'); setTxRange(''); }}>
+                  onClick={() => { setTab('transactions'); setTxType(['invoice']); setTxStatus(['open']); setTxRange(''); }}>
             <span className="sum-k"><span className="dot owe" aria-hidden="true" />{h.balanceCents < 0 ? 'In credit' : 'Open balance'}</span>
             <span className="sum-v">{money(Math.abs(h.balanceCents))}</span>
             <span className="sum-s">
@@ -803,7 +800,7 @@ export default function CustomerRecord({ session }: { session: Session }) {
             </span>
           </button>
           <button type="button" className="sum-btn"
-                  onClick={() => { setTab('transactions'); setTxType('invoice'); setTxStatus('overdue'); setTxRange(''); }}>
+                  onClick={() => { setTab('transactions'); setTxType(['invoice']); setTxStatus(['overdue']); setTxRange(''); }}>
             <span className="sum-k"><span className="dot late" aria-hidden="true" />Overdue</span>
             <span className={`sum-v${(h.overdueCents ?? 0) > 0 ? ' bad' : ''}`}>{money(h.overdueCents ?? 0)}</span>
             <span className="sum-s">
@@ -1057,7 +1054,7 @@ export default function CustomerRecord({ session }: { session: Session }) {
             <Link className="small" to={`/orders/new?customer=${c.id}`}>New order for {c.name}</Link>
           </div>
           <div className="row">
-            <StatusSelect id="c-ord-st" value={ordStatus} onChange={setOrdStatus} options={ORDER_FILTERS} />
+            <MultiStatusSelect id="c-ord-st" value={ordStatus} onChange={setOrdStatus} options={ORDER_FILTERS} />
           </div>
           <table>
             <thead>
@@ -1169,8 +1166,8 @@ export default function CustomerRecord({ session }: { session: Session }) {
                         ]} />
             </div>
             <div className="tx-filters">
-              <StatusSelect id="tx-type" label="Type" value={txType} onChange={setTxType} options={TX_TYPES} />
-              <StatusSelect id="tx-status" value={txStatus} onChange={setTxStatus} options={TX_STATUS} />
+              <MultiStatusSelect id="tx-type" label="Type" value={txType} onChange={setTxType} options={TX_TYPES} />
+              <MultiStatusSelect id="tx-status" value={txStatus} onChange={setTxStatus} options={TX_STATUS} />
               <StatusSelect id="tx-date" label="Date" value={txRange} onChange={setTxRange} options={TX_DATES} />
               {txRange === 'custom' && (
                 <>
@@ -1186,7 +1183,7 @@ export default function CustomerRecord({ session }: { session: Session }) {
               )}
               {filtered && (
                 <button type="button" className="as-link small tx-clear"
-                        onClick={() => { setTxType(''); setTxStatus(''); setTxRange(''); }}>Clear filters</button>
+                        onClick={() => { setTxType([]); setTxStatus([]); setTxRange(''); }}>Clear filters</button>
               )}
               <div className="tx-right">
                 <label className="check">

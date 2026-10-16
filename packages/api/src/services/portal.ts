@@ -15,6 +15,7 @@ import type { Actor } from './core.ts';
 import { audit } from './core.ts';
 import { RuleViolation, composeAddress } from '@alka/shared';
 import { accountPosition } from './customers.ts';
+import { ORDER_EVENTS } from './orders.ts';
 
 export async function getMyProfile(db: Db, customerId: string) {
   const c = await db.one<Record<string, unknown>>(
@@ -148,4 +149,86 @@ export async function removeMyAddress(db: Db, actor: Actor, customerId: string, 
     if (r.length === 0) throw new RuleViolation('that address could not be found on your account');
     await audit(t, actor, 'delete', 'CustomerAddress', addressId, addressId, { byCustomer: true });
   });
+}
+
+/* ------------------------------------------------------------------ */
+/* Order History details (Everton, 15 Oct 2026)                        */
+/* ------------------------------------------------------------------ */
+
+const lineSql = `
+  SELECT p.name AS product_name, p.bottles_per_case, p.is_bottle_charge,
+         oli.cases, oli.loose_bottles, oli.price_per_case_cents, oli.price_per_bottle_cents,
+         oli.delivered_cases, oli.delivered_loose,
+         (oli.cases * oli.price_per_case_cents + oli.loose_bottles * oli.price_per_bottle_cents)::bigint AS line_total_cents
+  FROM order_line_items oli JOIN products p ON p.id = oli.product_id
+  WHERE oli.order_id = $1
+  ORDER BY p.is_bottle_charge, p.name`;
+
+/** Where an order goes, in words: the chosen delivery address, else the main one. */
+async function orderAddress(db: Db, addressId: string | null, customerId: string): Promise<{ label: string | null; line: string | null }> {
+  if (addressId) {
+    const a = await db.maybeOne<{ label: string; address_line1: string | null; address_line2: string | null; city: string | null; parish: string | null }>(
+      `SELECT label, address_line1, address_line2, city, parish FROM customer_addresses WHERE id = $1 AND customer_id = $2`,
+      [addressId, customerId],
+    );
+    if (a) return { label: a.label, line: composeAddress({ addressLine1: a.address_line1, addressLine2: a.address_line2, city: a.city, parish: a.parish }) };
+  }
+  const c = await db.one<{ delivery_address: string | null }>(`SELECT delivery_address FROM customers WHERE id = $1`, [customerId]);
+  return { label: null, line: c.delivery_address };
+}
+
+/**
+ * One of the customer's own orders, everything the details page shows: what
+ * was ordered at what price, where and when it goes, the totals, and the
+ * invoice it went on once delivered. Somebody else's order reads the same as
+ * one that is not there.
+ */
+export async function myOrderDetail(db: Db, customerId: string, orderId: string) {
+  const o = await db.maybeOne<Record<string, unknown> & { customer_id: string; address_id: string | null }>(
+    `SELECT o.id, o.order_number, o.customer_id, o.order_date::text AS order_date,
+            o.requested_delivery_date::text AS requested_delivery_date, o.status, o.delivery_mode,
+            o.notes, o.customer_po, o.needs_review, o.address_id, o.source,
+            o.subtotal_cents, o.discount_amount_cents, o.gct_cents, o.grand_total_cents, o.gct_exempt,
+            o.is_recurring, o.recurrence_pattern, o.parent_recurring_id, o.empties_expected,
+            o.fulfilled_on::text AS fulfilled_on, ${ORDER_EVENTS} AS events,
+            EXISTS (SELECT 1 FROM delivery_stops s JOIN delivery_sheets d ON d.id = s.delivery_sheet_id
+                     WHERE s.order_id = o.id AND d.status = 'Open' AND d.started_at IS NOT NULL
+                       AND s.stop_outcome = 'Pending') AS sheet_started
+     FROM customer_orders o WHERE o.id = $1`, [orderId],
+  );
+  if (!o || o.customer_id !== customerId) throw new RuleViolation('that order could not be found on your account');
+  const lines = await db.query(lineSql, [orderId]);
+  const invoices = await db.query(
+    `SELECT l.invoice_id, l.invoice_number, l.invoice_date::text AS invoice_date,
+            l.grand_total_cents, l.balance_cents, l.status
+     FROM invoice_orders io JOIN invoice_ledger l ON l.invoice_id = io.invoice_id
+     WHERE io.order_id = $1 AND NOT l.is_credit_note ORDER BY l.invoice_date`, [orderId],
+  );
+  const address = o.delivery_mode === 'Delivery' ? await orderAddress(db, o.address_id, customerId) : { label: null, line: null };
+  return { ...o, lines, invoices, address };
+}
+
+/**
+ * One of the customer's own standing orders: how often, the next one, what
+ * each one carries (from the order it was made from), and the orders it has
+ * raised so far.
+ */
+export async function myScheduleDetail(db: Db, customerId: string, scheduleId: string) {
+  const s = await db.maybeOne<Record<string, unknown> & { customer_id: string; address_id: string | null; delivery_mode: string }>(
+    `SELECT o.id, o.order_number, o.customer_id, o.recurrence_pattern AS pattern,
+            o.next_delivery_date::text AS next_delivery_date, o.recurrence_paused AS paused,
+            o.recurrence_ends_on::text AS ends_on, o.delivery_mode, o.address_id, o.notes,
+            o.order_date::text AS order_date, o.subtotal_cents, o.gct_cents, o.grand_total_cents
+     FROM customer_orders o
+     WHERE o.id = $1 AND o.is_recurring AND o.parent_recurring_id IS NULL`, [scheduleId],
+  );
+  if (!s || s.customer_id !== customerId) throw new RuleViolation('that standing order could not be found on your account');
+  const lines = await db.query(lineSql, [scheduleId]);
+  const raised = await db.query(
+    `SELECT id, order_number, requested_delivery_date::text AS requested_delivery_date, status, grand_total_cents
+     FROM customer_orders WHERE parent_recurring_id = $1 OR id = $1
+     ORDER BY requested_delivery_date DESC NULLS LAST, order_number DESC LIMIT 12`, [scheduleId],
+  );
+  const address = s.delivery_mode === 'Delivery' ? await orderAddress(db, s.address_id, customerId) : { label: null, line: null };
+  return { ...s, lines, raised, address };
 }

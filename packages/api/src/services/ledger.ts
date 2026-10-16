@@ -47,6 +47,29 @@ export function asStatementStatus(v: unknown): StatementStatus | null {
   return (STATEMENT_STATUSES as readonly string[]).includes(String(v)) ? (v as StatementStatus) : null;
 }
 
+/**
+ * Several states at once (15 Oct 2026, multi-select status filters):
+ * "Open,Overdue" or an array. Unknown words are dropped; none left is all.
+ */
+export function asStatementStatuses(v: unknown): StatementStatus[] {
+  const parts = Array.isArray(v) ? v.map(String) : String(v ?? '').split(',');
+  const out: StatementStatus[] = [];
+  for (const p of parts) {
+    const st = asStatementStatus(p.trim());
+    if (st && !out.includes(st)) out.push(st);
+  }
+  return out;
+}
+
+/** The ids of this customer's invoices in ANY of the states given. */
+export async function invoicesInStatuses(
+  db: Queryable, customerId: string, statuses: readonly StatementStatus[],
+): Promise<string[]> {
+  const ids = new Set<string>();
+  for (const st of statuses) for (const id of await invoicesInStatus(db, customerId, st)) ids.add(id);
+  return [...ids];
+}
+
 /** The ids of this customer's invoices in a state; the SQL is the definition above. */
 export async function invoicesInStatus(
   db: Queryable, customerId: string, status: StatementStatus,
@@ -80,8 +103,9 @@ export interface Statement {
   customerName: string;
   from: string | null;
   to: string | null;
-  /** When narrowed to invoices in one state. */
-  status: StatementStatus | null;
+  /** When narrowed to invoices in some states: their names, "Open or Overdue". */
+  status: string | null;
+  statuses: StatementStatus[];
   openingBalanceCents: Cents;
   closingBalanceCents: Cents;
   entries: StatementEntry[];
@@ -91,11 +115,12 @@ export async function getStatement(
   db: Db,
   customerId: string,
   opts: { from?: string | null; to?: string | null; filter?: StatementFilter;
-          status?: StatementStatus | string | null } = {},
+          status?: StatementStatus | string | string[] | null } = {},
 ): Promise<Statement> {
   const filter = opts.filter ?? 'All';
-  const status = asStatementStatus(opts.status);
-  const only = status ? new Set(await invoicesInStatus(db, customerId, status)) : null;
+  const statuses = asStatementStatuses(opts.status);
+  const status = statuses.length ? statuses.join(' or ') : null;
+  const only = statuses.length ? new Set(await invoicesInStatuses(db, customerId, statuses)) : null;
   const from = opts.from ?? null;
   const to = opts.to ?? null;
 
@@ -232,7 +257,7 @@ export async function getStatement(
   return {
     customerId,
     customerName: customer.name,
-    from, to, status,
+    from, to, status, statuses,
     openingBalanceCents: opening,
     closingBalanceCents: running,
     entries,

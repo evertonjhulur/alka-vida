@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { api } from '../lib/api';
 import { money, date, when } from '../lib/format';
-import { SortTh, useSort } from '../components/ListTools';
+import { MultiStatusSelect, SortTh, useSort } from '../components/ListTools';
 
 interface Entry {
   date: string;
@@ -48,7 +48,7 @@ export function StatementView(
   const [from, setFrom] = useState('');
   const [to, setTo] = useState('');
   const [filter, setFilter] = useState<(typeof FILTERS)[number]>('All');
-  const [state, setState] = useState<(typeof STATES)[number]>('');
+  const [state, setState] = useState<string[]>([]);
   const [data, setData] = useState<StatementData | null>(null);
   const [bottles, setBottles] = useState<BottleAccount | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -69,7 +69,7 @@ export function StatementView(
     const q = new URLSearchParams({ filter });
     if (from) q.set('from', from);
     if (to) q.set('to', to);
-    if (state) q.set('status', state);
+    if (state.length) q.set('status', state.join(','));
     api.get<StatementData>(`/api/customers/${selected}/statement?${q}`)
       .then((d) => { setData(d); setError(null); })
       .catch((e) => setError(e.message));
@@ -97,7 +97,7 @@ export function StatementView(
       if (from) params.set('from', from);
       if (to) params.set('to', to);
       if (filter !== 'All') params.set('filter', filter);
-      if (state) params.set('status', state);
+      if (state.length) params.set('status', state.join(','));
       const blob = await api.getBlob(
         `/api/customers/${selected}/statement.pdf?${params.toString()}`,
       );
@@ -129,7 +129,7 @@ export function StatementView(
     const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv' }));
     const a = document.createElement('a');
     a.href = url;
-    a.download = `statement-${data.customerName.replace(/\W+/g, '-')}${state ? `-${state.replace(/\W+/g, '-')}` : ''}.csv`;
+    a.download = `statement-${data.customerName.replace(/\W+/g, '-')}${state.length ? `-${state.join('-').replace(/\W+/g, '-')}` : ''}.csv`;
     a.click();
     URL.revokeObjectURL(url);
   }
@@ -163,13 +163,8 @@ export function StatementView(
               {FILTERS.map((f) => <option key={f} value={f}>{f}</option>)}
             </select>
           </div>
-          <div className="field">
-            <label htmlFor="state">Invoices</label>
-            <select id="state" value={state}
-                    onChange={(e) => setState(e.target.value as typeof state)}>
-              {STATES.map((s) => <option key={s} value={s}>{s || 'Any state'}</option>)}
-            </select>
-          </div>
+          <MultiStatusSelect id="state" label="Invoices" value={state} onChange={setState}
+                             options={STATES.map((s) => [s, s || 'Any state'] as const)} />
           <div className="field">
             <button className="secondary" disabled={!data} onClick={exportCsv}>
               Export to Excel
@@ -201,7 +196,7 @@ export function StatementView(
         <div className="panel">
           <h2 style={{ marginTop: 0 }}>
             {data.customerName}
-            {state && <span className="chip info" style={{ marginLeft: 8, verticalAlign: 'middle' }}>{state} invoices only</span>}
+            {state.length > 0 && <span className="chip info" style={{ marginLeft: 8, verticalAlign: 'middle' }}>{state.join(' or ')} invoices only</span>}
           </h2>
           {/*
             * A statement stays a TABLE on a phone, unlike the order and
@@ -279,7 +274,7 @@ export function StatementView(
             {/* Paid more than invoiced is IN CREDIT. "Balance due -$275" is a
                 sentence nobody should have to decode, and the printed
                 statement says it the same way. */}
-            <span>{data.closingBalanceCents < 0 ? 'In credit' : state ? `Balance on ${state.toLowerCase()} invoices` : 'Balance due'}</span>
+            <span>{data.closingBalanceCents < 0 ? 'In credit' : state.length ? `Balance on ${state.join(' or ').toLowerCase()} invoices` : 'Balance due'}</span>
             <span>{money(Math.abs(data.closingBalanceCents))}</span>
           </div>
         </div>

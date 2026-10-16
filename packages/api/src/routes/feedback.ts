@@ -133,18 +133,23 @@ export function registerFeedbackRoutes(
 
   /* ---------------- stock ---------------- */
 
-  app.get('/api/stock/snapshot', office, async () => audits.stockSnapshot(db));
+  app.get('/api/stock/snapshot', office, async (req) =>
+    audits.stockSnapshot(db, (req.query as { asOf?: string }).asOf || null));
 
   // Several counts in one go, from the count sheet. Each is checked on its
   // own; the ones that pass are saved and the rest come back with why.
+  // One date for the whole sheet (it can be an earlier day), and saving
+  // applies them to stock (Everton, 15 Oct 2026).
   app.post('/api/audits/batch', office, async (req) => {
-    const b = (req.body ?? {}) as { counts?: audits.CountInput[] };
-    const saved: Array<{ itemId: string; id: string; discrepancy: number }> = [];
+    const b = (req.body ?? {}) as { counts?: audits.CountInput[]; countDate?: string | null; apply?: boolean };
+    const saved: Array<{ itemId: string; id: string; discrepancy: number; adjusted: number | null }> = [];
     const problems: Array<{ itemId: string; message: string }> = [];
     for (const c of b.counts ?? []) {
       try {
-        const r = await audits.recordCount(db, actorOf(req as Req), c);
-        saved.push({ itemId: c.itemId, id: r.id, discrepancy: r.discrepancy });
+        const r = await audits.recordCount(db, actorOf(req as Req), {
+          ...c, countDate: c.countDate ?? b.countDate ?? null, apply: c.apply ?? b.apply !== false,
+        });
+        saved.push({ itemId: c.itemId, id: r.id, discrepancy: r.discrepancy, adjusted: r.adjusted });
       } catch (err) {
         problems.push({ itemId: c.itemId, message: (err as Error).message });
       }

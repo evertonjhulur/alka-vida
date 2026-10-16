@@ -2,7 +2,8 @@ import { Fragment, useEffect, useState, type ReactNode } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { api } from '../lib/api';
 import { askText } from '../components/Dialog';
-import { BatchBar, SortTh, StatusSelect, TickAllTh, TickTd, useSort, useTicks } from '../components/ListTools';
+import { BatchBar, MultiStatusSelect, SortTh, TickAllTh, TickTd, passes, useSort, useTicks } from '../components/ListTools';
+import { OPEN_STAGES, ORDER_STAGES, orderStage } from '../lib/orderStatus';
 import { downloadCsv, dollars } from '../lib/csv';
 import { payMethods, useTakeCard } from '../lib/payments';
 import { money, date, day, relDay, toCents, todayInJamaica } from '../lib/format';
@@ -45,20 +46,12 @@ interface OrderLine {
   price_per_case_cents: number; price_per_bottle_cents: number;
 }
 
-type Show = 'waiting' | 'delivered' | 'cancelled' | 'all' | 'onround' | 'needsround' | 'collect' | 'late' | 'part' | 'review';
-/** The Status drop-down (Everton, 11 Oct 2026: a drop-down, not buttons). */
-const ORDER_SHOW: ReadonlyArray<readonly [Show, string]> = [
-  ['waiting', 'Waiting (not delivered yet)'],
-  ['onround', '· On a round or on the road'],
-  ['needsround', '· Needs a round'],
-  ['collect', '· To collect'],
-  ['late', '· Late, missed or not collected'],
-  ['part', '· Part delivered'],
-  ['review', '· Needs approval'],
-  ['delivered', 'Delivered, collected or sold'],
-  ['cancelled', 'Cancelled'],
-  ['all', 'Any status'],
-];
+/**
+ * The Status drop-down (Everton, 11 Oct 2026: a drop-down, not buttons;
+ * 15 Oct 2026: Ready, Out for Delivery, Partially Delivered, Delivered and
+ * Cancelled, several at once). Nothing ticked is any status.
+ */
+const ORDER_SHOW: ReadonlyArray<readonly [string, string]> = [['', 'Any status'], ...ORDER_STAGES];
 type When = 'any' | 'today' | 'week' | 'late' | 'range';
 type Panel = 'collect' | 'repeat' | 'offround' | 'cancel';
 
@@ -94,7 +87,7 @@ function standing(o: Order, today: string): { label: string; tone: string } {
     return { label: `Missed ${relDay(o.sheet_date, today)}`, tone: 'bad' };
   }
   if (o.stop_id && o.sheet_status === 'Open') {
-    if (o.sheet_started) return { label: 'On the road', tone: 'info' };
+    if (o.sheet_started) return { label: 'Out for delivery', tone: 'info' };
     if (o.sheet_date && date(o.sheet_date) < today) return { label: 'Late', tone: 'bad' };
     return { label: 'On a round', tone: 'info' };
   }
@@ -127,7 +120,7 @@ export default function Orders() {
   const [busy, setBusy] = useState(false);
 
   const [find, setFind] = useState(params.get('find') ?? '');
-  const [show, setShow] = useState<Show>(params.get('find') ? 'all' : 'waiting');
+  const [show, setShow] = useState<string[]>(params.get('find') ? [] : [...OPEN_STAGES]);
   /** A date range (team feedback, point 10.1), on the delivery date or the day placed. */
   const [range, setRange] = useState({ from: '', to: '', by: 'delivery' as 'delivery' | 'placed' });
   const [poEdit, setPoEdit] = useState('');
@@ -341,21 +334,7 @@ export default function Orders() {
     return d.toISOString().slice(0, 10);
   })();
   const needle = find.trim().toLowerCase();
-  const byStatus = (o: Order) => {
-    const label = standing(o, today).label;
-    switch (show) {
-      case 'waiting': return waiting(o);
-      case 'delivered': return o.status === 'Delivered';
-      case 'cancelled': return o.status === 'Cancelled';
-      case 'onround': return label === 'On a round' || label === 'On the road';
-      case 'needsround': return label === 'Needs a round';
-      case 'collect': return waiting(o) && o.delivery_mode === 'Pickup';
-      case 'late': return label === 'Late' || label.startsWith('Missed') || label === 'Not collected yet';
-      case 'part': return o.status === 'Partially Delivered';
-      case 'review': return !!o.needs_review && waiting(o);
-      default: return true;
-    }
-  };
+  const byStatus = (o: Order) => passes(show, (v) => orderStage(o) === v);
   const forDay = (o: Order) => (o.requested_delivery_date ? date(o.requested_delivery_date) : date(o.order_date));
   const byWhen = (o: Order) => {
     const d = forDay(o);
@@ -368,12 +347,14 @@ export default function Orders() {
     }
     return true;
   };
+  // Only unfinished orders ticked: soonest first, as the old Waiting list was.
+  const openOnly = show.length > 0 && show.every((v) => (OPEN_STAGES as string[]).includes(v));
   const shown = orders
     .filter((o) => byStatus(o) && byWhen(o)
       && (how === '' || o.delivery_mode === how)
       && (!needle || o.order_number.toLowerCase().includes(needle)
         || o.customer_name.toLowerCase().includes(needle)))
-    .sort((a, b) => (show === 'waiting'
+    .sort((a, b) => (openOnly
       ? forDay(a).localeCompare(forDay(b)) || a.order_number.localeCompare(b.order_number)
       : 0));
   // Sorting by a heading (11 Oct 2026); until one is clicked, the order above.
@@ -696,7 +677,7 @@ export default function Orders() {
             <input id="find" type="search" placeholder="Order number or customer"
                    value={find} onChange={(e) => { setFind(e.target.value); setLimit(50); }} />
           </div>
-          <StatusSelect id="ord-st" value={show} onChange={(v) => { setShow(v as Show); setLimit(50); }} options={ORDER_SHOW} />
+          <MultiStatusSelect id="ord-st" value={show} onChange={(v) => { setShow(v); setLimit(50); }} options={ORDER_SHOW} />
           <div className="field">
             <label htmlFor="kind">How</label>
             <select id="kind" value={how} onChange={(e) => setHow(e.target.value)}>
@@ -831,7 +812,7 @@ export default function Orders() {
         )}
         <div className="list-foot">
           <span>
-            {page.length} of {shown.length} {sort ? 'shown' : show === 'waiting' ? 'waiting · soonest first' : 'shown · newest first'}
+            {page.length} of {shown.length} {sort ? 'shown' : openOnly ? 'not finished · soonest first' : 'shown · newest first'}
           </span>
           {shown.length > page.length && (
             <button type="button" className="secondary" onClick={() => setLimit(limit + 50)}>Show more</button>

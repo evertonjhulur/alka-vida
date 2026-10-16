@@ -515,6 +515,27 @@ export async function endOwnSchedule(
 }
 
 /**
+ * A customer changing their own standing order from Order History (Everton,
+ * 15 Oct 2026): how often it comes and the date of the next one. What each
+ * one carries is the order it was made from, which may already have been
+ * delivered, so the quantities are the office's to change.
+ */
+export async function updateOwnSchedule(
+  db: Db, actor: Actor, customerId: string, scheduleId: string,
+  changes: { pattern?: RecurrencePattern; nextDeliveryDate?: string | null },
+): Promise<void> {
+  await assertOwnSchedule(db, customerId, scheduleId);
+  const pattern = changes.pattern && (['Weekly', 'Biweekly', 'Monthly'] as const).includes(changes.pattern)
+    ? changes.pattern : undefined;
+  const next = changes.nextDeliveryDate?.trim() || undefined;
+  if (next && next < await businessToday(db)) {
+    throw new RuleViolation('the next delivery cannot be on a day that has passed');
+  }
+  if (!pattern && !next) throw new RuleViolation('nothing to change');
+  await updateSchedule(db, actor, scheduleId, { pattern, nextDeliveryDate: next });
+}
+
+/**
  * Standing orders expected on a day that have not been raised yet (team
  * feedback, 1 Oct 2026, point 16: "standing orders do not appear on the
  * delivery rounds").

@@ -11,7 +11,9 @@ security), then the UX review build of 11 Oct 2026 (shorter pinned menu with tab
 dialog, tidy-ups, customer Details in four parts), then the New sale screen of 11 Oct 2026
 (one screen, product then size, payment at the end, credit used first) and the lists round (status
 drop-downs, sort by heading, batch actions), then messages to customers chosen by name and the customer page redesign with payment numbers
-(12 Oct 2026). See the last entries at the end.
+(12 Oct 2026), then Everton's round of 15 Oct 2026 (order statuses, oldest-first driver money,
+dated stock counts applied on save, portal Order History, audit log, multi-select status
+filters, counter-sale receipts). See the last entries at the end.
 
 ---
 
@@ -52,7 +54,7 @@ Working and verified end to end, in the browser as well as in tests:
 | Addresses | Line 1, line 2, town, parish. Composed into `delivery_address`, which stays what the stop and the invoice PDF read (migration 014). |
 | Employees & labour cost | Who works here, paid by the hour or by the trip, and the hours/trips recorded against them. Payroll totals for any date range. **Add from logins** creates a record per existing login — title from the role (`admin`→Manager, `user`→Employee, `driver`→Driver), rate left blank — and is safe to press twice. **Deliberately not wired into costing** (migration 015). A person is managed on their own record at `/employees/:id` — details, rate, and their own work history. |
 
-**Tests: 546 passing** (12 Oct 2026) — 68 pure domain (`packages/shared`), 474 API, 4 web (`packages/web/test`)
+**Tests: 558 passing** (15 Oct 2026) — 68 pure domain (`packages/shared`), 474 API, 4 web (`packages/web/test`)
 (`packages/api`, against real PostgreSQL via PGlite).
 
 ```bash
@@ -215,7 +217,10 @@ Load-bearing. Each corresponds to a real bug and is pinned by a named test.
    view from Confirmed payments. Do not add it back.
 2. **`planPayments` is the only way delivery activity becomes Payments.** Never
    add a second "detect an overpayment and split it" rule — that duplication is
-   what produced phantom credit before.
+   what produced phantom credit before. Since 15 Oct 2026 money the driver did
+   not split goes to the oldest open invoice first: `settlement.oldestFirst`
+   turns it into more allocation INPUTS before the plan, so it is still one
+   plan, one loop.
 3. **Marking a stop Delivered must always succeed.** No payment validation may
    be reachable from `markStop`.
 4. **Amounts shown to a driver are tax-inclusive**, always.
@@ -253,9 +258,11 @@ Load-bearing. Each corresponds to a real bug and is pinned by a named test.
     legitimate character in a password and stripping it locks people out. A
     trailing space on an address is a keyboard artefact and refusing it is
     indistinguishable, to the person, from the password being wrong.
-16. **A stock count is refused once stock has moved under it**, because
-    confirming writes the counted figure outright rather than applying a
-    difference. The override is deliberate and is recorded on the count.
+16. **A stock count never overwrites stock that moved after it.** (15 Oct
+    2026; it used to be refused.) Applying works to a target: the counted
+    usable figure PLUS the net movement since `counted_at`. That is what lets
+    a count be dated to an earlier day. `evenThoughStockMoved` still forces
+    the old outright overwrite, and says so on the count.
 17. **Work cannot be recorded against an employee whose rate is zero.** A zero
     is a blank nobody has filled in — everyone brought across by "Add from
     logins" starts that way — and costing their week at nothing would look
@@ -1490,3 +1497,96 @@ invoice a payment went against rather than its number.
 
 Tests: 546 (68 shared + 474 API + 4 web). New: `api/test/paymentnumbers.test.ts`
 (7), `web/test/transactions.test.ts` (4); `web` has a `test` script now.
+
+### Everton's round, 15 Oct 2026
+
+Screenshots he sent: portal news picture cropped, Place an order (where the
+standing-order switch goes), My orders with the action buttons circled, and
+Saks' Order History + order page as the model.
+
+**Orders screen statuses.** The Status filter is now Ready, Out for Delivery,
+Partially Delivered, Delivered, Cancelled (`web/src/lib/orderStatus.ts`,
+`orderStage`). His ruling: Ready = taken but not on the road yet (needs a
+round, on a round not started, or to collect); Out for Delivery = on a round
+the driver has started. "Waiting (not delivered yet)" and its sub-filters
+are gone; the default ticks Ready + Out + Partially Delivered (soonest first).
+The row chip "On the road" now reads "Out for delivery". Customer page ›
+Orders uses the same five (history query gained `sheet_started`).
+
+**Multi-select status filters, everywhere** (`MultiStatusSelect` + `passes`
+in `components/ListTools.tsx`): Orders, customer page (Orders; Transactions
+type and status), Invoices, Payments received, Credit notes, Quotes (default
+Draft + Sent), Purchase orders, Standing orders, Delivery rounds, Statement
+and the Statement… dialog. Nothing ticked = any. Statements take several
+states server-side: `status=Open,Overdue` (`ledger.asStatementStatuses`,
+`invoicesInStatuses`; `Statement.status` is now the joined words and
+`statuses` the list). `StatusSelect` (single) is still used for the
+Transactions date choice.
+
+**Purchasing.** "Still to come" removed from the PO status filter (tick
+Draft + Sent + Partially received instead).
+
+**Rounds: money the driver did not split** goes to the customer's OLDEST open
+invoice first, then the next; if only this delivery's invoice is open it goes
+there; anything left after every open invoice stays on the account
+(`settlement.oldestFirst`, used by `settleStop` and shown in the settlement
+review as `autoApplied`, "oldest first:" in the Applied to column). A split
+the driver did make stands; only the rest goes oldest first. Driver screen
+and settlement panel say so. Acceptance scenario 3 now expects the excess on
+older invoices first (the no-phantom-duplicate check is unchanged).
+
+**Stock count.** "Date of count" on the count sheet (today, or an earlier
+day; not the future). Saving applies at once, for anyone in the office (his
+ruling, changing his first answer): `/api/audits/batch` takes `countDate` and
+`apply` (default true). A past day is measured at the end of that day in
+Jamaica: `system_qty` = stock then (now less movements since), and applying
+carries the movements since forward (invariant 16). The sheet shows "System
+had on <day>" figures from `/api/stock/snapshot?asOf=`. `POST /api/audits`
+on its own still records an Open count for an admin to apply.
+
+**Portal.**
+- News pictures: shown whole and centred (`object-fit: contain`, taller lead).
+  Uploads sharper: up to 2400px, 92% JPEG, stepped downscaling; a picture
+  already small enough (<= 2,200,000 bytes and 2400px) is kept untouched.
+- Place an order: "Make this a standing order" switch top right (as on the
+  office New order), with Weekly / Every 2 weeks / Monthly. Sent as `repeat`
+  on POST /api/orders; the route sets it up after the order is safe
+  (`startOwnSchedule`) and returns `standing` or `standingError`. A
+  collection needs a date to count from.
+- "My orders" is now **Order History** (`pages/PortalOrders.tsx`), Saks-style:
+  All / Pending / Completed / Standing orders radios, a period drop-down, one
+  row per order (date, number, items, total, status in bold, a bottle tile,
+  › arrow). No buttons on the list. The "Standing orders" menu item is gone
+  (`/portal/repeats` and `?show=standing` open that filter); the explainer
+  text he quoted is removed.
+- `/portal/orders/:id` — the order's page: date | number | status, Make it a
+  standing order and Cancel order on the right (only before it goes out),
+  Items with price and delivered state, Order details (address, date, PO,
+  empties, note, invoice link) and Order summary. `GET /api/portal/orders/:id`
+  (`portal.myOrderDetail`).
+- `/portal/standing/:id` — a standing order's page: Edit (how often, next
+  date: `POST /api/portal/recurring/:id/update`, `recurring.updateOwnSchedule`),
+  Pause / Start again, Cancel standing order, what comes each time, the
+  orders it raised. Quantities are not editable by the customer (the template
+  order may already be delivered): the page says to call or WhatsApp.
+
+**Audit log** — Settings › Audit log (admin only, `/settings/audit-log`,
+`pages/AuditLog.tsx`, `services/auditlog.ts`, `GET /api/audit-log` and
+`/api/audit-log/filters`). Reads `audit_log`: date range (last 7 days to
+start), who, record type and action (multi), free-text find (label, details,
+name), Show more (cursor `before`), Export. Internal ids are hidden from the
+details; records with a page are linked.
+
+**Counter sale / walk-in receipt** is a SALES RECEIPT (`paperwork.drawSalesReceipt`,
+chosen in `drawReceipt` when a payment is on a Counter order's invoice):
+items with qty, unit price, amount; subtotal, discount, GCT, total; "Paid by
+<method>", anything else paid at the same time, "Still to pay" or "Paid in
+full"; account balance only for account customers. Emailed receipts use the
+same PDF. The walk-in record's placeholder phone is not printed.
+
+Tests: 558 (68 shared + 486 API + 4 web). New `api/test/oct15.test.ts` (12);
+`inventory.test.ts` movement tests rewritten for carry-forward.
+
+Not done / to watch: the settlement review's oldest-first preview and the
+real settlement agree because both read the ledger, but a payment taken in
+the office between review and settlement changes where the money goes.

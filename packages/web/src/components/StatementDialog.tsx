@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { api } from '../lib/api';
 import { money, todayInJamaica, when } from '../lib/format';
 import CustomerPicker, { type PickerCustomer } from './CustomerPicker';
+import { MultiStatusSelect } from './ListTools';
 
 /**
  * Statement… (UX review, 10-11 Oct 2026). Everton: "the customer screen
@@ -67,7 +68,7 @@ export default function StatementDialog({
   const [from, setFrom] = useState(periodDates('this-month').from);
   const [to, setTo] = useState(periodDates('this-month').to);
   const [show, setShow] = useState<(typeof SHOW)[number]>('All');
-  const [state, setState] = useState<(typeof STATES)[number]>('');
+  const [state, setState] = useState<string[]>([]);
   const [emailing, setEmailing] = useState(false);
   const [sendTo, setSendTo] = useState('');
   const [preview, setPreview] = useState<Preview | null>(null);
@@ -95,7 +96,7 @@ export default function StatementDialog({
     if (from) q.set('from', from);
     if (to) q.set('to', to);
     if (show !== 'All') q.set('filter', show);
-    if (state) q.set('status', state);
+    if (state.length) q.set('status', state.join(','));
     return q;
   };
 
@@ -141,7 +142,7 @@ export default function StatementDialog({
     try {
       const r = await api.post<{ sentTo: string }>(`/api/customers/${customerId}/statement/email`, {
         from: from || undefined, to: to || undefined,
-        filter: show !== 'All' ? show : undefined, status: state || undefined,
+        filter: show !== 'All' ? show : undefined, status: state.length ? state.join(',') : undefined,
         sendTo: sendTo.trim() || undefined,
       });
       onDone(`Statement for ${name}, ${span}, emailed to ${r.sentTo}.`);
@@ -199,12 +200,8 @@ export default function StatementDialog({
                 {SHOW.map((f) => <option key={f} value={f}>{f}</option>)}
               </select>
             </div>
-            <div className="field">
-              <label htmlFor="st-state">Invoices</label>
-              <select id="st-state" value={state} onChange={(e) => setState(e.target.value as typeof state)}>
-                {STATES.map((s) => <option key={s} value={s}>{s || 'Any state'}</option>)}
-              </select>
-            </div>
+            <MultiStatusSelect id="st-state" label="Invoices" value={state} onChange={setState}
+                               options={STATES.map((s) => [s, s || 'Any state'] as const)} />
           </div>
         </details>
 

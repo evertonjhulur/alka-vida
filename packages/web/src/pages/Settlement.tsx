@@ -35,6 +35,8 @@ interface StopRow {
   expectedCents: number;
   varianceCents: number;
   allocations: Allocation[];
+  /** Where money the driver did not split goes: oldest open invoice first (15 Oct 2026). */
+  autoApplied?: Allocation[];
   openInvoices: OpenInvoice[];
   settled: boolean;
 }
@@ -297,8 +299,9 @@ export default function Settlement({ session }: { session: Session }) {
         )}
         {left > 0 && (
           <div className="notice info">
-            {money(left)} will be recorded as a payment on the account without
-            being attached to a specific invoice.
+            {money(left)} not split here goes to the oldest open invoice first at
+            settlement, then the next. Anything left after every invoice is paid
+            stays on the account as credit.
           </div>
         )}
 
@@ -412,13 +415,21 @@ export default function Settlement({ session }: { session: Session }) {
                     : <span className="chip warn">{money(s.varianceCents)}</span>}
                 </td>
                 <td className="small">
-                  {s.allocations.length === 0
-                    ? <span className="muted">not applied yet</span>
+                  {s.allocations.length === 0 && (s.autoApplied ?? []).length === 0
+                    ? <span className="muted">{s.collectedCents > 0 && !s.settled ? 'not applied yet' : '—'}</span>
                     : s.allocations.map((a, i) => (
                         <div key={i}>
                           {a.invoiceNumber ?? 'on account'} — {money(a.amountCents)}
                         </div>
                       ))}
+                  {(s.autoApplied ?? []).length > 0 && (
+                    <div className="muted" title="Not split by the driver, so it goes to the oldest open invoice first">
+                      {s.allocations.length > 0 ? 'Rest, ' : ''}oldest first:
+                      {(s.autoApplied ?? []).map((a, i) => (
+                        <div key={i}>{a.invoiceNumber ?? 'left on account'} — {money(a.amountCents)}</div>
+                      ))}
+                    </div>
+                  )}
                 </td>
                 <td className="num">
                   <button className="secondary" onClick={() => openPanel(s)}>

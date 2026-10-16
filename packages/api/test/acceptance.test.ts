@@ -158,21 +158,34 @@ describe('3. An overpayment at a stop', () => {
       { invoiceId: result.invoiceId!, amountCents: TOTAL },
     ]);
 
+    // Older invoices this customer still owes on (earlier scenarios). Since
+    // 15 Oct 2026 the part the driver did not split goes to those first,
+    // oldest first, and only what is left after them stays on the account.
+    const olderOpen = (await f.db.query<{ invoice_id: string; balance_cents: string }>(
+      `SELECT invoice_id, balance_cents FROM invoice_ledger
+       WHERE customer_id = $1 AND NOT is_credit_note AND status NOT IN ('Paid','Cancelled')
+         AND invoice_id <> $2 ORDER BY invoice_date, invoice_number`, [f.customerId, result.invoiceId],
+    ));
+    const olderOwed = olderOpen.reduce((sum, r) => sum + Number(r.balance_cents), 0);
+    const toOlder = Math.min(olderOwed, 200_000);
+    const leftOver = 200_000 - toOlder;
+
     const before = await paymentsOf(f.db, f.customerId);
     const settle = await settleRoute(f.db, f.admin, order.deliverySheetId!,
       { actualCashCents: OVERPAY });
 
-    assert.equal(settle.paymentIds.length, 2,
-      'one payment against the invoice, one unattached - never three');
-
     const created = (await paymentsOf(f.db, f.customerId)).slice(before.length);
     const attached = created.filter((p) => p.invoice_id === result.invoiceId);
     const unattached = created.filter((p) => p.invoice_id === null);
+    const older = created.filter((p) => p.invoice_id && p.invoice_id !== result.invoiceId);
+    assert.equal(settle.paymentIds.length, created.length);
 
     assert.equal(attached.length, 1);
     assert.equal(Number(attached[0].amount_cents), TOTAL);
-    assert.equal(unattached.length, 1, 'exactly one unattached payment - no phantom duplicate');
-    assert.equal(Number(unattached[0].amount_cents), 200_000);
+    assert.equal(older.reduce((sum, p) => sum + Number(p.amount_cents), 0), toOlder,
+      'the excess paid older invoices, oldest first, up to what they owed');
+    assert.equal(unattached.length, leftOver > 0 ? 1 : 0, 'at most one unattached payment - no phantom duplicate');
+    if (leftOver > 0) assert.equal(Number(unattached[0].amount_cents), leftOver);
 
     const total = created.reduce((s, p) => s + Number(p.amount_cents), 0);
     assert.equal(total, OVERPAY, 'created payments sum to exactly the cash collected');

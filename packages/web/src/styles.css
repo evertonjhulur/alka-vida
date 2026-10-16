@@ -1609,3 +1609,118 @@ tr.tx-void td.money { text-decoration: line-through; }
   .tx-right { margin-left: 0; }
   .tx-acts { text-align: left; }
 }
+
+/* ---------- Status drop-downs with several ticked (15 Oct 2026) ---------- */
+.multi-select { position: relative; }
+.multi-select-btn {
+  display: inline-flex; align-items: center; justify-content: space-between; gap: 10px;
+  min-width: 170px; max-width: 260px; padding: 7px 9px;
+  background: #fff; color: var(--ink); border: 1px solid var(--line-control); border-radius: 6px;
+  font: inherit; font-weight: 400; text-align: left; cursor: pointer;
+}
+.multi-select-btn:hover { filter: none; background: #fff; border-color: var(--brand); }
+.multi-select-btn span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.multi-select-pop { min-width: 230px; max-height: 60vh; overflow-y: auto; }
+label.multi-select-item {
+  display: flex; align-items: center; gap: 8px; margin: 0; padding: 7px 14px;
+  font-size: 14px; color: var(--ink); cursor: pointer;
+}
+label.multi-select-item:hover { background: #f2fafc; }
+label.multi-select-item.any { border-bottom: 1px solid var(--line); margin-bottom: 4px; }
+label.multi-select-item.sub { padding-left: 30px; }
+label.multi-select-item input { margin: 0; }
+.multi-select-foot { display: flex; justify-content: space-between; padding: 6px 14px 2px; border-top: 1px solid var(--line); margin-top: 4px; }
+@media (max-width: 760px) { .multi-select-btn { width: 100%; max-width: none; } }
+
+/* ---------- Portal: standing order switch on Place an order (15 Oct 2026) ---------- */
+.portal-order-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; }
+.portal-order-head > div:first-child { flex: 1 1 auto; min-width: 0; }
+.portal-repeat { display: flex; flex-direction: column; align-items: flex-end; gap: 8px; }
+.portal-repeat .ns-repeat { display: inline-flex; align-items: center; gap: 10px; white-space: nowrap; }
+.portal-repeat .seg { flex-wrap: nowrap; }
+.portal-repeat .seg button { min-height: 36px; font-size: 13.5px; padding: 6px 10px; white-space: nowrap; }
+@media (max-width: 760px) {
+  .portal-order-head { flex-direction: column; }
+  .portal-repeat { align-items: stretch; width: 100%; }
+  .portal-repeat .ns-repeat { justify-content: space-between; }
+}
+
+/* ---------- Portal: Order History (15 Oct 2026, after Saks' order history) ---------- */
+.oh { max-width: 880px; }
+.oh-title { font-size: 30px; font-weight: 400; letter-spacing: .01em; margin: 4px 0 10px; color: var(--ink); }
+.oh-filters {
+  display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap;
+  padding: 6px 0 14px; border-bottom: 1px solid var(--line);
+}
+.oh-radios { display: flex; gap: 22px; flex-wrap: wrap; }
+label.oh-radio { display: inline-flex; align-items: center; gap: 8px; margin: 0; font-size: 15px; color: var(--ink); cursor: pointer; }
+label.oh-radio input { width: 18px; height: 18px; margin: 0; accent-color: var(--nav); }
+label.oh-radio.on { font-weight: 600; }
+.oh-period { min-width: 150px; }
+.oh-list { display: flex; flex-direction: column; }
+.oh-group { font-size: 12px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); padding: 16px 0 4px; }
+a.oh-row {
+  display: grid; grid-template-columns: minmax(0, 1fr) 96px 28px; align-items: center; gap: 18px;
+  padding: 18px 4px; border-bottom: 1px solid var(--line); color: var(--ink); text-decoration: none;
+}
+a.oh-row:hover { background: #f8fbfd; }
+a.oh-row:hover .oh-arrow { color: var(--brand); transform: translateX(2px); }
+a.oh-row.compact { grid-template-columns: minmax(0, 1fr) auto 28px; padding: 12px 4px; }
+.oh-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; line-height: 1.45; }
+.oh-text span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.oh-text strong:first-child { font-size: 15.5px; }
+.oh-status { color: var(--nav); }
+.oh-status.muted { color: var(--muted); }
+.oh-status.warn { color: var(--warn); }
+.oh-tile {
+  width: 96px; height: 104px; background: #eef4f9; border-radius: 4px;
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px;
+  font-size: 11.5px; color: var(--muted); text-align: center; padding: 4px;
+}
+.oh-tile span { max-width: 90px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.oh-arrow { font-size: 34px; line-height: 1; color: var(--ink); font-weight: 200; transition: transform .12s; justify-self: end; }
+.oh-empty { padding: 18px 4px; }
+
+.oh-detail { max-width: 940px; }
+.oh-back { margin: 0 0 6px; font-size: 18px; }
+.oh-back a { color: var(--ink); text-decoration: none; }
+.oh-back a:hover { color: var(--brand); }
+.oh-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 14px; flex-wrap: wrap; margin: 4px 0 14px; }
+.oh-head-line { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: baseline; font-size: 17px; }
+.oh-sep { color: var(--muted); }
+.oh-actions { display: flex; flex-direction: column; gap: 8px; align-items: stretch; min-width: 220px; }
+.oh-actions button { width: 100%; }
+.oh-repeat { margin: 0 0 14px; }
+.oh-section { font-size: 15px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; margin: 18px 0 6px; padding-bottom: 6px; border-bottom: 1px solid var(--line); }
+.oh-items { display: flex; flex-direction: column; }
+.oh-item { display: grid; grid-template-columns: 96px minmax(0, 1fr) auto 160px; gap: 18px; align-items: start; padding: 14px 0; border-bottom: 1px solid var(--line); }
+.oh-item .oh-tile { height: 96px; }
+.oh-item-what { display: flex; flex-direction: column; gap: 3px; }
+.oh-item-money { font-weight: 600; }
+.oh-item-state { display: flex; flex-direction: column; gap: 2px; }
+.oh-box { display: grid; grid-template-columns: minmax(0, 1.6fr) minmax(220px, 1fr); gap: 28px; margin-top: 22px; padding: 18px 22px; }
+.oh-box h3 { font-size: 15px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; margin: 0 0 12px; padding-bottom: 8px; border-bottom: 1px solid var(--line); }
+.oh-details-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px 24px; }
+.oh-label { font-weight: 600; margin-bottom: 2px; }
+.oh-summary .total-line.grand { border-top: 1px solid var(--line); margin-top: 8px; padding-top: 8px; }
+@media (max-width: 760px) {
+  .oh-radios { gap: 6px 16px; }
+  a.oh-row { grid-template-columns: minmax(0, 1fr) 72px 18px; gap: 10px; }
+  .oh-tile { width: 72px; height: 80px; }
+  .oh-tile svg { width: 30px; height: 40px; }
+  .oh-item { grid-template-columns: 72px minmax(0, 1fr) auto; }
+  .oh-item-state { grid-column: 2 / -1; }
+  .oh-box { grid-template-columns: 1fr; padding: 14px 16px; }
+  .oh-details-grid { grid-template-columns: 1fr; }
+  .oh-actions { width: 100%; }
+}
+
+/* ---------- News & offers pictures: the whole picture, centred (15 Oct 2026) ---------- */
+.news-pic { object-fit: contain; object-position: center; margin: 0 auto; max-height: 320px; background: #eef3f8; }
+.news-card.lead .news-pic { max-height: 520px; }
+@media (max-width: 760px) { .news-card.lead .news-pic { max-height: 360px; } }
+.news-thumbs img { object-fit: contain; background: #eef3f8; }
+
+/* ---------- Audit log (15 Oct 2026) ---------- */
+.audit-table td { vertical-align: top; }
+.audit-details { max-width: 420px; word-break: break-word; }

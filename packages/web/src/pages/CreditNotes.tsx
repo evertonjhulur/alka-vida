@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { api, download, downloadPost, type Session } from '../lib/api';
-import { BatchBar, SortTh, StatusSelect, TickAllTh, TickTd, sendSummary, useSort, useTicks } from '../components/ListTools';
+import { BatchBar, SortTh, MultiStatusSelect, passes, TickAllTh, TickTd, sendSummary, useSort, useTicks } from '../components/ListTools';
 import { downloadCsv, dollars } from '../lib/csv';
 import { money, toCents, when } from '../lib/format';
 import CustomerPicker, { type PickerCustomer } from '../components/CustomerPicker';
@@ -144,11 +144,10 @@ export default function CreditNotes({ session }: { session: Session }) {
   const notYet = prices.filter((p) => !lines.some((l) => l.productId === p.product_id));
 
   /* ---- the list: status, sort, batch actions (11 Oct 2026) ---- */
-  const [cnStatus, setCnStatus] = useState('');
+  const [cnStatus, setCnStatus] = useState<string[]>([]);
   const amountOf = (r: Row) => (r.credit_status === 'Pending' ? Math.abs(Number(r.pending_amount_cents ?? 0)) : Math.abs(Number(r.grand_total_cents)));
-  const cnFiltered = rows.filter((r) => (!cnStatus ? true
-    : cnStatus === 'unsent' ? r.credit_status === 'Approved' && !r.sent_date
-      : cnStatus === 'sent' ? !!r.sent_date : r.credit_status === cnStatus));
+  const cnFiltered = rows.filter((r) => passes(cnStatus, (v) => (v === 'unsent' ? r.credit_status === 'Approved' && !r.sent_date
+    : v === 'sent' ? !!r.sent_date : r.credit_status === v)));
   const cnSort = useSort(cnFiltered, {
     number: (r) => r.invoice_number, date: (r) => String(r.invoice_date).slice(0, 10), customer: (r) => r.customer_name,
     against: (r) => r.linked_invoice_number ?? '', why: (r) => r.reason ?? '', credit: (r) => amountOf(r), state: (r) => r.credit_status,
@@ -286,7 +285,7 @@ export default function CreditNotes({ session }: { session: Session }) {
 
       <div className="panel phone-cards">
         <div className="row">
-          <StatusSelect id="cn-st" value={cnStatus} onChange={setCnStatus} options={[
+          <MultiStatusSelect id="cn-st" value={cnStatus} onChange={setCnStatus} options={[
             ['', 'Any status'], ['Approved', 'Counted'], ['Pending', 'Waiting for approval'], ['Rejected', 'Rejected'],
             ['unsent', 'Counted, not sent yet'], ['sent', 'Sent'],
           ]} />

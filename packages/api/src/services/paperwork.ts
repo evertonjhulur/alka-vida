@@ -321,10 +321,13 @@ async function drawReceipt(doc: PDFKit.PDFDocument, db: Db, chosenIds: readonly 
   const rows = await db.query<{
     id: string; customer_id: string; amount_cents: number; payment_date: string; method: string;
     reference: string | null; receipt_number: string | null; invoice_number: string | null;
-    is_reversal: boolean;
+    is_reversal: boolean; invoice_id: string | null; counter_sale: boolean; paid_at: string;
   }>(
     `SELECT p.id, p.customer_id, p.amount_cents, business_date(p.payment_date)::text AS payment_date,
-            p.method, p.reference, p.receipt_number, i.invoice_number, p.is_reversal
+            p.method, p.reference, p.receipt_number, i.invoice_number, p.is_reversal, p.invoice_id,
+            to_char(p.created_at AT TIME ZONE 'America/Jamaica', 'FMHH12:MI AM') AS paid_at,
+            EXISTS (SELECT 1 FROM invoice_orders io JOIN customer_orders o ON o.id = io.order_id
+                     WHERE io.invoice_id = p.invoice_id AND o.delivery_mode = 'Counter') AS counter_sale
      FROM payments p LEFT JOIN invoices i ON i.id = p.invoice_id
      WHERE p.id = ANY($1::uuid[]) ORDER BY i.invoice_number NULLS LAST`, [paymentIds],
   );
@@ -349,6 +352,19 @@ async function drawReceipt(doc: PDFKit.PDFDocument, db: Db, chosenIds: readonly 
     [rows[0].customer_id],
   );
   const total = rows.reduce((s, r) => s + num(r.amount_cents), 0);
+
+  // A counter sale or walk-in gets a real sales receipt: what was bought,
+  // the totals and how it was paid, not money "applied to" an account
+  // (Everton, 15 Oct 2026).
+  const walkIn = (await db.one<{ w: boolean }>(`SELECT is_walk_in AS w FROM customers WHERE id = $1`, [rows[0].customer_id])).w;
+  const saleInvoices = [...new Set(rows.filter((r) => r.counter_sale && r.invoice_id).map((r) => r.invoice_id!))];
+  if (saleInvoices.length > 0) {
+    await drawSalesReceipt(doc, db, { rows, number, customer, walkIn, saleInvoices, balanceCents: Number(balance.b), totalCents: total });
+    return {
+      filename: `Receipt-${number.split(", ")[0]}.pdf`, receiptNumber: number,
+      customerName: customer.name, customerEmail: customer.email, totalCents: total,
+    };
+  }
 
   letterhead(doc, 50);
   doc.moveDown(1.2);
@@ -387,6 +403,129 @@ async function drawReceipt(doc: PDFKit.PDFDocument, db: Db, chosenIds: readonly 
     filename: `Receipt-${number.split(", ")[0]}.pdf`, receiptNumber: number,
     customerName: customer.name, customerEmail: customer.email, totalCents: total,
   };
+}
+
+/**
+ * The receipt for a sale over the counter: a till receipt in the house
+ * letterhead. Items with quantity, unit price and amount; subtotal, any
+ * discount, GCT and total; then the payment (method, reference, amount) and
+ * anything still owed on the sale. An account customer buying at the counter
+ * also sees their account balance; a walk-in does not have one.
+ */
+async function drawSalesReceipt(
+  doc: PDFKit.PDFDocument, db: Db,
+  r: {
+    rows: Array<{ amount_cents: number; payment_date: string; method: string; reference: string | null;
+      invoice_id: string | null; invoice_number: string | null; counter_sale: boolean; paid_at: string }>;
+    number: string; customer: { name: string; address: string | null; phone: string | null };
+    walkIn: boolean; saleInvoices: string[]; balanceCents: number; totalCents: number;
+  },
+) {
+  const inv = await db.query<{
+    invoice_id: string; invoice_number: string; subtotal_cents: number; discount_amount_cents: number;
+    gct_cents: number; grand_total_cents: number; balance_cents: number; gct_exempt: boolean; order_number: string | null;
+  }>(
+    `SELECT l.invoice_id, l.invoice_number, i.subtotal_cents, i.discount_amount_cents, i.gct_cents,
+            l.grand_total_cents, l.balance_cents, COALESCE(i.gct_exempt, false) AS gct_exempt,
+            (SELECT string_agg(o.order_number, ', ') FROM invoice_orders io JOIN customer_orders o ON o.id = io.order_id
+              WHERE io.invoice_id = i.id) AS order_number
+     FROM invoice_ledger l JOIN invoices i ON i.id = l.invoice_id
+     WHERE l.invoice_id = ANY($1::uuid[]) ORDER BY l.invoice_number`, [r.saleInvoices],
+  );
+  const lines = await db.query<{
+    product_name: string; bottles_per_case: number; cases: number; loose_bottles: number;
+    price_per_case_cents: number; price_per_bottle_cents: number; line_total_cents: number;
+  }>(
+    `SELECT p.name AS product_name, p.bottles_per_case, li.cases, li.loose_bottles,
+            li.price_per_case_cents, li.price_per_bottle_cents, li.line_total_cents
+     FROM invoice_line_items li JOIN products p ON p.id = li.product_id
+     WHERE li.invoice_id = ANY($1::uuid[]) ORDER BY li.invoice_id, p.name`, [r.saleInvoices],
+  );
+
+  letterhead(doc, 50);
+  doc.moveDown(1.2);
+  doc.fillColor(COLOR_INDIGO).fontSize(16).text('SALES RECEIPT', 50, doc.y, { align: 'right', width: 510 });
+  doc.fontSize(10).text(`Receipt ${r.number}`, { align: 'right', width: 510 })
+    .text(`Date: ${fmtDate(r.rows[0].payment_date)}${r.rows[0].paid_at ? `, ${r.rows[0].paid_at}` : ''}`, { align: 'right', width: 510 })
+    .text(`Sale: ${inv.map((i) => i.invoice_number).join(', ')}${inv[0]?.order_number ? `  ·  ${inv.map((i) => i.order_number).join(', ')}` : ''}`,
+      { align: 'right', width: 510 });
+  doc.moveDown(1);
+  doc.fontSize(9).fillColor('#555').text('SOLD TO', 50);
+  doc.fontSize(11).fillColor('#000').text(r.walkIn && /walk/i.test(r.customer.name) ? 'Walk-in customer' : r.customer.name);
+  doc.fontSize(9).fillColor('#333');
+  if (!r.walkIn && r.customer.address) doc.text(r.customer.address);
+  // The shared walk-in record carries a placeholder number; print a real one only.
+  if (r.customer.phone && /[1-9]/.test(r.customer.phone)) doc.text(r.customer.phone);
+  doc.moveDown(1.2);
+
+  const cols = { desc: 50, qty: 320, unit: 390, total: 480 };
+  const y0 = doc.y;
+  doc.fillColor('#555').fontSize(8)
+    .text('ITEM', cols.desc, y0).text('QTY', cols.qty, y0)
+    .text('UNIT PRICE', cols.unit, y0, { width: 80, align: 'right' })
+    .text('AMOUNT', cols.total, y0, { width: 80, align: 'right' });
+  doc.moveTo(50, doc.y + 2).lineTo(560, doc.y + 2).strokeColor(COLOR_BLUE).stroke();
+  doc.moveDown(0.6);
+  for (const l of lines) {
+    const cases = num(l.cases);
+    const bpc = num(l.bottles_per_case);
+    const unit = cases > 0 ? num(l.price_per_case_cents) : num(l.price_per_bottle_cents);
+    const qty = cases > 0 ? `${cases} cs${num(l.loose_bottles) > 0 ? ` + ${num(l.loose_bottles)}` : ''}` : String(num(l.loose_bottles));
+    const y = doc.y;
+    doc.fontSize(9).fillColor('#000')
+      .text(`${l.product_name}${cases > 0 && bpc > 0 ? ` (case of ${bpc})` : ''}`, cols.desc, y, { width: 260 })
+      .text(qty, cols.qty, y)
+      .text(cash(unit), cols.unit, y, { width: 80, align: 'right' })
+      .text(cash(num(l.line_total_cents)), cols.total, y, { width: 80, align: 'right' });
+    doc.moveDown(0.4);
+  }
+  doc.moveDown(0.6);
+  doc.moveTo(330, doc.y).lineTo(560, doc.y).strokeColor('#ccc').stroke();
+  doc.moveDown(0.5);
+  const row = (label: string, v: number, bold = false) => {
+    const y = doc.y;
+    doc.fillColor('#000').fontSize(bold ? 11 : 9)
+      .text(label, cols.unit - 150, y, { width: 220, align: 'right' })
+      .text(cash(v), cols.total, y, { width: 80, align: 'right' });
+    doc.moveDown(0.35);
+  };
+  const sum = (k: 'subtotal_cents' | 'discount_amount_cents' | 'gct_cents' | 'grand_total_cents' | 'balance_cents') =>
+    inv.reduce((a, i) => a + num(i[k]), 0);
+  row('Subtotal', sum('subtotal_cents'));
+  if (sum('discount_amount_cents') > 0) row('Discount', -sum('discount_amount_cents'));
+  row(inv.every((i) => i.gct_exempt) ? 'GCT (exempt)' : 'GCT 15%', sum('gct_cents'));
+  row('Total', sum('grand_total_cents'), true);
+
+  doc.moveDown(1);
+  doc.fontSize(8).fillColor('#555').text('PAYMENT', 50);
+  doc.moveDown(0.3);
+  const onSale = r.rows.filter((x) => x.counter_sale);
+  const other = r.rows.filter((x) => !x.counter_sale);
+  const paidOnSale = onSale.reduce((a, x) => a + num(x.amount_cents), 0);
+  const methods = [...new Set(r.rows.map((x) => x.method).filter(Boolean))].join(', ');
+  const ref = r.rows.find((x) => x.reference)?.reference;
+  const line2 = (label: string, v: string) => {
+    const y = doc.y;
+    doc.fontSize(9).fillColor('#000').text(label, 50, y).text(v, 430, y, { width: 130, align: 'right' });
+    doc.moveDown(0.4);
+  };
+  line2(`Paid by ${methods || 'cash'}${ref ? `, reference ${ref}` : ''}`, cash(paidOnSale));
+  for (const x of other) {
+    line2(x.invoice_number ? `Also paid: invoice ${x.invoice_number}` : 'Also paid: left on the account', cash(num(x.amount_cents)));
+  }
+  if (other.length) line2('Total received', cash(r.totalCents));
+  const owed = sum('balance_cents');
+  doc.moveDown(0.6);
+  doc.fontSize(10).fillColor('#000')
+    .text(owed > 0 ? `Still to pay on this sale: ${cash(owed)}` : 'Paid in full. Thank you for your purchase.', 50);
+  if (!r.walkIn) {
+    const b = r.balanceCents;
+    doc.fontSize(9).fillColor('#333')
+      .text(b > 0 ? `Balance on your account: ${cash(b)}` : b < 0 ? `Your account is in credit: ${cash(-b)}` : 'Your account is fully paid.', 50);
+  }
+  doc.moveDown(2).fontSize(8).fillColor('#777')
+    .text(`${BRAND.company}  ·  All amounts in Jamaican dollars. Please keep this receipt.`
+      + `\nContact ${await contactEmail(db)} for any orders or queries.`, 50, doc.y, { align: 'center', width: 510 });
 }
 
 /** Email a receipt (the "send a receipt" tick box, Zoho-style). */
