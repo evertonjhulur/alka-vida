@@ -18,7 +18,7 @@
 
 import type { Db } from '../db/index.ts';
 import { getSetting, siteUrl } from './core.ts';
-import { notifyUsers, usersInRoles } from './push.ts';
+import { knockHeld, notifyUsers, usersInRoles } from './push.ts';
 import { mailConfigured, sendMail } from './documents.ts';
 import { renderEmail } from './emailkit.ts';
 
@@ -83,7 +83,8 @@ export async function runAlerts(db: Db): Promise<AlertRun> {
      ORDER BY o.created_at LIMIT 50`, [since],
   );
   if (fresh.length) {
-    const office = (await usersInRoles(db, ['admin', 'user'])).map((u) => u.id);
+    // Only those who want new-order notifications (My account / Settings › Notifications).
+    const office = (await usersInRoles(db, ['admin', 'user'])).filter((u) => u.notify_orders).map((u) => u.id);
     for (const o of fresh) {
       if (!(await claim(db, 'order', o.id))) continue;
       await notifyUsers(db, office, {
@@ -119,7 +120,7 @@ export async function runAlerts(db: Db): Promise<AlertRun> {
      ORDER BY created_at LIMIT 50`, [since],
   );
   if (requests.length || apps.length) {
-    const admins = (await usersInRoles(db, ['admin'])).map((u) => u.id);
+    const admins = (await usersInRoles(db, ['admin'])).filter((u) => u.notify_decisions).map((u) => u.id);
     for (const r of requests) {
       if (!(await claim(db, 'decision', r.id))) continue;
       const what = TYPE_WORDS[r.request_type] ?? r.request_type;
@@ -158,14 +159,19 @@ export async function runAlerts(db: Db): Promise<AlertRun> {
        AND NOT EXISTS (SELECT 1 FROM staff_alerts_sent x WHERE x.kind = 'load' AND x.ref_id = a.id)
      LIMIT 50`, [since],
   );
+  const wantsLoad = new Set((await usersInRoles(db, ['driver'])).filter((u) => u.notify_load).map((u) => u.id));
   for (const a of added) {
     if (!(await claim(db, 'load', a.id))) continue;
+    if (!wantsLoad.has(a.driver)) continue;
     await notifyUsers(db, [a.driver], {
       title: 'Something was added to your load',
       body: `${a.zone} round, ${shortDay(a.day)}${a.by ? ` · added by ${a.by}` : ''}. Confirm it on My route.`,
       url: '/#/route', tag: `load-${a.id}`,
     });
   }
+
+  // Quiet hours just ended for someone: what was held reaches them now.
+  await knockHeld(db);
 
   return out;
 }

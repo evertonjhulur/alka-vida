@@ -53,6 +53,15 @@ function deviceName(): string {
   return browser ? `${what}, ${browser}` : what;
 }
 
+/** This browser's push address, if it has one, to mark "this device" in a list. */
+export async function currentEndpoint(): Promise<string | null> {
+  if (pushPossible()) return null;
+  try {
+    const reg = await navigator.serviceWorker.getRegistration('/');
+    return (await reg?.pushManager.getSubscription())?.endpoint ?? null;
+  } catch { return null; }
+}
+
 export async function turnPushOn(): Promise<PushState> {
   const why = pushPossible();
   if (why) return why;

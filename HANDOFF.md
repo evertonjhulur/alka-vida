@@ -54,7 +54,7 @@ Working and verified end to end, in the browser as well as in tests:
 | Addresses | Line 1, line 2, town, parish. Composed into `delivery_address`, which stays what the stop and the invoice PDF read (migration 014). |
 | Employees & labour cost | Who works here, paid by the hour or by the trip, and the hours/trips recorded against them. Payroll totals for any date range. **Add from logins** creates a record per existing login — title from the role (`admin`→Manager, `user`→Employee, `driver`→Driver), rate left blank — and is safe to press twice. **Deliberately not wired into costing** (migration 015). A person is managed on their own record at `/employees/:id` — details, rate, and their own work history. |
 
-**Tests: 564 passing** (15 Oct 2026, evening) — 68 pure domain (`packages/shared`), 474 API, 4 web (`packages/web/test`)
+**Tests: 567 passing** (15 Oct 2026, late) — 68 pure domain (`packages/shared`), 474 API, 4 web (`packages/web/test`)
 (`packages/api`, against real PostgreSQL via PGlite).
 
 ```bash
@@ -105,6 +105,7 @@ decision behind them:
 | 022 | 10 Oct follow-up: last-minute additions to a confirmed load, reconfirmed by the driver (`round_load_additions`, `round_load_lines.added_bottles`) |
 | 021 | 10 Oct follow-up: the driver confirms the load the office logged (`round_loads.driver_confirmed_*`) |
 | 020 | Everton's round of 10 Oct: payment after delivery (`after_stop_id`), truck loading and returns (`round_loads`, `round_load_lines`), collection stops (`round_collections`), stock-ledger types TruckLoad / TruckReturn / CustomerReturn, settings `document_footer` and `take_card_payments` |
+| 026 | notification settings: `users.notify_orders/notify_decisions/notify_load/quiet_from/quiet_to`, `staff_notifications.knocked_at` |
 | 025 | 15 Oct follow-up: `customer_orders.ready_at/ready_by_name/seen_at/review_reason`, request type SpecialDayOrder, `push_subscriptions`, `staff_notifications`, `staff_alerts_sent`, `users.decision_emails`, setting `alerts_since` |
 | 018 | Everton's round of 7 Oct: email ticks + unsubscribe token, walk-in flag, news pictures, "Payment Only" stops and partial deliveries, empties expected, the 5-gallon bottle product flag and bottles sold, PO "Partially Received - Closed" |
 
@@ -1653,3 +1654,28 @@ Also fixed: the Today screen's Needs a decision card called every non-discount
 request a "Credit note".
 
 Tests: 564 (68 + 492 + 4). New `api/test/alerts.test.ts` (6).
+
+### Managing notifications, 15 Oct 2026 (late)
+
+Everton asked for all four: a switch per kind, quiet hours, a devices list
+with Remove, and admins setting other people's.
+
+- Kinds (`push.ALERT_KINDS`): `orders` (admin + office), `decisions` push and
+  `decisionEmails` (admin), `load` (driver). `runAlerts` sends each only to
+  those with it on. `setAlertSettings` changes only the kinds the person's
+  role can have; your own, or anyone's for an admin.
+- Quiet hours (`quiet_from`/`quiet_to`, Jamaica time, may run over midnight;
+  `inQuietHours`): the note is still written but not knocked
+  (`knocked_at` null); `knockHeld()` (each alert run) knocks once when the
+  quiet hours are over, and the phone then shows what was held. Emails are
+  not held.
+- Devices: My account lists them ("this device" marked), Remove deletes the
+  subscription (removing this device also unsubscribes the browser). An admin
+  can see and remove anyone's from Settings › Notifications.
+- My account › Notifications (`components/NotificationsCard.tsx`) and
+  Settings › Notifications (`pages/NotificationSettings.tsx`, admin only).
+  Routes: `GET/PATCH /api/me/alerts`, `DELETE /api/push/devices/:id`,
+  `GET /api/alert-settings`, `PATCH /api/alert-settings/:userId`,
+  `GET /api/alert-settings/:userId/devices`.
+
+Tests: 567 (68 + 495 + 4); 3 more in `alerts.test.ts`.

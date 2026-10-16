@@ -1760,3 +1760,14 @@ button.order-tile.delivered { border-left-color: var(--ok); }
 /* ---------- Notifications prompt (15 Oct 2026) ---------- */
 .notify-prompt { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; }
 .notify-prompt-actions { display: inline-flex; align-items: center; gap: 12px; }
+
+/* ---------- Notification settings (15 Oct 2026) ---------- */
+.notif-h { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 18px 0 8px; padding-top: 12px; border-top: 1px solid var(--line); }
+.quiet-times { gap: 10px; align-items: flex-end; margin: -2px 0 6px; }
+.quiet-times .field { margin: 0; }
+.device-list { list-style: none; margin: 0; padding: 0; }
+.device-list li { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 8px 0; border-bottom: 1px solid var(--line); }
+.device-list li:last-child { border-bottom: 0; }
+.notif-table td { vertical-align: middle; }
+.notif-table td.na { color: var(--muted); text-align: center; }
+.notif-table .switch { transform: scale(.9); }

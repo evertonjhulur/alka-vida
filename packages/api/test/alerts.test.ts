@@ -199,3 +199,59 @@ describe('Push notifications', () => {
     assert.equal(mails.length, 0);
   });
 });
+
+describe('Managing notifications', () => {
+  test('each kind can be switched off; only kinds a role can have are changed', async () => {
+    const { setAlertSettings, alertSettingsFor } = await import('../src/services/push.ts');
+    const s = await setAlertSettings(f.db, f.office, f.office.id, { orders: false, decisions: false, load: false });
+    assert.equal(s.orders, false);
+    assert.equal(s.decisions, true, 'an office login cannot have decisions, so it is left alone');
+    await assert.rejects(setAlertSettings(f.db, f.office, f.admin.id, { orders: false }), /administrator|admin/i);
+    await setAlertSettings(f.db, f.admin, f.office.id, { orders: true });
+    assert.equal((await alertSettingsFor(f.db, f.office.id)).orders, true, 'an admin can set someone else\'s');
+    await assert.rejects(setAlertSettings(f.db, f.admin, f.admin.id, { quietFrom: '22:00' }), /both/);
+    await assert.rejects(setAlertSettings(f.db, f.admin, f.admin.id, { quietFrom: '25:00', quietTo: '06:00' }), /times like/);
+  });
+
+  test('someone who turned new orders off is not told; quiet hours hold the knock until they end', async () => {
+    const { setAlertSettings, inQuietHours, knockHeld } = await import('../src/services/push.ts');
+    assert.equal(inQuietHours('22:00', '06:00', '23:30'), true);
+    assert.equal(inQuietHours('22:00', '06:00', '05:59'), true);
+    assert.equal(inQuietHours('22:00', '06:00', '06:00'), false);
+    assert.equal(inQuietHours('13:00', '14:00', '13:30'), true);
+    assert.equal(inQuietHours(null, null, '13:30'), false);
+
+    const knocks: string[] = [];
+    setPushSink(async (endpoint) => { knocks.push(endpoint); return 201; });
+    await subscribe(f.db, f.office, { endpoint: 'https://push.example.com/office-q' });
+    await subscribe(f.db, f.admin, { endpoint: 'https://push.example.com/admin-q' });
+    await setAlertSettings(f.db, f.admin, f.admin.id, { orders: false });
+    // The office login is in quiet hours all day long, for the test.
+    await f.db.query(`UPDATE users SET quiet_from = '00:00', quiet_to = '23:59' WHERE id = $1`, [f.office.id]);
+
+    const c = await customer(null);
+    const placed = await createPortalOrder(f.db, portalActor(c), c, { lines: [{ productId: f.casedProductId, cases: 1 }], deliveryMode: 'Pickup' });
+    await runAlerts(f.db);
+    const adminNotes = await f.db.query(`SELECT 1 FROM staff_notifications WHERE user_id = $1 AND title = $2`, [f.admin.id, `New online order ${placed.orderNumber}`]);
+    assert.equal(adminNotes.length, 0, 'switched off: no note at all');
+    const held = await f.db.query<{ knocked_at: string | null }>(
+      `SELECT knocked_at FROM staff_notifications WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1`, [f.office.id]);
+    assert.equal(held[0].knocked_at, null, 'held while quiet');
+    assert.ok(!knocks.includes('https://push.example.com/office-q'));
+
+    // Quiet hours over: one knock for what was held.
+    await f.db.query(`UPDATE users SET quiet_from = NULL, quiet_to = NULL WHERE id = $1`, [f.office.id]);
+    assert.ok(await knockHeld(f.db) >= 1, 'every device of theirs is knocked');
+    assert.ok(knocks.includes('https://push.example.com/office-q'));
+    assert.equal(await knockHeld(f.db), 0, 'and only once');
+  });
+
+  test('a device can be removed by its owner or an admin, not by someone else', async () => {
+    const { removeDevice, myDevices } = await import('../src/services/push.ts');
+    await subscribe(f.db, f.driver, { endpoint: 'https://push.example.com/driver-phone', device: 'Android phone, Chrome' });
+    const [d] = (await myDevices(f.db, f.driver)) as Array<{ id: string }>;
+    await assert.rejects(removeDevice(f.db, f.office, d.id), /admin/i);
+    await removeDevice(f.db, f.admin, d.id);
+    assert.equal((await myDevices(f.db, f.driver)).length, 0);
+  });
+});

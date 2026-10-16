@@ -16,6 +16,7 @@ const CARDS: Card[] = [
   { to: '/settings/money', title: 'Invoices & payments', text: 'Bank details at the foot of invoices and statements, and whether you take card.' },
   { to: '/employees', title: 'People & logins', text: 'Staff and drivers, and who can sign in to Alka Vida.', adminOnly: true },
   { to: '/employees', title: 'Employees', text: 'Staff and drivers.', officeOnly: true },
+  { to: '/settings/notifications', title: 'Notifications', text: 'Who is told about new orders and decisions on their phone, quiet hours, and their devices.', adminOnly: true },
   { to: '/settings/audit-log', title: 'Audit log', text: 'Who did what, and when: every change made in Alka Vida, searchable.', adminOnly: true },
 ];
 

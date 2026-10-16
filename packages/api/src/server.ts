@@ -1569,15 +1569,19 @@ export async function buildServer(db: Db) {
     async (req) => push.notifyUsers(db, [actorOf(req).id], {
       title: 'Alka Vida notifications are on', body: 'This is how new orders and decisions will reach you.', url: '/#/', tag: 'test',
     }));
-  // Admins: email me about Needs a decision, or not.
+  // Who gets which notifications (15 Oct 2026): my own, and an admin's view of everyone's.
   app.get('/api/me/alerts', { preHandler: allow('admin', 'user', 'driver') },
-    async (req) => db.one(`SELECT decision_emails, email FROM users WHERE id = $1`, [actorOf(req).id]));
+    async (req) => push.alertSettingsFor(db, actorOf(req).id));
   app.patch('/api/me/alerts', { preHandler: allow('admin', 'user', 'driver') },
-    async (req) => {
-      const b = (req.body ?? {}) as { decisionEmails?: boolean };
-      await db.query(`UPDATE users SET decision_emails = $2 WHERE id = $1`, [actorOf(req).id, b.decisionEmails !== false]);
-      return { ok: true };
-    });
+    async (req) => push.setAlertSettings(db, actorOf(req), actorOf(req).id, (req.body ?? {}) as never));
+  app.delete('/api/push/devices/:id', { preHandler: allow('admin', 'user', 'driver') },
+    async (req) => push.removeDevice(db, actorOf(req), (req.params as { id: string }).id));
+  app.get('/api/alert-settings', { preHandler: allow('admin') },
+    async (req) => push.allAlertSettings(db, actorOf(req)));
+  app.patch('/api/alert-settings/:userId', { preHandler: allow('admin') },
+    async (req) => push.setAlertSettings(db, actorOf(req), (req.params as { userId: string }).userId, (req.body ?? {}) as never));
+  app.get('/api/alert-settings/:userId/devices', { preHandler: allow('admin') },
+    async (req) => push.myDevices(db, actorOf(req), (req.params as { userId: string }).userId));
 
   /* ---------------- the audit log (15 Oct 2026) ---------------- */
 

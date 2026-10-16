@@ -51,6 +51,7 @@ import QuoteAccept from './pages/QuoteAccept';
 import CreditNotes from './pages/CreditNotes';
 import AutoEmails from './pages/AutoEmails';
 import AuditLog from './pages/AuditLog';
+import NotificationSettings from './pages/NotificationSettings';
 import Messages from './pages/Messages';
 import Reminders from './pages/Reminders';
 import MoneySettings from './pages/MoneySettings';
@@ -338,6 +339,7 @@ function Shell({ session }: { session: Session }) {
           <Route path="/settings" element={<SettingsHub session={session} pending={pending} />} />
           <Route path="/settings/money" element={<><BackToSettings /><MoneySettings session={session} /></>} />
           <Route path="/settings/audit-log" element={<><BackToSettings /><AuditLog session={session} /></>} />
+          <Route path="/settings/notifications" element={<><BackToSettings /><NotificationSettings session={session} /></>} />
           <Route path="/messages" element={<><SectionTabs tabs={CUSTOMERS} /><Messages session={session} /></>} />
           <Route path="/reminders" element={<Reminders />} />
           <Route path="/payments" element={<Payments />} />
