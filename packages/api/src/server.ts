@@ -48,6 +48,8 @@ import { registerFeedbackRoutes } from './routes/feedback.ts';
 import { registerOctoberRoutes } from './routes/october.ts';
 import * as trucks from './services/trucks.ts';
 import { registerTruckRoutes } from './routes/trucks.ts';
+import { registerBrandRoutes } from './routes/brands.ts';
+import { productAvailableSql, ownProductSql } from './services/brands.ts';
 import * as messaging from './services/messaging.ts';
 import * as paperwork from './services/paperwork.ts';
 import * as portal from './services/portal.ts';
@@ -786,8 +788,22 @@ export async function buildServer(db: Db) {
 
   /* ---------------- catalogue ---------------- */
 
-  app.get('/api/products', async () =>
-    db.query(`SELECT * FROM products WHERE active ORDER BY name`));
+  // With each product's brand. A customer sees only what they may buy;
+  // ?for=walkin is what a counter sale with no customer may sell - our own
+  // products, never one bottled for somebody (16 Oct 2026).
+  app.get('/api/products', async (req) => {
+    const s = req.session!;
+    const q = (req.query ?? {}) as { for?: string };
+    const where = s.role === 'customer'
+      ? (s.customerId ? `AND ${productAvailableSql('p', '$1')}` : 'AND false')
+      : q.for === 'walkin' ? `AND ${ownProductSql('p')}` : '';
+    return db.query(
+      `SELECT p.*, b.name AS brand_name, b.type AS brand_type
+       FROM products p LEFT JOIN brands b ON b.id = p.brand_id
+       WHERE p.active ${where} ORDER BY p.name`,
+      s.role === 'customer' && s.customerId ? [s.customerId] : [],
+    );
+  });
 
   app.get('/api/price-tiers', { preHandler: allow('admin', 'user') }, async () =>
     db.query(`SELECT * FROM price_tiers ORDER BY name`));
@@ -1661,6 +1677,7 @@ export async function buildServer(db: Db) {
   registerFeedbackRoutes(app as never, db, { allow: allow as never, actorOf });
   registerOctoberRoutes(app as never, db, { allow: allow as never, actorOf });
   registerTruckRoutes(app as never, db, { allow: allow as never, actorOf });
+  registerBrandRoutes(app as never, db, { allow: allow as never, actorOf });
 
   return app;
 }

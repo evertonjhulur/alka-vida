@@ -200,7 +200,7 @@ interface Special {
 }
 interface Product { id: string; name: string; bottles_per_case: number }
 
-export function SpecialPricesPanel({ customerId, priceList }: { customerId: string; priceList: string | null }) {
+export function SpecialPricesPanel({ customerId, priceList, refresh = 0 }: { customerId: string; priceList: string | null; refresh?: number }) {
   const [rows, setRows] = useState<Special[]>([]);
   const [products, setProducts] = useState<Product[]>([]);
   const [productId, setProductId] = useState('');
@@ -211,8 +211,10 @@ export function SpecialPricesPanel({ customerId, priceList }: { customerId: stri
   const load = () => api.get<Special[]>(`/api/customers/${customerId}/special-prices`).then(setRows);
   useEffect(() => {
     load().catch((e) => setError(e.message));
-    api.get<Product[]>('/api/products').then(setProducts).catch(() => {});
-  }, [customerId]); // eslint-disable-line react-hooks/exhaustive-deps
+    // Only what this customer may buy (bottled brands, 16 Oct 2026).
+    api.get<Array<Product & { product_id: string; is_bottle_charge?: boolean }>>(`/api/customers/${customerId}/prices`)
+      .then((ps) => setProducts(ps.map((p) => ({ ...p, id: p.product_id })))).catch(() => {});
+  }, [customerId, refresh]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const unitOf = (bpc: number) => (Number(bpc) > 0 ? 'case' : 'bottle');
 
@@ -276,6 +278,82 @@ export function SpecialPricesPanel({ customerId, priceList }: { customerId: stri
           <button disabled={busy || !productId || price === ''}>Set special price</button>
         </div>
       </form>
+    </div>
+  );
+}
+
+interface Brand { id: string; name: string; type: string; active: boolean }
+
+/**
+ * Which bottled brands this customer may buy, and whether they buy ours
+ * (Everton, 16 Oct 2026). Products bottled for a customer are never offered
+ * to anybody else - on New order, quotes or the portal - and a customer who
+ * buys only their own brands is not offered Alka Vida's.
+ */
+export function BrandsPanel({ customerId, onSaved }: { customerId: string; onSaved?: () => void }) {
+  const [brands, setBrands] = useState<Brand[]>([]);
+  const [picked, setPicked] = useState<string[]>([]);
+  const [own, setOwn] = useState(true);
+  const [saved, setSaved] = useState<{ picked: string[]; own: boolean } | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [msg, setMsg] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    Promise.all([
+      api.get<Brand[]>('/api/brands'),
+      api.get<{ buysOwnBrand: boolean; brands: Array<{ id: string }> }>(`/api/customers/${customerId}/brands`),
+    ]).then(([all, mine]) => {
+      setBrands(all);
+      const ids = mine.brands.map((b) => b.id);
+      setPicked(ids); setOwn(mine.buysOwnBrand);
+      setSaved({ picked: ids, own: mine.buysOwnBrand });
+    }).catch((e) => setError(e.message));
+  }, [customerId]);
+
+  const coPack = brands.filter((b) => b.type !== 'Owned' && (b.active || picked.includes(b.id)));
+  const dirty = !!saved && (own !== saved.own || [...picked].sort().join() !== [...saved.picked].sort().join());
+
+  async function save() {
+    setBusy(true); setError(null); setMsg(null);
+    try {
+      await api.put(`/api/customers/${customerId}/brands`, { brandIds: picked, buysOwnBrand: own });
+      setSaved({ picked, own });
+      setMsg('Saved. Their order screens and portal now offer just these.');
+      onSaved?.();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Could not save');
+    } finally { setBusy(false); }
+  }
+
+  return (
+    <div className="panel">
+      <h2 style={{ marginTop: 0 }}>What they can order</h2>
+      <p className="muted small" style={{ marginTop: 0 }}>
+        Products we bottle for a customer are only ever offered to that customer. Tick the brands we
+        bottle for them; brands are added on <a href="#/pricing">Products &amp; pricing</a>.
+      </p>
+      {error && <div className="notice error">{error}</div>}
+      {msg && <div className="notice ok">{msg}</div>}
+      <label className="check" style={{ display: 'block', marginBottom: 10 }}>
+        <input type="checkbox" checked={own} onChange={(e) => setOwn(e.target.checked)} />{' '}
+        Can order Alka Vida products
+      </label>
+      <div className="field">
+        <label>Brands we bottle for them</label>
+        {coPack.length === 0 && <p className="muted small" style={{ margin: 0 }}>No bottled brands yet.</p>}
+        {coPack.map((b) => (
+          <label key={b.id} className="check" style={{ display: 'block' }}>
+            <input type="checkbox" checked={picked.includes(b.id)}
+                   onChange={(e) => setPicked((cur) => (e.target.checked ? [...cur, b.id] : cur.filter((x) => x !== b.id)))} />{' '}
+            {b.name}{!b.active && <span className="muted small"> (retired)</span>}
+          </label>
+        ))}
+      </div>
+      {!own && picked.length === 0 && (
+        <div className="notice warn">With neither ticked they will have nothing to order.</div>
+      )}
+      <button disabled={busy || !dirty} onClick={save}>Save</button>
     </div>
   );
 }

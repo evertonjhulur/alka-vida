@@ -432,6 +432,12 @@ async function drawInvoice(doc: PDFKit.PDFDocument, db: Db, invoiceId: string) {
         rate: cash(Math.abs(unit)), amt: cash(isCN ? Math.abs(num(l.line_total_cents as number)) : num(l.line_total_cents as number)),
       };
     });
+  // A balance brought across from QuickBooks has no lines of its own (migration 027).
+  const opening = !!(detail as unknown as { is_opening_balance?: boolean }).is_opening_balance && rows.length === 0;
+  if (rows.length === 0 && !isCN) {
+    rows.push({ date: dmy(ledger.invoiceDate), prod: 'Balance brought forward',
+      desc: ledger.notes ?? 'Opening balance', qty: '', rate: '', amt: cash(num(ledger.subtotal_cents)) });
+  }
   if (rows.length === 0 && isCN) {
     rows.push({ date: dmy(ledger.invoiceDate), prod: 'Credit', desc: ledger.notes ?? '', qty: '', rate: '', amt: cash(Math.abs(num(ledger.subtotal_cents))) });
   }
@@ -451,7 +457,7 @@ async function drawInvoice(doc: PDFKit.PDFDocument, db: Db, invoiceId: string) {
     doc.text(r.qty, col.qty.x, y, { width: col.qty.w, align: 'right' });
     doc.text(r.rate, col.rate.x, y, { width: col.rate.w, align: 'right' });
     doc.text(r.amt, col.amt.x, y, { width: col.amt.w, align: 'right' });
-    doc.text(ledger.gct_exempt ? 'Exempt' : 'GCT', col.tax.x, y, { width: col.tax.w, align: 'right' });
+    doc.text(opening ? '' : ledger.gct_exempt ? 'Exempt' : 'GCT', col.tax.x, y, { width: col.tax.w, align: 'right' });
     y += h + 10;
     doc.moveTo(PAGE_L, y - 4).lineTo(PAGE_R, y - 4).strokeColor(RULE).lineWidth(0.5).stroke();
   });
@@ -487,7 +493,8 @@ async function drawInvoice(doc: PDFKit.PDFDocument, db: Db, invoiceId: string) {
     trow(how, cash(-num(ledger.discount_amount_cents)));
   }
   const taxable = sub - num(ledger.discount_amount_cents);
-  trow(ledger.gct_exempt ? 'GCT (exempt)' : `GCT @ 15% on ${cash(abs(taxable))}`, cash(abs(sign * num(ledger.gct_cents))));
+  // A balance brought forward already includes whatever GCT QuickBooks charged.
+  if (!opening) trow(ledger.gct_exempt ? 'GCT (exempt)' : `GCT @ 15% on ${cash(abs(taxable))}`, cash(abs(sign * num(ledger.gct_cents))));
   rule();
   if (isCN) {
     trow('Credit total', cash(Math.abs(ledger.grandTotalCents)), true);

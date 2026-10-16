@@ -92,10 +92,15 @@ export default function Customers({ session }: { session: Session }) {
       <div className="panel">
         <div className="row" style={{ justifyContent: 'space-between' }}>
           <h2 style={{ marginTop: 0 }}>{showForm ? 'New customer' : 'All customers'}</h2>
-          <button className={showForm ? 'secondary' : ''}
-                  onClick={() => (showForm ? setShowForm(false) : startNew())}>
-            {showForm ? 'Cancel' : 'Add customer'}
-          </button>
+          <div className="row" style={{ gap: 8 }}>
+            {!showForm && (
+              <Link to="/customers/import" className="button-link secondary">Upload customers</Link>
+            )}
+            <button className={showForm ? 'secondary' : ''}
+                    onClick={() => (showForm ? setShowForm(false) : startNew())}>
+              {showForm ? 'Cancel' : 'Add customer'}
+            </button>
+          </div>
         </div>
 
         {showForm && (

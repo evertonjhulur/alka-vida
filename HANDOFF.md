@@ -13,7 +13,7 @@ dialog, tidy-ups, customer Details in four parts), then the New sale screen of 1
 drop-downs, sort by heading, batch actions), then messages to customers chosen by name and the customer page redesign with payment numbers
 (12 Oct 2026), then Everton's round of 15 Oct 2026 (order statuses, oldest-first driver money,
 dated stock counts applied on save, portal Order History, audit log, multi-select status
-filters, counter-sale receipts). See the last entries at the end.
+filters, counter-sale receipts), then bottled brands and the customer upload from QuickBooks (16 Oct 2026). See the last entries at the end.
 
 ---
 
@@ -54,7 +54,7 @@ Working and verified end to end, in the browser as well as in tests:
 | Addresses | Line 1, line 2, town, parish. Composed into `delivery_address`, which stays what the stop and the invoice PDF read (migration 014). |
 | Employees & labour cost | Who works here, paid by the hour or by the trip, and the hours/trips recorded against them. Payroll totals for any date range. **Add from logins** creates a record per existing login — title from the role (`admin`→Manager, `user`→Employee, `driver`→Driver), rate left blank — and is safe to press twice. **Deliberately not wired into costing** (migration 015). A person is managed on their own record at `/employees/:id` — details, rate, and their own work history. |
 
-**Tests: 567 passing** (15 Oct 2026, late) — 68 pure domain (`packages/shared`), 474 API, 4 web (`packages/web/test`)
+**Tests: 583 passing** (16 Oct 2026) — 68 pure domain (`packages/shared`), 507 API, 8 web (`packages/web/test`)
 (`packages/api`, against real PostgreSQL via PGlite).
 
 ```bash
@@ -107,6 +107,7 @@ decision behind them:
 | 020 | Everton's round of 10 Oct: payment after delivery (`after_stop_id`), truck loading and returns (`round_loads`, `round_load_lines`), collection stops (`round_collections`), stock-ledger types TruckLoad / TruckReturn / CustomerReturn, settings `document_footer` and `take_card_payments` |
 | 026 | notification settings: `users.notify_orders/notify_decisions/notify_load/quiet_from/quiet_to`, `staff_notifications.knocked_at` |
 | 025 | 15 Oct follow-up: `customer_orders.ready_at/ready_by_name/seen_at/review_reason`, request type SpecialDayOrder, `push_subscriptions`, `staff_notifications`, `staff_alerts_sent`, `users.decision_emails`, setting `alerts_since` |
+| 027 | bottled brands and the customer upload (16 Oct): `customer_brands`, `customers.buys_own_brand/imported_at`, `brands.active` + unique name, `invoices.is_opening_balance/opening_reference` |
 | 018 | Everton's round of 7 Oct: email ticks + unsubscribe token, walk-in flag, news pictures, "Payment Only" stops and partial deliveries, empties expected, the 5-gallon bottle product flag and bottles sold, PO "Partially Received - Closed" |
 
 ---
@@ -1679,3 +1680,72 @@ with Remove, and admins setting other people's.
   `GET /api/alert-settings/:userId/devices`.
 
 Tests: 567 (68 + 495 + 4); 3 more in `alerts.test.ts`.
+
+### Bottled brands and the customer upload, 16 Oct 2026
+
+Everton's rulings: Alka Lyfe and Sunra are the local distributors (each on
+its own prices); Treasure Isle buys the brand overseas and is treated as a
+distributor for its price. We bottle for Alka Lyfe (brands Alka Lyfe and Sky
+Drops), Melkleen (Cool Cool) and Living Hope (Living Water; Living
+Possibilities is the same customer, Living Hope going forward). **Third-party
+products are never sold to anybody but the customer they are bottled for.**
+Melkleen and Living Hope buy no Alka Vida products "so far".
+
+**Who may buy what** (`services/brands.ts`, migration 027):
+- A product of an Owned brand, or with no brand, is for every customer whose
+  `buys_own_brand` is true (the default). A product of a Third-Party Co-Pack
+  brand only for customers linked to it in `customer_brands` (any number per
+  customer) while the brand is `active`. The bottle charge is never held back.
+- `productAvailableSql(p, customer)` filters `customerPrices` (New order,
+  quotes, credit notes, the portal, special prices all read it) and
+  `GET /api/products` for a customer login. `?for=walkin` (New order with no
+  customer) = own products only (`ownProductSql`).
+- `assertAvailable` runs inside `resolveLines`, so orders, edits, quotes,
+  counter sales and standing orders all refuse a product the customer may not
+  buy. `editOrder` passes the lines already on the order (`alreadyOnIt`) so an
+  order taken before a brand was unlinked can still be changed. A standing
+  order that hits it is reported as a problem, like any other.
+- The old single `customers.brand_id` is kept; a co-pack brand in it was
+  copied into `customer_brands`.
+- Screens: Products & pricing has a **Brands** panel (add, rename, retire;
+  "Ours" / "Bottled for a customer", who it is linked to) and a brand
+  drop-down under each product. A customer's Details has a new
+  **Products & prices** part (Addresses is now its own part): "Can order Alka
+  Vida products" and tick boxes for the bottled brands, above Special prices
+  (whose product list is now only what they may buy).
+- Routes (`routes/brands.ts`): `GET/POST /api/brands`, `PATCH /api/brands/:id`,
+  `GET/PUT /api/customers/:id/brands`.
+
+**Customer upload** (`services/imports.ts`, `pages/CustomerImport.tsx`,
+Customers › Upload customers, `/customers/import`):
+- Reads the merged file as edited: the .xlsx itself (`lib/sheetfile.ts`, a
+  small zip/XML reader on the browser's DecompressionStream - no library) or a
+  CSV. `lib/customerUpload.ts` finds columns by heading, in any order; uses
+  the "Customer Upload" sheet, and "Open Items" for each customer's open
+  QuickBooks invoices and unapplied payments.
+- `POST /api/customers/import { rows, asOf, holdAutoEmails, dryRun }`. The
+  screen checks first (dry run: row by row, nothing written), then "Bring them
+  in" is ONE transaction - all or nothing; any row with a problem stops it.
+- A name already on file (active) is skipped, never overwritten, so the file
+  can be uploaded again. Customer Type: Individual/Corporate; Distributor =
+  Corporate on the "Distributor" price list (warning if there is none);
+  blank = Individual with a warning. Unknown zones and bottled brands are
+  ADDED (listed in the preview so a misspelling shows). Days "Mon, Thu",
+  "Monday and Thursday", "Mon/Fri". Phone and Mobile are kept together in
+  `phone`; no phone or email is allowed for an import (a warning).
+- Opening balances: when the customer's Open Items add up to the Opening
+  Balance column, each open invoice becomes an invoice `OB-<QuickBooks no.>`
+  with its date and due date, no lines, `is_opening_balance`, lifecycle Sent,
+  no GCT (QuickBooks already charged it); each unapplied payment becomes an
+  unattached payment (method Other, kind "Opening credit") = credit on
+  account. Otherwise one line dated "as of". Items that net to zero bring in
+  nothing. The invoice PDF and page show "Balance brought forward".
+- "Hold automatic statements and reminders" (ticked by default) turns
+  `auto_statements`/`auto_reminders` off for those customers so nobody is
+  emailed the day they arrive.
+- Tried end to end with the real file (265 customers, J$1,713,610.36, ties to
+  the Collections Report). The real file is NOT in git (the repo is public);
+  `web/test/fixtures/sample-upload.xlsx` is made-up customers.
+
+Tests: 583 (68 + 507 + 8). New `api/test/brands.test.ts` (12), `web/test/upload.test.ts` (4).
+

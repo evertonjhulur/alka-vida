@@ -7,6 +7,7 @@ import { api, getSession, takeReturnPath, type Session, type Role } from './lib/
 import Login from './pages/Login';
 import Dashboard from './pages/Dashboard';
 import Customers from './pages/Customers';
+import CustomerImport from './pages/CustomerImport';
 import NewOrder from './pages/NewOrder';
 import Orders from './pages/Orders';
 import Recurring from './pages/Recurring';
@@ -324,6 +325,7 @@ function Shell({ session }: { session: Session }) {
           <Route path="/orders" element={<><SectionTabs tabs={ORDERS} badges={tabBadges} /><Orders /></>} />
           <Route path="/recurring" element={<><SectionTabs tabs={ORDERS} badges={tabBadges} /><Recurring /></>} />
           <Route path="/customers" element={<><SectionTabs tabs={CUSTOMERS} /><Keyed><Customers session={session} /></Keyed></>} />
+          <Route path="/customers/import" element={<CustomerImport />} />
           <Route path="/customers/:customerId" element={<CustomerRecord session={session} />} />
           <Route path="/pricing" element={<><BackToSettings /><Pricing session={session} /></>} />
           <Route path="/products/:productId/bom" element={<Bom />} />

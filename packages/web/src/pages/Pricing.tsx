@@ -10,11 +10,17 @@ interface Product {
   active: boolean; isReturnable: boolean; isBottleCharge?: boolean;
   unit: 'case' | 'bottle'; listPriceCents: number;
   tierPrices: Record<string, number>;
+  brandId: string | null; brandName: string | null; brandType: string | null;
 }
+interface Brand {
+  id: string; name: string; type: 'Owned' | 'Third-Party Co-Pack'; active: boolean;
+  product_count: number; customers: Array<{ id: string; name: string }>;
+}
+const CO_PACK = 'Third-Party Co-Pack';
 interface Matrix { tiers: Tier[]; products: Product[] }
 
 const NEW_PRODUCT = {
-  name: '', size: '', bottlesPerCase: '24', listPrice: '', isReturnable: false,
+  name: '', size: '', bottlesPerCase: '24', listPrice: '', isReturnable: false, brandId: '',
 };
 
 export default function Pricing({ session }: { session: Session }) {
@@ -26,12 +32,15 @@ export default function Pricing({ session }: { session: Session }) {
   const [showProduct, setShowProduct] = useState(false);
   const [np, setNp] = useState({ ...NEW_PRODUCT });
   const [newTier, setNewTier] = useState('');
+  const [brands, setBrands] = useState<Brand[]>([]);
+  const [nb, setNb] = useState<{ name: string; type: string }>({ name: '', type: CO_PACK });
 
   /** Cell being edited: `${productId}:${tierId}` -> typed value. */
   const [edits, setEdits] = useState<Record<string, string>>({});
 
   async function load() {
-    setMatrix(await api.get<Matrix>('/api/pricing'));
+    const [m, b] = await Promise.all([api.get<Matrix>('/api/pricing'), api.get<Brand[]>('/api/brands')]);
+    setMatrix(m); setBrands(b);
   }
   useEffect(() => { load().catch((e) => setError(e.message)); }, []);
 
@@ -52,6 +61,7 @@ export default function Pricing({ session }: { session: Session }) {
         pricePerCaseCents: bpc > 0 ? price : 0,
         pricePerBottleCents: bpc > 0 ? 0 : price,
         isReturnable: np.isReturnable,
+        brandId: np.brandId || brands.find((b) => b.type === 'Owned' && b.active)?.id || null,
       });
       setMsg(`${np.name} added.`);
       setNp({ ...NEW_PRODUCT });
@@ -126,6 +136,59 @@ export default function Pricing({ session }: { session: Session }) {
       setError(err instanceof Error ? err.message : 'Could not save the list price');
     } finally { setBusy(false); }
   }
+
+  async function setBrand(product: Product, brandId: string) {
+    setBusy(true); setError(null);
+    try {
+      await api.patch(`/api/products/${product.id}`, { brandId: brandId || null });
+      const b = brands.find((x) => x.id === brandId);
+      setMsg(b?.type === CO_PACK
+        ? `${product.name} is now ${b.name}: only the customers it is bottled for will be offered it.`
+        : `${product.name} brand changed.`);
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not change the brand');
+    } finally { setBusy(false); }
+  }
+
+  async function addBrand(e: React.FormEvent) {
+    e.preventDefault();
+    setBusy(true); setError(null);
+    try {
+      await api.post('/api/brands', nb);
+      setMsg(`${nb.name} added.` + (nb.type === CO_PACK ? ' Link it to the customer it is bottled for on their Details › Products & prices.' : ''));
+      setNb({ name: '', type: CO_PACK });
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not add the brand');
+    } finally { setBusy(false); }
+  }
+
+  async function brandChange(b: Brand, change: { active?: boolean; name?: string }) {
+    setBusy(true); setError(null);
+    try {
+      await api.patch(`/api/brands/${b.id}`, change);
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not change the brand');
+    } finally { setBusy(false); }
+  }
+
+  async function renameBrand(b: Brand) {
+    const name = await askText(`Rename ${b.name}`, { label: 'Brand name', value: b.name, confirmLabel: 'Rename' });
+    if (name && name.trim() && name.trim() !== b.name) await brandChange(b, { name: name.trim() });
+  }
+
+  const brandSelect = (p: Product) => (
+    <select aria-label={`Brand of ${p.name}`} value={p.brandId ?? ''} disabled={busy}
+            style={{ fontSize: 12, padding: '2px 4px', marginTop: 4 }}
+            onChange={(e) => setBrand(p, e.target.value)}>
+      <option value="">No brand (ours)</option>
+      {brands.filter((b) => b.active || b.id === p.brandId).map((b) => (
+        <option key={b.id} value={b.id}>{b.name}{b.type === CO_PACK ? ' — bottled for a customer' : ''}</option>
+      ))}
+    </select>
+  );
 
   async function toggleActive(product: Product) {
     setBusy(true); setError(null);
@@ -202,6 +265,7 @@ export default function Pricing({ session }: { session: Session }) {
                       {p.isBottleCharge ? ' · charged when a customer hands over fewer empties than the full 5-gallon bottles they take' : ''}
                       {!p.active ? ' · retired' : ''}
                     </div>
+                    {!p.isBottleCharge && brandSelect(p)}
                   </td>
                   <td className="num">
                     <input type="number" step="0.01" min="0" style={{ width: 100 }}
@@ -278,6 +342,54 @@ export default function Pricing({ session }: { session: Session }) {
         </div>
       </div>
 
+      <div className="panel">
+        <div className="row" style={{ justifyContent: 'space-between' }}>
+          <h2 style={{ marginTop: 0 }}>Brands</h2>
+          <form onSubmit={addBrand} className="row" style={{ marginBottom: 0 }}>
+            <div className="field" style={{ marginBottom: 0 }}>
+              <input aria-label="New brand name" value={nb.name} placeholder="e.g. Cool Cool"
+                     onChange={(e) => setNb({ ...nb, name: e.target.value })} />
+            </div>
+            <div className="field" style={{ marginBottom: 0 }}>
+              <select aria-label="Whose brand" value={nb.type} onChange={(e) => setNb({ ...nb, type: e.target.value })}>
+                <option value={CO_PACK}>Bottled for a customer</option>
+                <option value="Owned">Our own</option>
+              </select>
+            </div>
+            <button disabled={busy || !nb.name.trim()}>Add brand</button>
+          </form>
+        </div>
+        <p className="muted small" style={{ marginTop: 0 }}>
+          Our own brands are offered to every customer. A brand we bottle for a customer is offered only to
+          the customers it is linked to (their Details › Products &amp; prices) — never to anybody else,
+          walk-ins included. Choose each product's brand under its name below.
+        </p>
+        <table>
+          <thead><tr><th>Brand</th><th>Whose</th><th>Bottled for</th><th className="num">Products</th><th /></tr></thead>
+          <tbody>
+            {brands.map((b) => (
+              <tr key={b.id} style={{ opacity: b.active ? 1 : 0.5 }}>
+                <td><strong>{b.name}</strong>{!b.active && <span className="muted small"> · retired</span>}</td>
+                <td>{b.type === CO_PACK ? <span className="chip info">Bottled for a customer</span> : <span className="chip ok">Ours</span>}</td>
+                <td className="small">
+                  {b.type !== CO_PACK ? <span className="muted">everyone</span>
+                    : b.customers.length ? b.customers.map((c, i) => (
+                      <span key={c.id}>{i > 0 && ', '}<Link to={`/customers/${c.id}?tab=details&part=products`}>{c.name}</Link></span>
+                    )) : <span className="chip warn">nobody yet</span>}
+                </td>
+                <td className="num">{b.product_count}</td>
+                <td className="num">
+                  <button className="secondary" disabled={busy} onClick={() => renameBrand(b)}>Rename</button>{' '}
+                  <button className={b.active ? 'danger-soft' : 'secondary'} disabled={busy}
+                          onClick={() => brandChange(b, { active: !b.active })}>{b.active ? 'Retire' : 'Restore'}</button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        {brands.length === 0 && <p className="muted">No brands yet.</p>}
+      </div>
+
       {grid(
         cased,
         'Case sales',
@@ -324,6 +436,15 @@ export default function Pricing({ session }: { session: Session }) {
                 <input id="pp" type="number" step="0.01" min="0" required
                        style={{ width: 140 }} value={np.listPrice}
                        onChange={(e) => setNp({ ...np, listPrice: e.target.value })} />
+              </div>
+              <div className="field">
+                <label htmlFor="pbr">Brand</label>
+                <select id="pbr" value={np.brandId} onChange={(e) => setNp({ ...np, brandId: e.target.value })}>
+                  <option value="">{brands.find((b) => b.type === 'Owned' && b.active)?.name ?? 'Ours'}</option>
+                  {brands.filter((b) => b.active && b.type === CO_PACK).map((b) => (
+                    <option key={b.id} value={b.id}>{b.name} — bottled for a customer</option>
+                  ))}
+                </select>
               </div>
               <div className="field">
                 <label htmlFor="pr">Returnable</label>

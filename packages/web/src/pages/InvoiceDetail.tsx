@@ -60,6 +60,8 @@ interface Invoice {
   customer?: CustomerRef; orders?: OrderRef[];
   delivery?: Delivery | null; creditNotes?: CreditNote[]; history?: HistoryRow[];
   onAccountCents?: number;
+  /** A balance brought across from QuickBooks (16 Oct 2026): no lines of its own. */
+  is_opening_balance?: boolean; opening_reference?: string | null; notes?: string | null;
 }
 
 type Panel = 'pay' | 'email' | 'edit' | 'discount' | 'credit' | null;
@@ -577,6 +579,15 @@ export default function InvoiceDetail({ session }: { session: Session }) {
                     <td className="num">{money(Number(l.line_total_cents))}</td>
                   </tr>
                 ))}
+                {i.is_opening_balance && (i.lines ?? []).length === 0 && (
+                  <tr>
+                    <td>Balance brought forward
+                      <div className="muted small">{i.notes ?? 'Opening balance brought across from QuickBooks.'}</div></td>
+                    <td />
+                    <td />
+                    <td className="num">{money(Number(i.subtotal_cents))}</td>
+                  </tr>
+                )}
               </tbody>
             </table>
           </div>
@@ -585,7 +596,9 @@ export default function InvoiceDetail({ session }: { session: Session }) {
             {Number(i.discount_amount_cents) > 0 && (
               <div className="total-line"><span>Discount{Number(i.discount_fixed_cents) > 0 ? '' : ` ${Number(i.discount_percent)}%`}</span><span>−{money(Number(i.discount_amount_cents))}</span></div>
             )}
-            <div className="total-line"><span>{i.gct_exempt ? 'GCT (exempt)' : 'GCT 15%'}</span><span>{money(Number(i.gct_cents))}</span></div>
+            {!i.is_opening_balance && (
+              <div className="total-line"><span>{i.gct_exempt ? 'GCT (exempt)' : 'GCT 15%'}</span><span>{money(Number(i.gct_cents))}</span></div>
+            )}
             <div className="total-line grand"><span>Total</span><span>{money(i.grandTotalCents)}</span></div>
             {!i.is_credit_note && (
               <>

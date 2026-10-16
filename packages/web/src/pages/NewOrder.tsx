@@ -221,7 +221,7 @@ export default function NewOrder() {
   const pastCutoff = nowHm >= cutoff;
 
   useEffect(() => {
-    api.get<Product[]>('/api/products').then((p) => { setListProducts(p); setProducts(p); }).catch(() => {});
+    api.get<Product[]>('/api/products?for=walkin').then((p) => { setListProducts(p); setProducts(p); }).catch(() => {});
     api.get<Customer[]>('/api/customers').then(setCustomers).catch(() => {});
     api.get<{ sameDayCutoff: string }>('/api/settings/ordering')
       .then((o) => setCutoff(o.sameDayCutoff || '10:00')).catch(() => {});

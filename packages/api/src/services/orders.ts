@@ -8,6 +8,7 @@
 import type { Db, Queryable } from '../db/index.ts';
 import type { Actor } from './core.ts';
 import { audit, businessTimeNow, businessToday, getSetting, nextNumber, num, requireRole } from './core.ts';
+import { assertAvailable } from './brands.ts';
 import type { Cents, DeliveryMode, PaymentMethod, RecurrencePattern } from '@alka/shared';
 import {
   computeTotals, computeLineTotal, totalBottles, RuleViolation, composeAddress,
@@ -109,6 +110,7 @@ export async function resolveLines(
   t: Queryable,
   customerId: string,
   lines: readonly OrderLineInput[],
+  opts: { alreadyOnIt?: readonly string[] } = {},
 ): Promise<ResolvedLine[]> {
   if (lines.length === 0) throw new RuleViolation('an order must have at least one line');
 
@@ -122,6 +124,9 @@ export async function resolveLines(
       `${customer.name} is inactive (merged away) and cannot be selected for new orders`,
     );
   }
+  // Products bottled for one customer are never sold to another, and a
+  // customer who buys only their own brands is not sold ours (16 Oct 2026).
+  await assertAvailable(t, customerId, lines.map((l) => l.productId), opts.alreadyOnIt);
 
   const resolved: ResolvedLine[] = [];
   for (const line of lines) {
@@ -693,8 +698,13 @@ export async function editOrder(
     }
 
     const warnings: string[] = [];
+    // A line already on the order can stay even if its brand was unlinked since.
+    const onIt = changes.lines
+      ? (await t.query<{ product_id: string }>(
+          `SELECT product_id FROM order_line_items WHERE order_id = $1`, [orderId])).map((r) => r.product_id)
+      : [];
     const lines = changes.lines
-      ? await resolveLines(t, order.customer_id, changes.lines)
+      ? await resolveLines(t, order.customer_id, changes.lines, { alreadyOnIt: onIt })
       : null;
 
     if (lines) {

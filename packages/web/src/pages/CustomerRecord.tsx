@@ -5,7 +5,7 @@ import { payMethods, useTakeCard } from '../lib/payments';
 import { money, date, statusTone, toCents, todayInJamaica, when } from '../lib/format';
 import StatementDialog from '../components/StatementDialog';
 import CustomerForm, { customerToForm, formToPayload, BLANK_CUSTOMER, type CustomerFormValues } from '../components/CustomerForm';
-import { AddressesPanel, SpecialPricesPanel } from '../components/CustomerExtras';
+import { AddressesPanel, BrandsPanel, SpecialPricesPanel } from '../components/CustomerExtras';
 import { BatchBar, MultiStatusSelect, SortTh, StatusSelect, TickAllTh, TickTd, passes, useSort, useTicks } from '../components/ListTools';
 import { ORDER_STAGES, orderStage } from '../lib/orderStatus';
 import { STATE_TONE, invoiceMatches, invoiceState } from '../lib/invoiceState';
@@ -154,7 +154,8 @@ const PARTS = [
   ['contact', 'Contact & delivery'],
   ['billing', 'Billing'],
   ['emails', 'Emails'],
-  ['addresses', 'Addresses & prices'],
+  ['addresses', 'Addresses'],
+  ['products', 'Products & prices'],
 ] as const;
 type Part = (typeof PARTS)[number][0];
 
@@ -190,6 +191,7 @@ export default function CustomerRecord({ session }: { session: Session }) {
     setParams(next, { replace: true });
   };
 
+  const [brandsSaved, setBrandsSaved] = useState(0);
   const partParam = params.get('part');
   const part: Part = PARTS.some(([k]) => k === partParam) ? partParam as Part : 'contact';
   const setPart = (p: Part) => {
@@ -1314,9 +1316,11 @@ export default function CustomerRecord({ session }: { session: Session }) {
             ))}
           </nav>
           {part === 'addresses' ? (
+            <AddressesPanel customerId={c.id} />
+          ) : part === 'products' ? (
             <>
-              <AddressesPanel customerId={c.id} />
-              <SpecialPricesPanel customerId={c.id} priceList={c.price_tier_name} />
+              <BrandsPanel customerId={c.id} onSaved={() => setBrandsSaved((n) => n + 1)} />
+              <SpecialPricesPanel customerId={c.id} priceList={c.price_tier_name} refresh={brandsSaved} />
             </>
           ) : (
             <div className="panel">

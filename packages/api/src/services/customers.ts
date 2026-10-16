@@ -8,6 +8,7 @@ import type { Actor } from './core.ts';
 import { audit, businessToday, num, requireRole } from './core.ts';
 import { RuleViolation, composeAddress } from '@alka/shared';
 import { assertZoneUsable } from './zones.ts';
+import { productAvailableSql } from './brands.ts';
 
 /**
  * Merge two customer records.
@@ -472,7 +473,7 @@ export async function customerPrices(db: Db | Queryable, customerId: string) {
      LEFT JOIN price_tiers pt ON pt.id = c.price_tier_id
      LEFT JOIN price_lists pl ON pl.product_id = p.id AND pl.price_tier_id = c.price_tier_id
      LEFT JOIN customer_prices cp ON cp.product_id = p.id AND cp.customer_id = c.id
-     WHERE p.active
+     WHERE p.active AND ${productAvailableSql('p', '$1')}
      ORDER BY p.name`,
     [customerId],
   );
