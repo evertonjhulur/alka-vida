@@ -13,13 +13,15 @@ import { centsFrom, headerKey, isoFrom, type Table } from './sheetfile.ts';
 
 export interface OpenItem {
   reference: string | null; type: string | null; date: string | null; dueDate: string | null;
-  amountCents: number | null; openCents: number;
+  amountCents: number | null; openCents: number; description: string | null;
 }
 export interface UploadRow {
   name: string; customerType: string; contactPerson: string; phone: string; mobile: string; email: string;
   billingAddress: string; deliveryAddress: string; area: string; parish: string;
   deliveryZone: string; deliveryDays: string; openingBalanceCents: number;
   bottledBrands: string; canOrderOwnBrand: string; openItems: OpenItem[];
+  paymentTerms: string; invoiceCycle: string;
+  deliveryInstructions: string; notes: string;
 }
 export interface ReadResult {
   sheet: string;
@@ -54,7 +56,13 @@ const COLUMNS: Record<string, keyof UploadRow | 'asOf' | 'skip'> = {
   bottledbrands: 'bottledBrands', brands: 'bottledBrands',
   canorderalkavidaproducts: 'canOrderOwnBrand', alkavidaproducts: 'canOrderOwnBrand',
   // The reference columns in the merged file; read past without complaint.
-  zonebasis: 'skip', suggestedtype: 'skip', suggestedzone: 'skip',
+  paymentterms: 'paymentTerms', terms: 'paymentTerms', creditterms: 'paymentTerms',
+  invoicecycle: 'invoiceCycle', cycle: 'invoiceCycle',
+  deliveryinstructions: 'deliveryInstructions', instructions: 'deliveryInstructions',
+  notes: 'notes', note: 'notes',
+  zonebasis: 'skip', suggestedtype: 'skip', suggestedzone: 'skip', check: 'skip', sources: 'skip',
+  // Price columns from his lists are reference only - prices are set in the app (16 Oct 2026).
+  '5gallonpricejmd': 'skip', '5gallonpriceon1506listreference': 'skip', '5gallonpricereference': 'skip',
 };
 
 const norm = (s: string) => String(s ?? '').replace(/\s+/g, ' ').trim();
@@ -111,6 +119,7 @@ export function readUpload(sheets: Record<string, Table>): ReadResult {
           reference: col(row, 'number') || null, type: col(row, 'type') || null,
           date: isoFrom(col(row, 'date')) || null, dueDate: isoFrom(col(row, 'duedate')) || null,
           amountCents: Number.isFinite(amount) ? amount : null, openCents: open,
+          description: col(row, 'description') || null,
         });
         items.set(nameKey(who), list);
       }
@@ -138,6 +147,8 @@ export function readUpload(sheets: Record<string, Table>): ReadResult {
       deliveryZone: at(row, 'deliveryZone'), deliveryDays: at(row, 'deliveryDays'),
       openingBalanceCents: Number.isFinite(bal) ? bal : 0,
       bottledBrands: at(row, 'bottledBrands'), canOrderOwnBrand: at(row, 'canOrderOwnBrand'),
+      paymentTerms: at(row, 'paymentTerms'), invoiceCycle: at(row, 'invoiceCycle'),
+      deliveryInstructions: at(row, 'deliveryInstructions'), notes: at(row, 'notes'),
       openItems: own,
     });
   }

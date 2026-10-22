@@ -3,6 +3,8 @@ import { Link, useSearchParams } from 'react-router-dom';
 import { api, type Session } from '../lib/api';
 import { money, date, todayInJamaica, when } from '../lib/format';
 import { askText } from '../components/Dialog';
+import WebsiteOrderRow, { type WebsiteOrder } from '../components/WebsiteOrderRow';
+import type { PickerCustomer } from '../components/CustomerPicker';
 
 /**
  * Needs a decision: everything waiting on an administrator, in one list.
@@ -95,6 +97,9 @@ export default function Decisions({ session }: { session: Session }) {
   const [apps, setApps] = useState<Application[]>([]);
   const [tiers, setTiers] = useState<Tier[]>([]);
   const [zones, setZones] = useState<Zone[]>([]);
+  // Orders from the website by people without an account (21 Oct 2026).
+  const [webOrders, setWebOrders] = useState<WebsiteOrder[]>([]);
+  const [customers, setCustomers] = useState<PickerCustomer[]>([]);
   const [params] = useSearchParams();
   const asked = params.get('show');
   const [filter, setFilter] = useState<Filter>(asked === 'money' || asked === 'accounts' ? asked : 'all');
@@ -120,6 +125,8 @@ export default function Decisions({ session }: { session: Session }) {
     setApps(b);
     try { setTiers(await api.get<Tier[]>('/api/price-tiers')); } catch { /* not fatal */ }
     try { setZones((await api.get<Zone[]>('/api/zones')).filter((z) => !z.retired_at)); } catch { /* not fatal */ }
+    try { setWebOrders(await api.get<WebsiteOrder[]>('/api/website-orders?status=Pending')); } catch { /* not fatal */ }
+    try { setCustomers(await api.get<PickerCustomer[]>('/api/customers')); } catch { /* not fatal */ }
   }
   useEffect(() => { load().catch((e) => setError(e.message)); }, []);
 
@@ -185,7 +192,7 @@ export default function Decisions({ session }: { session: Session }) {
 
   const pendingApps = apps.filter((a) => a.status === 'Pending');
   const decidedApps = apps.filter((a) => a.status !== 'Pending').slice(0, 10);
-  const total = approvals.length + pendingApps.length;
+  const total = approvals.length + pendingApps.length + webOrders.length;
   const showMoney = filter !== 'accounts';
   const showAccounts = filter !== 'money';
 
@@ -376,6 +383,10 @@ export default function Decisions({ session }: { session: Session }) {
 
   const shown = [
     ...(showMoney ? approvals.map(approvalRow) : []),
+    ...(showAccounts ? webOrders.map((w) => (
+      <WebsiteOrderRow key={w.id} w={w} isAdmin={isAdmin} tiers={tiers} zones={zones} customers={customers}
+                       busy={busy} act={act} onLink={(l, e) => { setLink(l); setEmailed(e); }} />
+    )) : []),
     ...(showAccounts ? pendingApps.map(appRow) : []),
   ];
 
@@ -408,7 +419,7 @@ export default function Decisions({ session }: { session: Session }) {
       <div className="pills" role="group" aria-label="Show">
         {pill('all', 'Everything', total)}
         {pill('money', 'Money changes', approvals.length)}
-        {pill('accounts', 'New accounts', pendingApps.length)}
+        {pill('accounts', 'New accounts and website orders', pendingApps.length + webOrders.length)}
       </div>
 
       <div className="panel" style={{ padding: 0 }}>

@@ -47,6 +47,8 @@ export interface ImportOpenItem {
   amountCents?: number | null;
   /** What is still open: positive owed, negative credit. */
   openCents: number;
+  /** What the line is, printed on the opening invoice (e.g. "Current balance at 16 Oct 2026"). */
+  description?: string | null;
 }
 
 export interface ImportRow {
@@ -65,6 +67,12 @@ export interface ImportRow {
   openingBalanceCents?: number | null;
   bottledBrands?: string | null;
   canOrderOwnBrand?: string | boolean | null;
+  /** "Due on receipt", "Net 15"... (16 Oct 2026: from the 1506 customer list). */
+  paymentTerms?: string | null;
+  /** Every delivery, Weekly or Monthly. Weekly and Monthly are due on receipt. */
+  invoiceCycle?: string | null;
+  deliveryInstructions?: string | null;
+  notes?: string | null;
   openItems?: ImportOpenItem[] | null;
 }
 
@@ -83,6 +91,8 @@ export interface RowResult {
   action: 'create' | 'skip' | 'error';
   accountType: 'Individual' | 'Corporate' | null;
   priceList: string | null;
+  paymentTerms: string | null;
+  invoiceCycle: 'PerDelivery' | 'Weekly' | 'Monthly';
   zone: string | null;
   days: string[];
   brands: string[];
@@ -165,6 +175,8 @@ interface Plan {
   items: ImportOpenItem[];
 }
 
+const STANDARD_TERMS = ['Due on receipt', 'Cash on delivery', 'Net 15', 'Net 30', 'Net 60', 'Net 90'];
+
 async function plan(t: Queryable, input: ImportInput) {
   const existing = new Set((await t.query<{ name: string }>(
     `SELECT name FROM customers WHERE active`)).map((c) => squash(c.name)));
@@ -182,7 +194,8 @@ async function plan(t: Queryable, input: ImportInput) {
   input.rows.forEach((src, i) => {
     const name = clean(src.name);
     const r: RowResult = {
-      row: i + 2, name, action: 'create', accountType: null, priceList: null, zone: null,
+      row: i + 2, name, action: 'create', accountType: null, priceList: null,
+      paymentTerms: null, invoiceCycle: 'PerDelivery', zone: null,
       days: [], brands: [], buysOwnBrand: true, balanceCents: 0, balanceAs: 'none', itemCount: 0,
       errors: [], warnings: [],
     };
@@ -275,6 +288,20 @@ async function plan(t: Queryable, input: ImportInput) {
       r.warnings.push('cannot order Alka Vida products and has no bottled brands - they will have nothing to order');
     }
 
+    // Terms and invoice cycle. Prices are never set from the file (16 Oct 2026):
+    // the price columns on his lists are reference only.
+    const cycle = clean(src.invoiceCycle).toLowerCase().replace(/[^a-z]/g, '');
+    if (!cycle || cycle === 'everydelivery' || cycle === 'perdelivery') r.invoiceCycle = 'PerDelivery';
+    else if (cycle === 'weekly') r.invoiceCycle = 'Weekly';
+    else if (cycle === 'monthly' || cycle === 'endofmonth' || cycle === 'eom') r.invoiceCycle = 'Monthly';
+    else r.errors.push(`Invoice Cycle "${clean(src.invoiceCycle)}" should be Every delivery, Weekly or Monthly`);
+    const terms = clean(src.paymentTerms);
+    if (r.invoiceCycle !== 'PerDelivery') r.paymentTerms = 'Due on receipt';
+    else if (terms) {
+      r.paymentTerms = STANDARD_TERMS.find((x) => x.toLowerCase() === terms.toLowerCase()) ?? terms;
+      if (!STANDARD_TERMS.includes(r.paymentTerms)) r.warnings.push(`payment terms "${terms}" are not one of the usual ones - kept as written`);
+    }
+
     // Opening balance
     const bal = Math.round(Number(src.openingBalanceCents ?? 0)) || 0;
     r.balanceCents = bal;
@@ -361,8 +388,9 @@ export async function importCustomers(db: Db, actor: Actor, input: ImportInput):
         `INSERT INTO customers
            (name, account_type, contact_person, phone, email, address_line1, city, parish, delivery_address,
             delivery_zone, delivery_days, default_delivery_day, price_tier_id, buys_own_brand,
-            auto_statements, auto_reminders, imported_at, notes)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::text[],$12,$13,$14,$15,$16,now(),$17)
+            auto_statements, auto_reminders, imported_at, notes,
+            payment_terms, invoice_cycle, delivery_instructions)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::text[],$12,$13,$14,$15,$16,now(),$17,$18,$19,$20)
          RETURNING id`,
         [r.name, r.accountType, clean(src.contactPerson) || null, p.phone, p.email,
          p.line1, p.city, p.parish,
@@ -371,7 +399,9 @@ export async function importCustomers(db: Db, actor: Actor, input: ImportInput):
          composeAddress({ addressLine1: p.line1, city: p.city,
            parish: p.parish && !squash(p.line1 ?? '').includes(squash(p.parish)) ? p.parish : null }),
          r.zone, r.days, r.days[0] ?? null, p.tierId, r.buysOwnBrand, !hold, !hold,
-         `Brought across from QuickBooks on ${new Date().toISOString().slice(0, 10)}`],
+         [clean(src.notes), `Brought across from QuickBooks on ${new Date().toISOString().slice(0, 10)}`]
+           .filter(Boolean).join('\n'),
+         r.paymentTerms, r.invoiceCycle, clean(src.deliveryInstructions) || null],
       );
       await audit(t, actor, 'create', 'Customer', c.id, r.name, { from: 'customer upload', asOf });
 
@@ -403,6 +433,7 @@ export async function importCustomers(db: Db, actor: Actor, input: ImportInput):
              VALUES ($1,$2,$3,$2,$4,'Sent',$5,0,$5,true,$6,$7) RETURNING id`,
             [number, date, isoDate(item.dueDate) ?? date, c.id, item.openCents, ref,
              ref ? `Opening balance brought across from QuickBooks invoice ${ref}${was}.`
+                 : clean(item.description) ? `Opening balance brought across from QuickBooks: ${clean(item.description)}.`
                  : `Opening balance brought across from QuickBooks, as at ${asOf}.`],
           );
           await audit(t, actor, 'create', 'Invoice', inv.id, number,

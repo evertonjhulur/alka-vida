@@ -54,7 +54,7 @@ Working and verified end to end, in the browser as well as in tests:
 | Addresses | Line 1, line 2, town, parish. Composed into `delivery_address`, which stays what the stop and the invoice PDF read (migration 014). |
 | Employees & labour cost | Who works here, paid by the hour or by the trip, and the hours/trips recorded against them. Payroll totals for any date range. **Add from logins** creates a record per existing login — title from the role (`admin`→Manager, `user`→Employee, `driver`→Driver), rate left blank — and is safe to press twice. **Deliberately not wired into costing** (migration 015). A person is managed on their own record at `/employees/:id` — details, rate, and their own work history. |
 
-**Tests: 583 passing** (16 Oct 2026) — 68 pure domain (`packages/shared`), 507 API, 8 web (`packages/web/test`)
+**Tests: 585 passing** (16 Oct 2026) — 68 pure domain (`packages/shared`), 508 API, 9 web (`packages/web/test`)
 (`packages/api`, against real PostgreSQL via PGlite).
 
 ```bash
@@ -107,6 +107,7 @@ decision behind them:
 | 020 | Everton's round of 10 Oct: payment after delivery (`after_stop_id`), truck loading and returns (`round_loads`, `round_load_lines`), collection stops (`round_collections`), stock-ledger types TruckLoad / TruckReturn / CustomerReturn, settings `document_footer` and `take_card_payments` |
 | 026 | notification settings: `users.notify_orders/notify_decisions/notify_load/quiet_from/quiet_to`, `staff_notifications.knocked_at` |
 | 025 | 15 Oct follow-up: `customer_orders.ready_at/ready_by_name/seen_at/review_reason`, request type SpecialDayOrder, `push_subscriptions`, `staff_notifications`, `staff_alerts_sent`, `users.decision_emails`, setting `alerts_since` |
+| 028 | (withdrawn, empty) standing discount |
 | 027 | bottled brands and the customer upload (16 Oct): `customer_brands`, `customers.buys_own_brand/imported_at`, `brands.active` + unique name, `invoices.is_opening_balance/opening_reference` |
 | 018 | Everton's round of 7 Oct: email ticks + unsubscribe token, walk-in flag, news pictures, "Payment Only" stops and partial deliveries, empties expected, the 5-gallon bottle product flag and bottles sold, PO "Partially Received - Closed" |
 
@@ -1749,3 +1750,99 @@ Customers › Upload customers, `/customers/import`):
 
 Tests: 583 (68 + 507 + 8). New `api/test/brands.test.ts` (12), `web/test/upload.test.ts` (4).
 
+**Upload file v2 (16 Oct 2026, later).** Everton added the 1506 Customer List
+(delivery day, credit terms DOR/EOM/15 days/FOC, 5-gallon price, green =
+"invoice urgently"), the Delivery Area list (zone blocks by day) and the A/R
+Ageing Summary at 16 Oct (balances now J$3,115,278.10 - the collections
+report had left out current invoices). The upload now also reads:
+- Payment Terms (free text, the usual ones recognised) and Invoice Cycle
+  (Every delivery / Weekly / Monthly; Weekly and Monthly force Due on
+  receipt). EOM on his list = Monthly.
+- Delivery Instructions (gate codes) and Notes (added above the
+  "Brought across" line).
+- Open Items "Description": printed on an opening invoice with no QuickBooks
+  number (the "current balance" and ageing-bucket lines).
+- "Check" and "Sources" columns are reference only and ignored.
+Zones are Everton's to set up: the file carries a draft from his Delivery Area
+list (Portmore/Downtown Mon, Red Hills/Uptown Tue+Thu, New Kingston/Cross
+Roads Wed, Downtown Fri - "we go downtown twice"). His rule: the delivery
+DAY supersedes the zone; the app already works that way (a customer's own
+days come before their zone's run days in `orders.deliveryDaysFor`).
+Tests: 1 more API, 1 more web.
+
+**No pricing from the upload (16 Oct 2026).** Everton: "please do not change
+any pricing mechanisms in the systems, the lists aren't perfect and needs
+updating by me before." A standing-discount feature (migration 028) and the
+upload setting 5-gallon special prices were built and then removed the same
+day; 028 is now an empty migration kept for numbering. The upload sets no
+prices and no discounts; the 5-gallon price and free-of-cost columns in the
+file are reference only (FOC customers are charged and discounted 100% by
+hand; Kool 97FM is billed and offset as marketing spend). It still puts a
+"Distributor" customer on the Distributor price list.
+
+**Upload file v3** uses the QuickBooks Open Invoices report (16 Oct, 4:41 pm,
+J$3,054,018.29) for every opening invoice and unapplied payment; the 3:00 pm
+A/R Ageing's extra pennies (J$0.25 in all) are folded into each customer's
+latest invoice; larger differences are flagged (payments posted in between).
+
+Tests: 585 (68 + 508 + 9).
+
+
+---
+
+## The public website at alkavidaja.com (21-22 Oct 2026)
+
+Everton: "migrate the app and guide customers into our ecosystem" - one
+access point at alkavidaja.com, with login and customer interaction. Rulings
+(21 Oct): ONE SITE served by the app (GoDaddy Website Builder and the JotForm
+retired; point the domain at Railway); guests can order without an account
+("quick order, then account"); show listed prices; separate pages, not one
+long home page; the About page keeps the ORIGINAL copy word for word; the
+business number is 876-528-6112. Mockups: https://claude.ai/artifact/7EpDVWC4XjzpDdFZ5ZH6Ph
+(project doc claude/landing-page-oct-2026.md). Then: "build for the team to
+see and generate feedback".
+
+Web (`packages/web/src/site/Site.tsx`, `site.css`, all scoped under `.site`):
+- Pages: `/` home (signed out only; signed in, `/` is still the app), `/water`,
+  `/delivery`, `/your-account`, `/business`, `/about`, `/contact`, `/order`.
+  `SITE_PATHS` in Site.tsx; App.tsx `Routed` shows them signed in or not.
+- `/sign-in` is the old sign-in page (`?forgot=1` opens "reset password");
+  any other address signed out still shows sign-in (session-expiry return).
+  The home page and Your account carry their own sign-in form.
+- Live from the system, never typed twice: products and LISTED prices (each
+  product's own price - what a walk-in or a customer with no tier pays; tier
+  prices are never public), zones with run days (Delivery page "When do you
+  come to my area?"), WhatsApp number (Settings, else 876-528-6112).
+  Own-brand products only (`ownProductSql`), never co-pack, never the bottle
+  charge. GCT 15% shown on the order estimate, prices "before GCT".
+- Size photos: `packages/web/public/site/<size>.jpg` (5gal, 5l, 1.5l, 500ml,
+  280ml - see README.txt there); a drawn bottle until then.
+- Contact form opens the visitor's own email (mailto) - no mail from the page.
+
+API:
+- Migration 029 `website_orders` (+ `website_order_seq`, refs WEB-000001).
+- `services/website.ts`: `siteInfo`, `submitWebsiteOrder` (validates, own
+  products only, hidden "website" field for robots), `listWebsiteOrders`
+  (with `possible_matches` by email or last 7 phone digits),
+  `bookWebsiteOrder` (ADMIN: new customer from what they typed, or an
+  existing one; creates the order with `createOrder` - Delivery/Pickup,
+  pay on delivery, note "Website order WEB-…: will pay cash/by transfer",
+  empties 0 when "first 5 gallon, no empty" so the bottle charge applies;
+  if they ticked "Open an account" and gave an email: login + invitation +
+  the approved email), `declineWebsiteOrder` (ADMIN).
+- `routes/website.ts`: PUBLIC `GET /api/public/site`, `POST /api/public/order`
+  (5 per 10 minutes per address); office `GET /api/website-orders`; admin
+  `POST /api/website-orders/:id/book` and `/decline`.
+- Needs a decision: website orders sit under "New accounts and website
+  orders" (`components/WebsiteOrderRow.tsx`); badge counts and the dashboard
+  include them; admins get push + email ("website-order" alert kind).
+
+Tests: 595 (68 + 518 + 9). New `api/test/website.test.ts` (10). The alerts
+"quiet hours" test can fail if run across midnight Jamaica time; rerun it.
+
+Still to do / to decide: real case prices (Everton is updating pricing
+himself); zones and days; the photos; real Privacy Policy and Terms text;
+then point alkavidaja.com at Railway (GoDaddy DNS: CNAME www -> Railway, and
+the root via forwarding or Railway's instructions) - keep the MX records so
+orders@alkavidaja.com keeps working. Set PORTAL_URL=https://alkavidaja.com on
+Railway once the domain is live, so emailed links use it.

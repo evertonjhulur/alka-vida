@@ -119,7 +119,14 @@ export async function runAlerts(db: Db): Promise<AlertRun> {
        AND NOT EXISTS (SELECT 1 FROM staff_alerts_sent a WHERE a.kind = 'application' AND a.ref_id = customer_applications.id)
      ORDER BY created_at LIMIT 50`, [since],
   );
-  if (requests.length || apps.length) {
+  const webOrders = await db.query<{ id: string; reference: string; who: string; phone: string; fulfilment: string }>(
+    `SELECT id, reference, COALESCE(business_name, first_name || ' ' || last_name) AS who, phone, fulfilment
+     FROM website_orders
+     WHERE status = 'Pending' AND created_at > $1::timestamptz
+       AND NOT EXISTS (SELECT 1 FROM staff_alerts_sent a WHERE a.kind = 'website-order' AND a.ref_id = website_orders.id)
+     ORDER BY created_at LIMIT 50`, [since],
+  );
+  if (requests.length || apps.length || webOrders.length) {
     const admins = (await usersInRoles(db, ['admin'])).filter((u) => u.notify_decisions).map((u) => u.id);
     for (const r of requests) {
       if (!(await claim(db, 'decision', r.id))) continue;
@@ -147,6 +154,18 @@ export async function runAlerts(db: Db): Promise<AlertRun> {
       out.emails += await emailAdmins(db, `Alka Vida: new account request from ${a.who}`, 'A new account request',
         [['Who', a.who], ['Account', a.account_type], ...(a.phone ? [['Phone', a.phone] as [string, string]] : [])],
         'Someone asked to open an account. It is waiting for an administrator under Needs a decision.');
+      out.decisions++;
+    }
+    for (const w of webOrders) {
+      if (!(await claim(db, 'website-order', w.id))) continue;
+      await notifyUsers(db, admins, {
+        title: 'Needs a decision: website order',
+        body: [w.reference, w.who, w.fulfilment === 'Collect' ? 'collecting' : 'delivery', w.phone].join(' · '),
+        url: '/#/decisions?show=accounts', tag: `website-order-${w.id}`,
+      });
+      out.emails += await emailAdmins(db, `Alka Vida: website order ${w.reference} from ${w.who}`, 'A website order',
+        [['Reference', w.reference], ['Who', w.who], ['Phone', w.phone], ['How', w.fulfilment === 'Collect' ? 'Collecting at White Marl' : 'Delivery']],
+        'Someone ordered on the website without an account. Confirm it with them, then book it under Needs a decision.');
       out.decisions++;
     }
   }

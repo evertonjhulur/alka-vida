@@ -1771,3 +1771,4 @@ button.order-tile.delivered { border-left-color: var(--ok); }
 .notif-table td { vertical-align: middle; }
 .notif-table td.na { color: var(--muted); text-align: center; }
 .notif-table .switch { transform: scale(.9); }
+.signin-home { position: absolute; top: 18px; left: 24px; z-index: 1; color: var(--brand); font-weight: 600; text-decoration: none; }

@@ -59,7 +59,7 @@ export default function SetPassword() {
         <div className="panel" style={{ maxWidth: 460 }}>
           <h1>You are all set</h1>
           <p>Your password is saved. Sign in with it and your email address.</p>
-          <Link to="/">Go to sign in</Link>
+          <Link to="/sign-in">Go to sign in</Link>
         </div>
       </div>
     );
@@ -74,7 +74,7 @@ export default function SetPassword() {
             It may have been used already, or it may have expired. Use
             {' '}<strong>Forgotten your password?</strong> on the sign-in page to get a new one.
           </p>
-          <Link to="/">Back to sign in</Link>
+          <Link to="/sign-in">Back to sign in</Link>
         </div>
       </div>
     );

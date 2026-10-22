@@ -221,3 +221,37 @@ describe('Customer upload', () => {
     assert.equal(Number(inv.grand_total_cents), 100000);
   });
 });
+
+describe('Customer upload: terms, invoice cycle and notes (16 Oct 2026)', () => {
+  test('they are set on the customer; prices are never set from the file', async () => {
+    const r = await importCustomers(f.db, f.office, { asOf: '2026-10-16', rows: [
+      { name: 'Monthly Co', customerType: 'Corporate', invoiceCycle: 'Monthly', paymentTerms: 'Net 30',
+        fiveGallonPriceCents: 60000, notes: 'Invoice urgently', deliveryInstructions: 'Gate code 1234#' },
+      { name: 'Usual Price', customerType: 'Individual', paymentTerms: 'net 15', fiveGallonPriceCents: 50000 },
+      { name: 'Bad Cycle', customerType: 'Individual', invoiceCycle: 'Fortnightly' },
+    ], dryRun: true });
+    assert.equal(r.rows[0].invoiceCycle, 'Monthly');
+    assert.equal(r.rows[0].paymentTerms, 'Due on receipt');
+    assert.equal(r.rows[1].paymentTerms, 'Net 15');
+    assert.equal(r.rows[2].action, 'error');
+
+    await importCustomers(f.db, f.office, { asOf: '2026-10-16', rows: [
+      { name: 'Monthly Co', customerType: 'Corporate', invoiceCycle: 'Monthly', fiveGallonPriceCents: 60000,
+        notes: 'Invoice urgently', deliveryInstructions: 'Gate code 1234#',
+        openingBalanceCents: 100000, openItems: [{ openCents: 100000, date: '2026-10-16', dueDate: '2026-10-31',
+          description: 'Current balance (not yet due) at 16 Oct 2026' }] },
+    ] });
+    const c = await f.db.one<Record<string, unknown>>(`SELECT * FROM customers WHERE name = 'Monthly Co'`);
+    assert.equal(c.invoice_cycle, 'Monthly');
+    assert.equal(c.payment_terms, 'Due on receipt');
+    assert.equal(c.delivery_instructions, 'Gate code 1234#');
+    assert.match(String(c.notes), /^Invoice urgently\nBrought across from QuickBooks/);
+    const sp = await f.db.query(`SELECT 1 FROM customer_prices WHERE customer_id = $1`, [c.id]);
+    assert.equal(sp.length, 0);
+    const inv = await f.db.one<{ notes: string; due_date: string }>(
+      `SELECT notes, due_date::text FROM invoices WHERE customer_id = $1`, [c.id]);
+    assert.match(inv.notes, /Current balance \(not yet due\)/);
+    assert.equal(inv.due_date, '2026-10-31');
+  });
+});
+

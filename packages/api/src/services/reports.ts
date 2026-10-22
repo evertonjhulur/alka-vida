@@ -195,8 +195,10 @@ export async function dashboard(db: Db) {
      ORDER BY s.delivery_date, s.zone`,
   );
 
+  // Account requests plus website orders: both wait under "New accounts".
   const applications = await db.one<{ n: string }>(
-    `SELECT COUNT(*)::text AS n FROM customer_applications WHERE status = 'Pending'`,
+    `SELECT ((SELECT COUNT(*) FROM customer_applications WHERE status = 'Pending')
+           + (SELECT COUNT(*) FROM website_orders WHERE status = 'Pending'))::text AS n`,
   );
   const approvals = await db.query(
     `SELECT ar.id, ar.request_type, ar.entity_label, ar.reason,

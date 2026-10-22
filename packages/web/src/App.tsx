@@ -5,6 +5,7 @@ import {
 import { api, getSession, takeReturnPath, type Session, type Role } from './lib/api';
 
 import Login from './pages/Login';
+import PublicSite, { SITE_PATHS } from './site/Site';
 import Dashboard from './pages/Dashboard';
 import Customers from './pages/Customers';
 import CustomerImport from './pages/CustomerImport';
@@ -377,6 +378,7 @@ function Shell({ session }: { session: Session }) {
           <Route path="/my-account" element={<MyAccount session={session} />} />
           {/* Signing in from #/login lands on the start, not on "not found". */}
           <Route path="/login" element={<Navigate to="/" replace />} />
+          <Route path="/sign-in" element={<Navigate to="/" replace />} />
           <Route path="*" element={<NotFound />} />
         </Routes>
         </ErrorBoundary>
@@ -447,13 +449,22 @@ function Routed({
   // A quotation's accept link opens the same page whether or not anybody is
   // signed in on this browser.
   const isPublic = PUBLIC_ROUTES.includes(pathname) || pathname.startsWith('/quote/');
-  if (session && !isPublic) return <Shell session={session} />;
+  // The website at alkavidaja.com (21 Oct 2026): its pages are for everybody,
+  // signed in or not - except "/", which is the website's home page for a
+  // visitor and the app's start for somebody signed in.
+  const isSite = SITE_PATHS.includes(pathname) && !(session && pathname === '/');
+  if (session && !isPublic && !isSite) return <Shell session={session} />;
 
   return (
     <Routes>
+      {SITE_PATHS.map((p) => (
+        <Route key={p} path={p} element={<PublicSite session={session} onSignedIn={onSignedIn} />} />
+      ))}
       <Route path="/quote/:token" element={<QuoteAccept />} />
       <Route path="/register" element={<Register />} />
       <Route path="/set-password" element={<SetPassword />} />
+      {/* Any other address: the sign-in page, which after a session ran out
+          takes them back to where they were. */}
       <Route path="*" element={<Login onSignedIn={onSignedIn} />} />
     </Routes>
   );

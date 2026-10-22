@@ -25,7 +25,7 @@ describe('Customer upload file', () => {
     assert.equal(a.deliveryDays, 'Mon, Thu');
     assert.equal(a.canOrderOwnBrand, 'No');
     assert.deepEqual(a.openItems, [{ reference: '90001', type: 'Invoice', date: '2026-09-04',
-      dueDate: '2026-10-04', amountCents: 2000000, openCents: 1234567 }]);
+      dueDate: '2026-10-04', amountCents: 2000000, openCents: 1234567, description: null }]);
     assert.equal(b.name, 'Jane "JJ" Example');
     assert.equal(b.openingBalanceCents, -50000);
     assert.equal(b.openItems[0].openCents, -50000);
@@ -40,6 +40,17 @@ describe('Customer upload file', () => {
     assert.deepEqual(r.problems, []);
     assert.deepEqual(r.rows.map((x) => [x.name, x.openingBalanceCents, x.deliveryDays]),
       [['Smith, John', 150000, 'Mon, Thu'], ['Credit Co', -300000, '']]);
+  });
+
+  test('terms, invoice cycle, instructions and notes columns; price columns are reference only (16 Oct 2026)', () => {
+    const csv = 'Customer Name,Payment Terms,Invoice Cycle,5-Gallon Price (JMD),Delivery Instructions,Notes,Check,Sources\n'
+      + 'A Co,Due on receipt,Monthly,600,Gate code 1234#,Invoice urgently,Delivery day,1506 list\n';
+    const r = readUpload({ Sheet1: parseCsv(csv) });
+    assert.deepEqual(r.ignored, []);
+    const [a] = r.rows;
+    assert.deepEqual([a.paymentTerms, a.invoiceCycle, a.deliveryInstructions, a.notes],
+      ['Due on receipt', 'Monthly', 'Gate code 1234#', 'Invoice urgently']);
+    assert.ok(!('fiveGallonPriceCents' in a));
   });
 
   test('money and dates as Excel and QuickBooks write them', () => {

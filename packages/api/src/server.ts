@@ -49,6 +49,7 @@ import { registerOctoberRoutes } from './routes/october.ts';
 import * as trucks from './services/trucks.ts';
 import { registerTruckRoutes } from './routes/trucks.ts';
 import { registerBrandRoutes } from './routes/brands.ts';
+import { registerWebsiteRoutes } from './routes/website.ts';
 import { productAvailableSql, ownProductSql } from './services/brands.ts';
 import * as messaging from './services/messaging.ts';
 import * as paperwork from './services/paperwork.ts';
@@ -91,7 +92,7 @@ export async function buildServer(db: Db) {
   // An order or a request just made: look for things to announce now.
   app.addHook('onResponse', async (req, reply) => {
     if (req.method === 'POST' && reply.statusCode < 300
-      && /^\/api\/(orders|counter-sale|approvals|credit-notes|invoices|payments|stops|registration|register|portal)/.test(req.url)) {
+      && /^\/api\/(orders|counter-sale|approvals|credit-notes|invoices|payments|stops|registration|register|portal|public\/order)/.test(req.url)) {
       kickAlerts();
     }
   });
@@ -501,8 +502,11 @@ export async function buildServer(db: Db) {
    */
   app.get('/api/pending-counts', { preHandler: allow('admin', 'user') },
     async () => {
+      // Account requests and website orders both wait under "New accounts"
+      // in Needs a decision, so one badge counts both (21 Oct 2026).
       const apps = await db.one<{ n: string }>(
-        `SELECT COUNT(*)::text AS n FROM customer_applications WHERE status = 'Pending'`);
+        `SELECT ((SELECT COUNT(*) FROM customer_applications WHERE status = 'Pending')
+               + (SELECT COUNT(*) FROM website_orders WHERE status = 'Pending'))::text AS n`);
       const approvals = await db.one<{ n: string }>(
         `SELECT COUNT(*)::text AS n FROM approval_requests WHERE status = 'Pending'`);
       // Quotes a customer has said yes to, waiting to be turned into orders.
@@ -1678,6 +1682,7 @@ export async function buildServer(db: Db) {
   registerOctoberRoutes(app as never, db, { allow: allow as never, actorOf });
   registerTruckRoutes(app as never, db, { allow: allow as never, actorOf });
   registerBrandRoutes(app as never, db, { allow: allow as never, actorOf });
+  registerWebsiteRoutes(app as never, db, { allow: allow as never, actorOf });
 
   return app;
 }

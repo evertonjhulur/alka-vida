@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useLocation } from 'react-router-dom';
 import { api, type Session } from '../lib/api';
 import Logo from '../components/Logo';
 
@@ -15,7 +15,8 @@ export default function Login({ onSignedIn }: { onSignedIn: (s: Session) => void
   const [password, setPassword] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [forgot, setForgot] = useState(false);
+  // "Forgotten your password?" on the website comes here with ?forgot=1.
+  const [forgot, setForgot] = useState(new URLSearchParams(useLocation().search).get('forgot') === '1');
   const [resetSent, setResetSent] = useState(false);
 
   /** "Forgotten your password?": a reset link by email, never a yes/no on the address. */
@@ -49,6 +50,7 @@ export default function Login({ onSignedIn }: { onSignedIn: (s: Session) => void
   return (
     <div className="signin">
       <section className="signin-brand">
+        <Link to="/" className="signin-home small">‹ alkavidaja.com home</Link>
         <Logo height={150} className="signin-logo" />
         <div className="signin-line">Orders, rounds and money, in one place.</div>
         <div className="signin-sub">

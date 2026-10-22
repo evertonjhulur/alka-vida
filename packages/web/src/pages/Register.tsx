@@ -61,8 +61,8 @@ export default function Register() {
 
   const header = (
     <header className="public-head">
-      <Link to="/" aria-label="Alka Vida, sign in"><Logo height={52} /></Link>
-      <Link to="/">Sign in</Link>
+      <Link to="/" aria-label="Alka Vida home"><Logo height={52} /></Link>
+      <Link to="/sign-in">Sign in</Link>
     </header>
   );
 
@@ -81,7 +81,7 @@ export default function Register() {
               Once your account is set up you will get an email with a link to choose
               your own password. Nobody here will ever ask you for it.
             </p>
-            <Link to="/">Back to sign in</Link>
+            <Link to="/">Back to the home page</Link>
           </section>
         </main>
       </div>

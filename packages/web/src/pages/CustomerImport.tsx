@@ -9,6 +9,7 @@ import { readUpload, type ReadResult } from '../lib/customerUpload';
 interface RowResult {
   row: number; name: string; action: 'create' | 'skip' | 'error';
   accountType: string | null; priceList: string | null; zone: string | null; days: string[];
+  paymentTerms?: string | null; invoiceCycle?: string;
   brands: string[]; buysOwnBrand: boolean; balanceCents: number;
   balanceAs: 'items' | 'single' | 'none'; itemCount: number;
   errors: string[]; warnings: string[];
@@ -193,7 +194,7 @@ export default function CustomerImport() {
           <div style={{ overflowX: 'auto' }}>
             <table>
               <thead>
-                <tr><th>Row</th><th>Customer</th><th>Type</th><th>Zone · days</th><th>Brands</th>
+                <tr><th>Row</th><th>Customer</th><th>Type · terms</th><th>Zone · days</th><th>Brands</th>
                   <th className="num">Opening balance</th><th>Notes</th></tr>
               </thead>
               <tbody>
@@ -205,7 +206,10 @@ export default function CustomerImport() {
                       {r.action === 'skip' && <div><span className="chip neutral">already here</span></div>}
                       {r.action === 'error' && <div><span className="chip bad">problem</span></div>}
                     </td>
-                    <td>{r.accountType ?? ''}{r.priceList ? <div className="muted small">{r.priceList} prices</div> : null}</td>
+                    <td>{r.accountType ?? ''}{r.priceList ? <div className="muted small">{r.priceList} prices</div> : null}
+                      {(r.paymentTerms || (r.invoiceCycle && r.invoiceCycle !== 'PerDelivery')) && (
+                        <div className="muted small">{r.invoiceCycle === 'Monthly' ? 'Monthly invoice' : r.invoiceCycle === 'Weekly' ? 'Weekly invoice' : r.paymentTerms}</div>
+                      )}</td>
                     <td>{r.zone ?? <span className="muted">—</span>}
                       {r.days.length > 0 && <div className="muted small">{r.days.join(', ')}</div>}</td>
                     <td className="small">
