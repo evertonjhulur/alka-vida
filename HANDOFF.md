@@ -1942,3 +1942,9 @@ enter for any date."
   took it"; payment "Paid at the time / On account"; no round, no repeat,
   no older-invoice payments. Button "Record it for <day>".
 Tests: 615 (74 + 532 + 9). New `api/test/pastdelivery.test.ts`.
+
+**Fix (23 Oct 2026, evening): website page clashed with Delivery rounds.**
+The website's delivery page used `/delivery`, which is also the office's
+Delivery rounds screen, so signed-in staff landed on the website. The
+website page is now `/how-we-deliver`; `web/test/sitepaths.test.ts` fails if
+any website address ever matches an app route again.

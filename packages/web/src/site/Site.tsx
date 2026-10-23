@@ -118,7 +118,7 @@ function ProductPhoto({ product, square }: { product: SiteProduct; square?: bool
 }
 
 const NAV: Array<[string, string]> = [
-  ['/water', 'Our water'], ['/delivery', 'Delivery'], ['/your-account', 'Your account'],
+  ['/water', 'Our water'], ['/how-we-deliver', 'Delivery'], ['/your-account', 'Your account'],
   ['/business', 'For business'], ['/about', 'About us'], ['/contact', 'Contact'],
 ];
 
@@ -269,7 +269,7 @@ function Home({ site, onSignedIn, session }: { site: SiteInfo; onSignedIn: (s: S
 
       <section className="s-section" aria-label="Find out more">
         <div className="wrap s-grid three">
-          <Link to="/delivery" className="s-door aqua"><b>How delivery works</b><span>Order, we bring it on your area's day, you pay and get a receipt.</span><span className="go">Delivery and paying →</span></Link>
+          <Link to="/how-we-deliver" className="s-door aqua"><b>How delivery works</b><span>Order, we bring it on your area's day, you pay and get a receipt.</span><span className="go">Delivery and paying →</span></Link>
           <Link to="/your-account" className="s-door indigo"><b>Your water account, online</b><span>Order again, follow your delivery, see your statement and receipts.</span><span className="go">What you can do →</span></Link>
           <Link to="/business" className="s-door"><b>For business</b><span>Business accounts with your own prices, and water bottled under your own label.</span><span className="go">Business accounts →</span></Link>
         </div>
@@ -777,12 +777,17 @@ function QuickOrder({ site, loaded }: { site: SiteInfo; loaded: boolean }) {
 /* The site                                                            */
 /* ------------------------------------------------------------------ */
 
-/** Every public page's address. "/" is the home page only when nobody is signed in. */
-export const SITE_PATHS = ['/', '/water', '/delivery', '/your-account', '/business', '/about', '/contact', '/order'];
+/**
+ * Every public page's address. "/" is the home page only when nobody is
+ * signed in. None may be an address the app itself uses (/delivery is the
+ * office's Delivery rounds), or signed-in staff would land on the website
+ * instead - the website's delivery page is /how-we-deliver (23 Oct 2026).
+ */
+export const SITE_PATHS = ['/', '/water', '/how-we-deliver', '/your-account', '/business', '/about', '/contact', '/order'];
 
 const TITLES: Record<string, string> = {
   '/': 'Alka Vida · Alkaline drinking water, delivered', '/water': 'Our water · Alka Vida',
-  '/delivery': 'Delivery · Alka Vida', '/your-account': 'Your account · Alka Vida',
+  '/how-we-deliver': 'Delivery · Alka Vida', '/your-account': 'Your account · Alka Vida',
   '/business': 'For business · Alka Vida', '/about': 'About us · Alka Vida',
   '/contact': 'Contact · Alka Vida', '/order': 'Order water · Alka Vida',
 };
@@ -799,7 +804,7 @@ export default function PublicSite({ session, onSignedIn }: { session: Session |
   let page: React.ReactNode;
   switch (pathname) {
     case '/water': page = <Water site={site} loaded={loaded} />; break;
-    case '/delivery': page = <Delivery site={site} />; break;
+    case '/how-we-deliver': page = <Delivery site={site} />; break;
     case '/your-account': page = <YourAccount onSignedIn={onSignedIn} session={session} />; break;
     case '/business': page = <Business />; break;
     case '/about': page = <About />; break;
