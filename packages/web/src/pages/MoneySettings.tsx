@@ -10,7 +10,7 @@ import { setTakeCard } from '../lib/payments';
  *  - Whether we take card payments. Off: Card is left out of every list of
  *    ways to pay; card payments already recorded still show as recorded.
  */
-interface Money { takeCard: boolean; documentFooter: string; defaultFooter: string }
+interface Money { takeCard: boolean; documentFooter: string; defaultFooter: string; backdateDays: number }
 
 export default function MoneySettings({ session }: { session: Session }) {
   const [m, setM] = useState<Money | null>(null);
@@ -25,7 +25,7 @@ export default function MoneySettings({ session }: { session: Session }) {
     e.preventDefault();
     setBusy(true); setErr(null); setNote(null);
     try {
-      const out = await api.put<Money>('/api/settings/money', { takeCard: m!.takeCard, documentFooter: m!.documentFooter });
+      const out = await api.put<Money>('/api/settings/money', { takeCard: m!.takeCard, documentFooter: m!.documentFooter, backdateDays: m!.backdateDays });
       setM(out);
       setTakeCard(out.takeCard);
       setNote('Saved. The next invoice or statement printed carries it.');
@@ -67,6 +67,18 @@ export default function MoneySettings({ session }: { session: Session }) {
           <div className="muted small">
             Off: "Card" is left out of every list of ways to pay (driver's stop, My route, counter sale, New order,
             Payments, invoice, customer record). Card payments already recorded still show as recorded.
+          </div>
+        </fieldset>
+        <fieldset className="form-block" disabled={!isAdmin}>
+          <legend>Recording an earlier day</legend>
+          <div className="field">
+            <label htmlFor="back">How many days back office staff can record a sale or delivery</label>
+            <input id="back" type="number" min={0} max={31} step={1} style={{ width: 90 }}
+                   value={m.backdateDays} onChange={(e) => setM({ ...m, backdateDays: Number(e.target.value) })} />
+            <div className="muted small">
+              On New sale, "It already went out on an earlier day" dates the invoice and any payment that day.
+              Office staff can go this many days back; administrators can choose any day.
+            </div>
           </div>
         </fieldset>
         {isAdmin ? <button disabled={busy}>{busy ? 'Saving…' : 'Save'}</button>

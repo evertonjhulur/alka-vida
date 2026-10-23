@@ -53,6 +53,11 @@ export interface CreateOrderInput {
    * (a portal customer asked for a day that is not one of theirs).
    */
   reviewReason?: 'SameDay' | 'SpecialDay' | null;
+  /**
+   * Never put it on a delivery round: a delivery recorded after it was made
+   * (23 Oct 2026) - the round has been and gone.
+   */
+  noRound?: boolean;
   isRecurring?: boolean;
   recurrencePattern?: RecurrencePattern | null;
   parentRecurringId?: string | null;
@@ -300,7 +305,7 @@ export async function createOrder(
         : `${orderNumber} is for today but came in after the same-day cut-off, so it is waiting `
           + 'under Needs a decision. Approve it there to put it on today\'s round.');
       void req;
-    } else if (input.deliveryMode === 'Delivery') {
+    } else if (input.deliveryMode === 'Delivery' && !input.noRound) {
       const placement = await placeOnDeliverySheet(t, order.id, input.customerId,
         input.requestedDeliveryDate ?? null, input.addressId ?? null);
       sheetId = placement.sheetId;

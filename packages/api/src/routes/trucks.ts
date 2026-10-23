@@ -9,6 +9,7 @@
 
 import type { FastifyInstance } from 'fastify';
 import type { Db } from '../db/index.ts';
+import { backdateDays } from '../services/counter.ts';
 import type { Actor } from '../services/core.ts';
 import { DEFAULT_DOCUMENT_FOOTER, documentFooter, requireRole, takesCard, businessToday } from '../services/core.ts';
 import type { Session } from '../lib/auth.ts';
@@ -39,19 +40,26 @@ export function registerTruckRoutes(
 
   const readMoney = async () => ({
     takeCard: await takesCard(db),
+    // How far back office staff may record a delivery (23 Oct 2026).
+    backdateDays: await backdateDays(db),
     documentFooter: await documentFooter(db),
     defaultFooter: DEFAULT_DOCUMENT_FOOTER,
   });
   app.get('/api/settings/money', office, async () => readMoney());
   app.put('/api/settings/money', only('admin'), async (req) => {
     requireRole(actor(req), 'admin');
-    const b = (req.body ?? {}) as { takeCard?: boolean; documentFooter?: string };
+    const b = (req.body ?? {}) as { takeCard?: boolean; documentFooter?: string; backdateDays?: number };
     await db.tx(async (t) => {
       const put = (key: string, value: string) => t.query(
         `INSERT INTO system_settings (key, value) VALUES ($1,$2)
          ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`, [key, value],
       );
       if (b.takeCard !== undefined) await put('take_card_payments', b.takeCard ? 'true' : 'false');
+      if (b.backdateDays !== undefined) {
+        const n = Math.round(Number(b.backdateDays));
+        if (!Number.isFinite(n) || n < 0 || n > 31) throw new RuleViolation('days back must be a whole number from 0 to 31');
+        await put('backdate_days', String(n));
+      }
       if (b.documentFooter !== undefined) {
         const text = String(b.documentFooter).replace(/\r\n/g, '\n').trim();
         if (text.length > 1500) throw new RuleViolation('keep the footer under 1,500 characters');

@@ -91,6 +91,11 @@ type PayWhen = 'Now' | 'On delivery' | 'On account';
 type Pattern = 'Weekly' | 'Biweekly' | 'Monthly';
 
 const GCT_RATE = 0.15;
+/** Recording an earlier day (23 Oct 2026): it was delivered, or they took it. */
+const PAST_MODES: Array<[Mode, string]> = [
+  ['Delivery', 'We delivered it'],
+  ['Pickup', 'They took it'],
+];
 const MODES: Array<[Mode, string]> = [
   ['Counter', 'Taking it now'],
   ['Pickup', 'Collecting later'],
@@ -203,6 +208,18 @@ export default function NewOrder() {
   const [repeatDays, setRepeatDays] = useState<string[]>([]);
 
   const [payWhen, setPayWhen] = useState<PayWhen>('Now');
+  /**
+   * Recording something that went out on an earlier day (23 Oct 2026): the
+   * invoice and any payment are dated that day. Office staff can go back
+   * backLimit days (Settings › Invoices & payments); administrators any day.
+   */
+  const [past, setPast] = useState(false);
+  const [pastOn, setPastOn] = useState(addDays(today, -1));
+  const [backLimit, setBackLimit] = useState(3);
+  useEffect(() => {
+    api.get<{ backdateDays?: number }>('/api/settings/money')
+      .then((m) => { if (typeof m.backdateDays === 'number') setBackLimit(m.backdateDays); }).catch(() => {});
+  }, []);
   const [method, setMethod] = useState('Cash');
   const [amount, setAmount] = useState<string | null>(null);
   const [reference, setReference] = useState('');
@@ -369,7 +386,7 @@ export default function NewOrder() {
   const onCycle = customer?.invoice_cycle === 'Weekly' || customer?.invoice_cycle === 'Monthly';
   const termsWords = onCycle ? `their ${customer!.invoice_cycle!.toLowerCase()} invoice`
     : customer?.payment_terms ? `their ${customer.payment_terms} terms` : 'their terms';
-  const whens: Array<[PayWhen, string]> = [
+  const whens: Array<[PayWhen, string]> = past ? [['Now', 'Paid at the time'], ['On account', 'On account']] : [
     ['Now', 'Now'],
     ...(outMode === 'Delivery' ? [['On delivery', 'On delivery'] as [PayWhen, string]] : []),
     ['On account', 'On account'],
@@ -468,6 +485,7 @@ export default function NewOrder() {
     setAddressId('');
     setMode(startMode === 'Pickup' ? 'Pickup' : 'Delivery');
     setWho(startWho);
+    setPast(false);
     setCustomerId('');
     setWalkIn({ name: '', phone: '', email: '' });
     saleKey.current = idempotencyKey('sale');
@@ -490,7 +508,7 @@ export default function NewOrder() {
     if (payloadLines.length === 0) return fail('Add at least one product, with its size and how many.');
     if (lines.some((l) => l.group && !l.productId)) return fail('Choose the size for every product, or remove the line.');
     if (fullFives > 0 && emptiesN === null && !bottleOnOrder) {
-      return fail(outMode === 'Delivery' ? 'How many 5-gallon empties will they hand over? Put 0 if none.'
+      return fail(outMode === 'Delivery' && !past ? 'How many 5-gallon empties will they hand over? Put 0 if none.'
         : 'How many 5-gallon empties did they hand in? Put 0 if none.');
     }
     if (walkInShort) return fail(`A walk-in pays in full: ${money(totals.grandTotal)}. To take part payment, choose their customer account.`);
@@ -499,7 +517,35 @@ export default function NewOrder() {
       .map((i) => ({ invoiceId: i.invoice_id, amountCents: Number(i.balance_cents) }));
 
     try {
-      if (outMode === 'Counter') {
+      if (past) {
+        // Went out on an earlier day (23 Oct 2026): dated that day, never on a round.
+        const id = isWalkIn ? await walkInRecord() : customerId;
+        const paidThen = isWalkIn ? totals.grandTotal : (takingNow ? amountCents : 0);
+        const r = await api.post<{
+          orderNumber: string; invoiceNumber: string | null; onCycle: boolean;
+          grandTotalCents: number; balanceCents: number | null;
+        }>('/api/past-delivery', {
+          customerId: id || null,
+          deliveredOn: pastOn,
+          how: isAccount && mode === 'Delivery' ? 'Delivered' : 'Collected',
+          lines: payloadLines,
+          ...money_,
+          amountPaidCents: paidThen,
+          method,
+          reference: reference.trim() || null,
+          notes: note.trim() || null,
+          emptiesReturned: fullFives > 0 ? (emptiesN ?? 0) : null,
+          idempotencyKey: saleKey.current,
+        });
+        const who_ = isWalkIn ? (walkIn.name.trim() || 'a walk-in') : customer?.name ?? 'the customer';
+        setResult({
+          customerId: isWalkIn ? null : customerId, paymentIds: [], receiptName: '',
+          text: `Recorded for ${who_} on ${day(pastOn)}: order ${r.orderNumber}, ${money(r.grandTotalCents)}. `
+            + (r.onCycle ? `It goes on their ${customer?.invoice_cycle?.toLowerCase() ?? ''} invoice for that period.`
+              : `Invoice ${r.invoiceNumber} is dated ${day(pastOn)}${r.balanceCents && r.balanceCents > 0 ? `, ${money(r.balanceCents)} left on account` : ', paid'}.`),
+        });
+        setPast(false);
+      } else if (outMode === 'Counter') {
         // Invoice and payment in one motion, at the counter.
         const id = isWalkIn ? await walkInRecord() : customerId;
         const email = isWalkIn ? walkIn.email.trim() : customer?.email ?? '';
@@ -632,7 +678,7 @@ export default function NewOrder() {
   const offDay = outMode === 'Delivery' && zoneDays.length > 0 && requestedDate && !zoneDays.includes(weekdayOf(requestedDate));
   const round = sheets?.find((s) => s.zone === zone && s.status === 'Open') ?? null;
   const roundNote = (() => {
-    if (outMode !== 'Delivery' || !customer) return null;
+    if (outMode !== 'Delivery' || !customer || past) return null;
     if (!zone) return <span className="bad-text">No delivery zone on file, so this cannot go on a round. Set one on their Details tab.</span>;
     if (!sheets) return null;
     if (round?.started_at) return <>The {zone} round for {day(requestedDate)} is already on the road; this is added to it ({round.stop_count} stops).</>;
@@ -641,6 +687,7 @@ export default function NewOrder() {
   })();
 
   const finishText = busy ? 'Saving…'
+    : past && (isAccount || isWalkIn) ? `Record it for ${day(pastOn)}${takingNow && (isWalkIn ? totals.grandTotal : amountCents) > 0 ? `, paid ${money(isWalkIn ? totals.grandTotal : amountCents)}` : ''}`
     : isWalkIn ? `Take ${money(totals.grandTotal)} and print receipt`
       : !isAccount ? 'Choose who it is for'
         : taking > 0 ? `${outMode === 'Counter' ? 'Complete sale' : repeat ? 'Create standing order' : 'Create order'}, record ${money(taking)}`
@@ -707,13 +754,13 @@ export default function NewOrder() {
               <div>
                 <span className="label">How it goes out</span>
                 <div className="ns-seg" role="group" aria-label="How it goes out">
-                  {MODES.map(([m, label]) => (
+                  {(past ? PAST_MODES : MODES).map(([m, label]) => (
                     <button key={m} type="button" className={mode === m ? 'on' : ''} aria-pressed={mode === m}
                             onClick={() => { setMode(m); if (m === 'Counter') setRepeat(false); }}>{label}</button>
                   ))}
                 </div>
               </div>
-              {mode !== 'Counter' && (
+              {mode !== 'Counter' && !past && (
                 <div className="ns-date">
                   <label htmlFor="ns-date">{mode === 'Pickup' ? 'Collect on' : 'Deliver on'}</label>
                   <input id="ns-date" type="date" value={requestedDate} min={today}
@@ -749,7 +796,30 @@ export default function NewOrder() {
                        onChange={(e) => setWalkIn({ ...walkIn, email: e.target.value })} />
                 <button type="button" className="as-link" onClick={changeWho}>Change</button>
               </div>
-              <div className="muted small">Takes the goods now and pays in full. A name and phone put them on file for next time.</div>
+              <div className="muted small">{past ? 'Paid in full at the time.' : 'Takes the goods now and pays in full.'} A name and phone put them on file for next time.</div>
+            </div>
+          )}
+
+          {(isAccount || isWalkIn) && (
+            <div className="ns-past">
+              <label className="ns-past-tick">
+                <input type="checkbox" checked={past} onChange={(e) => {
+                  setPast(e.target.checked); setRepeat(false); setAmount(null);
+                  if (e.target.checked && mode === 'Counter') setMode('Pickup');
+                }} />
+                It already went out on an earlier day
+              </label>
+              {past && (
+                <span className="ns-past-date">
+                  <label htmlFor="ns-past-on">Went out on</label>
+                  <input id="ns-past-on" type="date" value={pastOn} max={today}
+                         min={isAdmin ? undefined : addDays(today, -backLimit)}
+                         onChange={(e) => setPastOn(e.target.value)} />
+                  <span className="muted small">
+                    The invoice and any payment are dated that day.{isAdmin ? ' As an administrator you can choose any day.' : ` Up to ${backLimit} ${backLimit === 1 ? 'day' : 'days'} back; older ones need an administrator.`}
+                  </span>
+                </span>
+              )}
             </div>
           )}
         </div>
@@ -864,7 +934,7 @@ export default function NewOrder() {
 
           {fullFives > 0 && !bottleOnOrder && (
             <div className="ns-empties">
-              <label htmlFor="ns-emp">{outMode === 'Delivery' ? '5-gal empties to hand over' : '5-gal empties handed in'}</label>
+              <label htmlFor="ns-emp">{outMode === 'Delivery' && !past ? '5-gal empties to hand over' : '5-gal empties handed in'}</label>
               <input id="ns-emp" inputMode="numeric" value={emptiesBack} placeholder={String(fullFives)}
                      onChange={(e) => setEmptiesBack(e.target.value.replace(/[^0-9]/g, ''))} />
               <span className="small">
@@ -881,7 +951,7 @@ export default function NewOrder() {
                 <button type="button" className="as-link" aria-expanded={noteOpen} onClick={() => setNoteOpen(!noteOpen)}>
                   {noteOpen ? '−' : '+'} {outMode === 'Delivery' ? 'Note for the driver' : 'Note on the order'}
                 </button>
-                {isAccount && outMode !== 'Counter' && (
+                {isAccount && outMode !== 'Counter' && !past && (
                   <span className="ns-repeat">
                     <span className="small">Repeat this order</span>
                     <button type="button" role="switch" aria-checked={repeat} aria-label="Repeat this order"
@@ -1000,7 +1070,7 @@ export default function NewOrder() {
             </>
           )}
 
-          {isAccount && takingNow && openOlder.length > 0 && (
+          {isAccount && takingNow && openOlder.length > 0 && !past && (
             <div>
               <span className="label">Also collect on older invoices</span>
               <div className="ns-older">
@@ -1022,9 +1092,9 @@ export default function NewOrder() {
 
           {isAccount && (
             <div className="ns-sum">
-              <div className="total-line"><span>Taking now</span><strong className="num">{money(taking)}</strong></div>
+              <div className="total-line"><span>{past ? 'Paid at the time' : 'Taking now'}</span><strong className="num">{money(taking)}</strong></div>
               <div className="total-line">
-                <span>{after < 0 ? 'In credit afterwards' : `They will owe, once ${outMode === 'Delivery' ? 'delivered' : 'invoiced'}`}</span>
+                <span>{after < 0 ? 'In credit afterwards' : past ? 'They will owe' : `They will owe, once ${outMode === 'Delivery' ? 'delivered' : 'invoiced'}`}</span>
                 <strong className={`num${after <= 0 ? ' ok-text' : ''}`}>{money(Math.abs(after))}</strong>
               </div>
             </div>

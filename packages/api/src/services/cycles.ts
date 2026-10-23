@@ -66,7 +66,8 @@ export async function pendingDeliveries(
             o.discount_percent, o.discount_fixed_cents, o.gct_exempt
      FROM customer_orders o
      JOIN customers c ON c.id = o.customer_id
-     WHERE o.delivery_mode = 'Pickup' AND o.status IN ('Delivered','Partially Delivered')
+     -- A delivery recorded after the day (no round, 23 Oct 2026) waits like a collection.
+     WHERE (o.delivery_mode = 'Pickup' OR o.recorded_late) AND o.status IN ('Delivered','Partially Delivered')
        AND NOT EXISTS (SELECT 1 FROM invoice_orders io WHERE io.order_id = o.id)
        AND ($1::uuid IS NULL OR o.customer_id = $1::uuid)
      ORDER BY 7, o.order_number`,

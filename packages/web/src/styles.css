@@ -1772,3 +1772,9 @@ button.order-tile.delivered { border-left-color: var(--ok); }
 .notif-table td.na { color: var(--muted); text-align: center; }
 .notif-table .switch { transform: scale(.9); }
 .signin-home { position: absolute; top: 18px; left: 24px; z-index: 1; color: var(--brand); font-weight: 600; text-decoration: none; }
+/* New sale: recording an earlier day (23 Oct 2026). */
+.ns-past { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 8px 18px; align-items: center; padding: 8px 12px; border: 1px dashed var(--line-control); border-radius: 6px; background: #fbfcfd; }
+.ns-past-tick { display: flex; align-items: center; gap: 8px; margin: 0; color: var(--ink); font-size: 14px; font-weight: 600; }
+.ns-past-tick input { width: 18px; height: 18px; }
+.ns-past-date { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; }
+.ns-past-date label { margin: 0; color: var(--ink); font-size: 14px; }

@@ -1913,3 +1913,32 @@ in "Alka Vida settings.txt" as ORS_API_KEY=... (and on Railway as a variable).
   asked to "Save the exact spot" at the gate, which replaces it. The
   customer page says "Dropped by the customer when they signed up".
 Tests: 610 (74 + 527 + 9).
+
+---
+
+## Recording a sale or delivery on an earlier day (23 Oct 2026)
+
+Everton: "we need to be able to enter invoices for prior days ... set it as
+3 for now and change to 1 down the line. Admins should have the right to
+enter for any date."
+
+- Migration 032: `customer_orders.recorded_late`; setting `backdate_days`
+  (default 3), edited in Settings › Invoices & payments ("Recording an
+  earlier day", admin only, 0-31).
+- `counter.recordPastDelivery` (POST /api/past-delivery, admin/user): the
+  order (order_date, requested date, fulfilled_on), the invoice (invoice_date,
+  so the due date runs from it) and any payment taken are dated the day it
+  went out. how = Delivered (delivery_mode Delivery, `noRound` - never on a
+  round) or Collected (Pickup). Office staff refused beyond backdate_days;
+  admins any day; never a future day. Walk-ins still pay in full.
+  Weekly/monthly customers: no invoice now - marked delivered that day and
+  picked up by `cycles.pendingDeliveries` (recorded_late orders count like
+  collections) for that week's/month's invoice; money taken sits on account.
+- `invoiceAndTakePayment` takes `on` (date) for the invoice, payments and
+  fulfilled_on; `createOrder` takes `noRound`.
+- New sale: "It already went out on an earlier day" tick (account customers
+  and walk-ins) with "Went out on" (min = today - backdate_days for office
+  staff, none for admins; max today); modes become "We delivered it / They
+  took it"; payment "Paid at the time / On account"; no round, no repeat,
+  no older-invoice payments. Button "Record it for <day>".
+Tests: 615 (74 + 532 + 9). New `api/test/pastdelivery.test.ts`.

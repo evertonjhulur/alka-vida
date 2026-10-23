@@ -41,7 +41,7 @@ import * as invitations from './services/invitations.ts';
 import * as registration from './services/registration.ts';
 import * as zones from './services/zones.ts';
 import * as labour from './services/labour.ts';
-import { collectOrder, counterSale } from './services/counter.ts';
+import { collectOrder, counterSale, recordPastDelivery } from './services/counter.ts';
 import { registerRevisionRoutes } from './routes/revisions.ts';
 import { registerBatchRoutes } from './routes/batches.ts';
 import { registerFeedbackRoutes } from './routes/feedback.ts';
@@ -1005,6 +1005,11 @@ export async function buildServer(db: Db) {
       ...(req.body as Record<string, unknown>),
       orderId: (req.params as { id: string }).id,
     } as never));
+
+  // A delivery or sale that went out on an earlier day and was never entered
+  // (23 Oct 2026): dated the day it happened. Office staff: backdate_days back.
+  app.post('/api/past-delivery', { preHandler: allow('admin', 'user') },
+    async (req) => recordPastDelivery(db, actorOf(req), req.body as never));
 
   app.post('/api/counter-sale', { preHandler: allow('admin', 'user') },
     async (req) => {
