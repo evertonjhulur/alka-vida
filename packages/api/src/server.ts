@@ -50,6 +50,7 @@ import * as trucks from './services/trucks.ts';
 import { registerTruckRoutes } from './routes/trucks.ts';
 import { registerBrandRoutes } from './routes/brands.ts';
 import { registerWebsiteRoutes } from './routes/website.ts';
+import { registerLocationRoutes } from './routes/locations.ts';
 import { productAvailableSql, ownProductSql } from './services/brands.ts';
 import * as messaging from './services/messaging.ts';
 import * as paperwork from './services/paperwork.ts';
@@ -1683,6 +1684,7 @@ export async function buildServer(db: Db) {
   registerTruckRoutes(app as never, db, { allow: allow as never, actorOf });
   registerBrandRoutes(app as never, db, { allow: allow as never, actorOf });
   registerWebsiteRoutes(app as never, db, { allow: allow as never, actorOf });
+  registerLocationRoutes(app as never, db, { allow: allow as never, actorOf });
 
   return app;
 }

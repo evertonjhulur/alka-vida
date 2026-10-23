@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
+import StopLocation from '../components/StopLocation';
 import { api, getSession } from '../lib/api';
 import { payMethods, useTakeCard } from '../lib/payments';
 import { money, toCents } from '../lib/format';
@@ -31,6 +32,10 @@ interface OpenInvoice {
 interface Stop {
   id: string;
   customer_name: string;
+  /** Map pin of the address this order goes to (23 Oct 2026). */
+  lat?: number | null;
+  lng?: number | null;
+  location_source?: string | null;
   delivery_address: string | null;
   contact_phone: string | null;
   order_ref: string | null;
@@ -437,10 +442,15 @@ export default function DriverStop() {
         )}
         <div className="stop-links">
           {stop.contact_phone && <a className="button-link secondary" href={`tel:${stop.contact_phone.replace(/[^\d+]/g, '')}`}>Call {stop.contact_phone}</a>}
+          {stop.lat != null && stop.lng != null && (
+            <a className="button-link secondary" href={`https://www.google.com/maps/dir/?api=1&destination=${stop.lat},${stop.lng}`}
+               target="_blank" rel="noopener">Directions</a>
+          )}
           <button type="button" className="secondary" aria-expanded={notesOpen} onClick={() => setNotesOpen(!notesOpen)}>
             Add a note
           </button>
         </div>
+        <StopLocation stopId={stop.id} pinned={stop.lat != null} source={stop.location_source} onSaved={() => { void load(); }} />
         {notesOpen && (
           <div style={{ marginTop: 10 }}>
             <label htmlFor="notes">Your note (the office sees it)</label>

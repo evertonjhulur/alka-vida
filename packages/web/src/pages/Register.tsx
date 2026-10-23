@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../lib/api';
 import Logo from '../components/Logo';
+import PinPicker, { type DroppedPin } from '../components/PinPicker';
 
 type AccountType = 'Corporate' | 'Individual';
 
@@ -38,6 +39,8 @@ const BLANK = {
  */
 export default function Register() {
   const [f, setF] = useState({ ...BLANK });
+  /** Their pin for the delivery address, if they drop one (23 Oct 2026). */
+  const [pin, setPin] = useState<DroppedPin | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [done, setDone] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -52,7 +55,9 @@ export default function Register() {
     e.preventDefault();
     setBusy(true); setError(null);
     try {
-      const r = await api.post<{ name: string }>('/api/register', f);
+      const r = await api.post<{ name: string }>('/api/register', {
+        ...f, lat: pin?.lat ?? null, lng: pin?.lng ?? null, accuracyM: pin?.accuracyM ?? null,
+      });
       setDone(r.name);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not send your request');
@@ -186,6 +191,7 @@ export default function Register() {
                 </select>
               </div>
             </div>
+            <PinPicker value={pin} onChange={setPin} className="field" />
             <div className="field" style={{ marginBottom: 0 }}>
               <label htmlFor="nt">Anything else (optional)</label>
               <input id="nt" maxLength={MAX.notes} autoComplete="off" value={f.notes} placeholder="How much you use, best delivery times"
@@ -197,7 +203,7 @@ export default function Register() {
             {busy ? 'Sending…' : 'Send my request'}
           </button>
           <p className="muted small" style={{ textAlign: 'center', margin: 0 }}>
-            Already have an account? <Link to="/">Sign in</Link>
+            Already have an account? <Link to="/sign-in">Sign in</Link>
           </p>
         </form>
       </main>

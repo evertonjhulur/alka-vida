@@ -25,7 +25,7 @@ import type { Actor } from './core.ts';
 import { audit, contactEmail, getSetting, nextNumber, requireRole } from './core.ts';
 import { ownProductSql } from './brands.ts';
 import { createInvitation, UNUSABLE_PASSWORD } from './invitations.ts';
-import { emailAccountApproved, PARISHES } from './registration.ts';
+import { emailAccountApproved, PARISHES, publicPin } from './registration.ts';
 import { assertZoneUsable } from './zones.ts';
 import { createOrder } from './orders.ts';
 import { composeAddress, RuleViolation } from '@alka/shared';
@@ -133,6 +133,8 @@ export interface WebsiteOrderInput {
   noEmpties?: boolean;
   wantsAccount?: boolean;
   notes?: string | null;
+  /** Optional pin they dropped for the delivery address (23 Oct 2026). */
+  lat?: number | null; lng?: number | null; accuracyM?: number | null;
   /** A field people never see; a robot filling every box fills this too. */
   website?: string;
 }
@@ -201,17 +203,19 @@ export async function submitWebsiteOrder(
     return { productId: p.id, name: p.name, size: p.size, qty: l.qty, unit: p.unit, priceCents: p.priceCents };
   });
 
+  const pin = fulfilment === 'Deliver' ? publicPin(input) : null;
   const row = await db.tx(async (t) => {
     const reference = await nextNumber(t, 'website_order_seq', 'WEB');
     await t.query(
       `INSERT INTO website_orders
          (reference, first_name, last_name, business_name, phone, email, fulfilment,
           address_line1, address_line2, city, parish, preferred_day, pay_method,
-          lines, no_empties, wants_account, notes)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14::jsonb,$15,$16,$17)`,
+          lines, no_empties, wants_account, notes, lat, lng, location_accuracy_m)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14::jsonb,$15,$16,$17,$18,$19,$20)`,
       [reference, firstName, lastName, businessName, phone, email, fulfilment,
        address.addressLine1, address.addressLine2, address.city, address.parish, day, payMethod,
-       JSON.stringify(lines), input.noEmpties === true, wantsAccount, notes],
+       JSON.stringify(lines), input.noEmpties === true, wantsAccount, notes,
+       pin?.lat ?? null, pin?.lng ?? null, pin?.accuracyM ?? null],
     );
     return { reference };
   });
@@ -266,6 +270,7 @@ export async function bookWebsiteOrder(
     address_line2: string | null; city: string | null; parish: string | null; pay_method: string;
     lines: Array<{ productId: string; qty: number; unit: string }>; no_empties: boolean;
     wants_account: boolean; notes: string | null;
+    lat: number | null; lng: number | null; location_accuracy_m: number | null; created_at: string;
   }>(`SELECT * FROM website_orders WHERE id = $1`, [id]);
   if (!w) throw new RuleViolation('website order not found');
   if (w.status !== 'Pending') throw new RuleViolation(`this website order has already been ${w.status.toLowerCase()}`);
@@ -296,12 +301,16 @@ export async function bookWebsiteOrder(
       const c = await t.one<{ id: string }>(
         `INSERT INTO customers
            (name, phone, email, delivery_address, address_line1, address_line2, city, parish,
-            contact_person, account_type, price_tier_id, delivery_zone, payment_terms, notes)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'Cash on delivery',$13)
+            contact_person, account_type, price_tier_id, delivery_zone, payment_terms, notes,
+            lat, lng, location_accuracy_m, location_source, location_set_at, location_set_by)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'Cash on delivery',$13,$14,$15,$16,$17,$18,$19)
          RETURNING id`,
         [name, w.phone, w.email ?? '', composeAddress(address), w.address_line1, w.address_line2,
          w.city, w.parish, w.business_name ? person : null, w.business_name ? 'Corporate' : 'Individual',
-         terms.priceTierId ?? null, zone, `Came from the website (${w.reference}).`],
+         terms.priceTierId ?? null, zone, `Came from the website (${w.reference}).`,
+         // The pin they dropped with the order (23 Oct 2026).
+         w.lat, w.lng, w.location_accuracy_m, w.lat != null ? 'Customer' : null,
+         w.lat != null ? w.created_at : null, w.lat != null ? person : null],
       );
       let uid: string | null = null;
       if (makeLogin) {

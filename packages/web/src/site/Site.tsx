@@ -21,6 +21,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { Link, NavLink, useLocation, useNavigate } from 'react-router-dom';
 import { api, type Session } from '../lib/api';
 import Logo from '../components/Logo';
+import PinPicker, { type DroppedPin } from '../components/PinPicker';
 import './site.css';
 
 /* ------------------------------------------------------------------ */
@@ -575,6 +576,7 @@ function QuickOrder({ site, loaded }: { site: SiteInfo; loaded: boolean }) {
   const [fulfilment, setFulfilment] = useState<'Deliver' | 'Collect'>('Deliver');
   const [payMethod, setPayMethod] = useState<'Cash' | 'Bank Transfer'>('Cash');
   const [noEmpties, setNoEmpties] = useState(false);
+  const [pin, setPin] = useState<DroppedPin | null>(null);
   const [wantsAccount, setWantsAccount] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -612,6 +614,9 @@ function QuickOrder({ site, loaded }: { site: SiteInfo; loaded: boolean }) {
       const r = await api.post<{ reference: string; name: string }>('/api/public/order', {
         ...f, fulfilment, payMethod, noEmpties: hasFiveGal && noEmpties, wantsAccount: wantsAccount && !!f.email.trim(),
         preferredDay: f.preferredDay || null,
+        lat: fulfilment === 'Deliver' ? pin?.lat ?? null : null,
+        lng: fulfilment === 'Deliver' ? pin?.lng ?? null : null,
+        accuracyM: fulfilment === 'Deliver' ? pin?.accuracyM ?? null : null,
         lines: lines.map((l) => ({ productId: l.productId, qty: l.qty })),
       });
       setDone(r);
@@ -710,6 +715,7 @@ function QuickOrder({ site, loaded }: { site: SiteInfo; loaded: boolean }) {
                   {['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].map((d) => <option key={d} value={d}>{DAY_WORDS[d]}</option>)}
                 </select></div>
               <p className="muted small" style={{ alignSelf: 'end' }}>We deliver to each area on set days and will confirm yours.</p>
+              <PinPicker value={pin} onChange={setPin} className="full" />
             </>}
             <div className="s-field full"><label htmlFor="nt">{fulfilment === 'Deliver' ? 'Anything the driver should know (optional)' : 'Anything we should know (optional)'}</label>
               <input id="nt" placeholder={fulfilment === 'Deliver' ? 'Gate code, call on arrival…' : ''} value={f.notes} onChange={set('notes')} /></div>

@@ -19,7 +19,7 @@ import { createInvitation, UNUSABLE_PASSWORD } from './invitations.ts';
 import { assertZoneUsable } from './zones.ts';
 import { mailConfigured, sendMail } from './documents.ts';
 import { customerEmail } from './emailkit.ts';
-import { composeAddress, RuleViolation } from '@alka/shared';
+import { composeAddress, inJamaica, RuleViolation } from '@alka/shared';
 
 export type AccountType = 'Corporate' | 'Individual';
 
@@ -39,6 +39,22 @@ export interface ApplicationInput {
   city?: string | null;
   parish?: string | null;
   notes?: string | null;
+  /** Optional pin they dropped for the delivery address (23 Oct 2026). */
+  lat?: number | null;
+  lng?: number | null;
+  accuracyM?: number | null;
+}
+
+/** A pin someone dropped on a public form: kept only if it is a real spot in Jamaica. */
+export function publicPin(input: { lat?: unknown; lng?: unknown; accuracyM?: unknown }):
+  { lat: number; lng: number; accuracyM: number | null } | null {
+  if (input.lat == null || input.lng == null || input.lat === '' || input.lng === '') return null;
+  const p = { lat: Number(input.lat), lng: Number(input.lng) };
+  if (!Number.isFinite(p.lat) || !Number.isFinite(p.lng) || !inJamaica(p)) {
+    throw new RuleViolation('the pin on the map is not in Jamaica - move it to where we deliver, or leave it out');
+  }
+  const acc = input.accuracyM == null || input.accuracyM === '' ? null : Math.max(0, Math.round(Number(input.accuracyM) || 0));
+  return { ...p, accuracyM: acc };
 }
 
 const clean = (s: string | null | undefined) => s?.trim() || null;
@@ -135,18 +151,20 @@ export async function submitApplication(
     );
   }
 
+  const pin = publicPin(input);
   const row = await db.one<{ id: string }>(
     `INSERT INTO customer_applications
        (account_type, business_name, contact_person, first_name, last_name,
         email, phone, address_line1, address_line2, city, parish,
-        delivery_address, notes)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+        delivery_address, notes, lat, lng, location_accuracy_m)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
      RETURNING id`,
     [accountType, businessName, contactPerson, firstName, lastName,
      email, phone, address.addressLine1, address.addressLine2, address.city, address.parish,
      // The whole line as well as the parts, so nothing downstream has to know
      // the parts exist.
-     composeAddress(address), clean(input.notes)],
+     composeAddress(address), clean(input.notes),
+     pin?.lat ?? null, pin?.lng ?? null, pin?.accuracyM ?? null],
   );
 
   // Deliberately NOT audited against a user: nobody is signed in, and
@@ -198,9 +216,11 @@ export async function approveApplication(
     email: string; phone: string; delivery_address: string | null;
     address_line1: string | null; address_line2: string | null;
     city: string | null; parish: string | null;
+    lat: number | null; lng: number | null; location_accuracy_m: number | null; created_at: string;
   }>(
     `SELECT status, account_type, business_name, contact_person, first_name, last_name,
-            email, phone, delivery_address, address_line1, address_line2, city, parish
+            email, phone, delivery_address, address_line1, address_line2, city, parish,
+            lat, lng, location_accuracy_m, created_at
      FROM customer_applications WHERE id = $1`,
     [applicationId],
   );
@@ -221,14 +241,19 @@ export async function approveApplication(
       `INSERT INTO customers
          (name, phone, email, delivery_address, address_line1, address_line2,
           city, parish, contact_person, account_type,
-          price_tier_id, delivery_zone, payment_terms)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+          price_tier_id, delivery_zone, payment_terms,
+          lat, lng, location_accuracy_m, location_source, location_set_at, location_set_by)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
        RETURNING id`,
       [name, app.phone, app.email, app.delivery_address,
        app.address_line1, app.address_line2, app.city, app.parish,
        app.account_type === 'Corporate' ? app.contact_person : null,
        app.account_type, terms.priceTierId ?? null,
-       zone, clean(terms.paymentTerms)],
+       zone, clean(terms.paymentTerms),
+       // The pin they dropped when they asked (23 Oct 2026).
+       app.lat, app.lng, app.location_accuracy_m,
+       app.lat != null ? 'Customer' : null, app.lat != null ? app.created_at : null,
+       app.lat != null ? name : null],
     );
 
     let userId: string | null = null;

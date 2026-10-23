@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
+import SortStopsPanel from '../components/SortStopsPanel';
+import { sendWaitingPins } from '../components/StopLocation';
 import { api, type Session } from '../lib/api';
 import { time, when } from '../lib/format';
 import {
@@ -9,6 +11,8 @@ import {
 
 interface Stop {
   id: string; customer_name: string; delivery_address: string | null;
+  /** Map pin (23 Oct 2026). */
+  lat?: number | null;
   sequence_no: number; stop_outcome: string; line_items_summary: string | null;
   order_ref?: string | null; delivery_instructions?: string | null; order_notes?: string | null;
   remainder_to?: string | null; payment_amount_cents?: number; bottles_empties_picked_up?: number;
@@ -61,7 +65,7 @@ export default function DriverRoute({ session }: { session: Session }) {
     }
   }, []);
 
-  useEffect(() => { load(); }, [load]);
+  useEffect(() => { load(); void sendWaitingPins(); }, [load]);
 
   const done = (message: string) => {
     setSaved(message); setError(null); setAddFor(null); setLoadingFor(null);
@@ -103,6 +107,7 @@ export default function DriverRoute({ session }: { session: Session }) {
                 key (0, 10, 20...), which means nothing to a driver. */}
             <span className="seq">{i + 1}</span>
             <strong>{stop.customer_name}</strong>
+            {stop.lat == null && stop.stop_outcome === 'Pending' && <span className="chip warn" style={{ marginLeft: 6 }}>no location yet</span>}
             <div className="muted small" style={{ marginLeft: 34 }}>
               {stop.delivery_address ?? 'No address on file'}
             </div>
@@ -194,6 +199,18 @@ export default function DriverRoute({ session }: { session: Session }) {
               <>
                 <p className="subtitle">This route is yours. Check the load the office logged, and confirm it when you set off.</p>
                 <ConfirmLoadPanel sheetId={sheet.id} onDone={done} />
+                {/* Sorting before the round starts (23 Oct 2026). */}
+                {sheet.stops.length > 1 && <SortStopsPanel sheetId={sheet.id} onDone={done} driver />}
+                {sheet.stops.length > 0 && <section className="panel">
+                  <h2 className="side-h" style={{ marginTop: 0 }}>Stop order</h2>
+                  <ol style={{ margin: 0, paddingLeft: 22 }}>
+                    {sheet.stops.map((st) => (
+                      <li key={st.id} style={{ padding: '3px 0' }}>
+                        {st.customer_name}{st.lat == null && <span className="chip warn" style={{ marginLeft: 6 }}>no location yet</span>}
+                      </li>
+                    ))}
+                  </ol>
+                </section>}
               </>
             )}
             {/* Added to the load after it was confirmed: the driver reconfirms. */}

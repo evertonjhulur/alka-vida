@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import PlantLocationPanel from '../components/PlantLocationPanel';
 import { api, type Session } from '../lib/api';
 import { ask } from '../components/Dialog';
 
@@ -109,6 +110,7 @@ export default function Zones({ session }: { session: Session }) {
         on the round for its customer&rsquo;s zone and date; New order suggests the next day
         the round runs.
       </p>
+      <PlantLocationPanel isAdmin={session.role === 'admin'} />
 
       {error && <div className="notice error">{error}</div>}
       {msg && <div className="notice ok">{msg}</div>}

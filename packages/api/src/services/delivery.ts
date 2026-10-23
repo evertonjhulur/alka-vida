@@ -794,6 +794,9 @@ export async function getStopForDriver(db: Db, stopId: string) {
     // Where the stop sits on its round ("Stop 3 of 5", same order as the
     // round page), the customer's terms, and their standing notes.
     `SELECT s.*, c.name AS customer_name, c.payment_terms, c.notes AS customer_notes, c.invoice_cycle,
+            CASE WHEN o.address_id IS NOT NULL THEN ca.lat ELSE c.lat END AS lat,
+            CASE WHEN o.address_id IS NOT NULL THEN ca.lng ELSE c.lng END AS lng,
+            CASE WHEN o.address_id IS NOT NULL THEN ca.location_source ELSE c.location_source END AS location_source,
             COALESCE(ca.delivery_instructions, c.delivery_instructions) AS delivery_instructions,
             o.notes AS order_notes, o.customer_po, o.requested_delivery_date::text AS order_date_wanted,
             o.empties_expected, o.status AS order_status, o.pay_when,
@@ -976,6 +979,9 @@ export async function getSheet(db: Db, sheetId: string) {
   if (!sheet) return null;
   const stops = await db.query(
     `SELECT s.*, c.name AS customer_name,
+            CASE WHEN o.address_id IS NOT NULL THEN ca.lat ELSE c.lat END AS lat,
+            CASE WHEN o.address_id IS NOT NULL THEN ca.lng ELSE c.lng END AS lng,
+            CASE WHEN o.address_id IS NOT NULL THEN ca.location_source ELSE c.location_source END AS location_source,
             o.grand_total_cents AS order_total_cents, o.delivery_mode,
             o.notes AS order_notes, o.customer_po,
             COALESCE(ca.delivery_instructions, c.delivery_instructions) AS delivery_instructions,

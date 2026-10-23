@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { api, type Session } from '../lib/api';
+import SortStopsPanel from '../components/SortStopsPanel';
 import { money, date, day, time, when } from '../lib/format';
 import {
   AddStopPanel, AddToLoadPanel, AdditionsList, LoadingPanel, ReturnsPanel, TruckTable, KIND_WORDS, collectionSummary,
@@ -29,6 +30,9 @@ interface Stop {
   customer_po?: string | null;
   rescheduled_to?: string | null;
   reschedule_reason?: string | null;
+  /** Map pin of the address the order goes to (23 Oct 2026). */
+  lat?: number | null;
+  lng?: number | null;
 }
 
 interface Sheet {
@@ -259,6 +263,10 @@ export default function RouteDetail({ session }: { session: Session }) {
         <LoadingPanel sheetId={sheet.id} onDone={done} onCancel={() => setLoading(false)} />
       )}
 
+      {open && office && !sheet.started_at && sheet.stops.length > 1 && (
+        <SortStopsPanel sheetId={sheet.id} onDone={done} />
+      )}
+
       <div className="inv-grid">
         <section className="panel" style={{ padding: 0 }}>
           <div className="panel-pad" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
@@ -275,6 +283,7 @@ export default function RouteDetail({ session }: { session: Session }) {
                   <td data-label="Order"><span className="stop-no">{i + 1}</span></td>
                   <td data-label="Customer">
                     <strong>{s.customer_name}</strong>
+                    {s.lat == null && <span className="chip warn" style={{ marginLeft: 6 }}>no map pin</span>}
                     <div className="muted small">{s.delivery_address ?? 'No address on file'}</div>
                     <div className="small">{[s.order_ref, s.customer_po ? `PO ${s.customer_po}` : null].filter(Boolean).join(' · ')}</div>
                     {(s.delivery_instructions || (s.order_notes && !/^Standing order for/.test(s.order_notes))) && (

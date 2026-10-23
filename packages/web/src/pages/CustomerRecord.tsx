@@ -5,6 +5,7 @@ import { payMethods, useTakeCard } from '../lib/payments';
 import { money, date, statusTone, toCents, todayInJamaica, when } from '../lib/format';
 import StatementDialog from '../components/StatementDialog';
 import CustomerForm, { customerToForm, formToPayload, BLANK_CUSTOMER, type CustomerFormValues } from '../components/CustomerForm';
+import LocationPinsPanel from '../components/LocationPinsPanel';
 import { AddressesPanel, BrandsPanel, SpecialPricesPanel } from '../components/CustomerExtras';
 import { BatchBar, MultiStatusSelect, SortTh, StatusSelect, TickAllTh, TickTd, passes, useSort, useTicks } from '../components/ListTools';
 import { ORDER_STAGES, orderStage } from '../lib/orderStatus';
@@ -1316,7 +1317,10 @@ export default function CustomerRecord({ session }: { session: Session }) {
             ))}
           </nav>
           {part === 'addresses' ? (
-            <AddressesPanel customerId={c.id} />
+            <>
+              <AddressesPanel customerId={c.id} />
+              <LocationPinsPanel customerId={c.id} />
+            </>
           ) : part === 'products' ? (
             <>
               <BrandsPanel customerId={c.id} onSaved={() => setBrandsSaved((n) => n + 1)} />

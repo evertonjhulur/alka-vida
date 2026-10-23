@@ -48,6 +48,16 @@ MAIL_FROM=
 
 
 # ---------------------------------------------------------------------------
+# Sorting a round's stops by road (optional)
+# ---------------------------------------------------------------------------
+# Without this, "Sort the stops" uses straight-line distance, which needs no
+# internet. With it, stops are sorted along real roads by openrouteservice
+# (free account at https://openrouteservice.org - copy your API key here).
+# On Railway, add it as a variable with the same name instead.
+# ORS_API_KEY=
+
+
+# ---------------------------------------------------------------------------
 # Advanced - you almost certainly do not need these
 # ---------------------------------------------------------------------------
 # The timezone every business date is calculated in. Changing this changes

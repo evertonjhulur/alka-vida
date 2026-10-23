@@ -1846,3 +1846,70 @@ then point alkavidaja.com at Railway (GoDaddy DNS: CNAME www -> Railway, and
 the root via forwarding or Railway's instructions) - keep the MX records so
 orders@alkavidaja.com keeps working. Set PORTAL_URL=https://alkavidaja.com on
 Railway once the domain is live, so emailed links use it.
+
+---
+
+## Map pins and sorting a round's stops (23 Oct 2026) - stage 1
+
+Everton: "a process of sorting the stops on the route for the driver
+optimally" (openmapquest had come up); it should sort at the start and work
+offline. Mockups: https://claude.ai/artifact/R29KPiZ4k4JMKEfpt6SEUX; project
+doc claude/route-sorting-oct-2026.md. His ruling: do both stages, stage 1
+first (pins + sort). Stage 2 (the whole driver app working with no signal)
+is still to do.
+
+- Migration 030: `lat`, `lng`, `location_accuracy_m`, `location_source`
+  (Driver / Office / Link), `location_set_at`, `location_set_by` on
+  customers (main address) and customer_addresses (each extra address).
+  The plant is settings `plant_lat` / `plant_lng`.
+- `shared/src/routeorder.ts`: straight-line sort (nearest neighbour + 2-opt,
+  from the plant and back), `tourKm`, `parseLatLng` (plain "lat, lng", @,
+  q=, !3d!4d links), `inJamaica`. In shared so the phone can use it offline
+  in stage 2.
+- `services/locations.ts` + `routes/locations.ts`:
+  - `GET /api/settings/routing` (plant + whether road sort is on),
+    `PUT /api/settings/plant-location` (admin; lat/lng or pasted text).
+  - `GET /api/customers/:id/pins`, `PUT /api/customers/:id/pin` (office;
+    lat/lng, `text` = link/coordinates - short maps.app.goo.gl links are
+    followed server side - or `clear`).
+  - `POST /api/stops/:id/location` (driver at the door; their own round only;
+    refused when the phone's fix is worse than 200 m). Lands on the address
+    the order goes to.
+  - `POST /api/delivery-sheets/:id/sort` {method Road|Straight} -> proposal;
+    `.../sort/apply` {order, saveAsUsual}. Only before the round starts
+    (started_at) - then locked. Drivers only on their own round, and never
+    saveAsUsual. Stops with no pin go last.
+  - Road sort = openrouteservice optimisation (VROOM) when ORS_API_KEY is set
+    (Railway variable, or a line in "Alka Vida settings.txt"; documented in
+    the example file). Max 50 stops. Any failure falls back to straight line
+    with a note saying why.
+- Web: `components/MapView.tsx` (Leaflet 1.9.4 + OpenStreetMap tiles; new
+  dependency in packages/web), `SortStopsPanel` (round page before start, and
+  the driver's route before start), `LocationPinsPanel` (customer › Details ›
+  Addresses › Map pins), `StopLocation` ("Save this location" on the driver's
+  stop; a pin taken with no signal waits in localStorage
+  `alkavida.pendingPins` and is sent later), `PlantLocationPanel` (Settings ›
+  Delivery zones). Rounds show a "no map pin" chip; the driver's stop has a
+  Directions button (Google Maps) once pinned.
+
+Tests: 608 (74 shared + 525 API + 9 web). New `shared/test/routeorder.test.ts`,
+`api/test/locations.test.ts`.
+
+To switch on road sorting: free account at openrouteservice.org, put the key
+in "Alka Vida settings.txt" as ORS_API_KEY=... (and on Railway as a variable).
+
+**Customers drop their own pin when they sign up (23 Oct 2026).** Everton:
+"make the save pin a part of the account opening process for customers".
+- Migration 031: location_source may also be 'Customer'; customer_applications
+  and website_orders get lat, lng, location_accuracy_m.
+- `components/PinPicker.tsx` ("Help our driver find you", optional): "I'm
+  there now: use my location" (phone GPS) or pick/drag on a map. On Open an
+  account (Register) and on the website's quick order when delivering.
+- `registration.publicPin` validates it (in Jamaica, else a plain message);
+  approving an account request / booking a website order as a NEW customer
+  copies it to the customer as source 'Customer'.
+- Needs a decision shows "They dropped a pin ... see it on the map".
+- The driver's stop: a 'Customer' pin is used for sorting, but the driver is
+  asked to "Save the exact spot" at the gate, which replaces it. The
+  customer page says "Dropped by the customer when they signed up".
+Tests: 610 (74 + 527 + 9).

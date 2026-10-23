@@ -23,6 +23,7 @@ export interface WebsiteOrder {
   status: string; created_at: string; decline_reason: string | null;
   customer_name: string | null; order_number: string | null; decided_by_name: string | null;
   possible_matches: Array<{ id: string; name: string; phone: string | null; email: string | null }> | null;
+  lat?: number | null; lng?: number | null; location_accuracy_m?: number | null;
 }
 interface Tier { id: string; name: string }
 interface Zone { id: string; name: string; covers: string | null }
@@ -97,6 +98,12 @@ export default function WebsiteOrderRow({
           {w.wants_account && w.email ? ' · wants an account' : ''} · sent {when(w.created_at)}
         </div>
         {w.notes && <div className="small">“{w.notes}”</div>}
+        {w.lat != null && (
+          <div className="small">
+            Pin dropped for the delivery{w.location_accuracy_m != null ? ` (about ${w.location_accuracy_m} m)` : ''}:{' '}
+            <a href={`https://www.google.com/maps?q=${w.lat},${w.lng}`} target="_blank" rel="noopener">see it on the map</a>
+          </div>
+        )}
         {matches.length > 0 && (
           <div className="small" style={{ color: 'var(--warn)' }}>
             Maybe already a customer: {matches.map((m) => m.name).join(', ')} (same email or phone).

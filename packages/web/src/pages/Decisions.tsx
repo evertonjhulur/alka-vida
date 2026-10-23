@@ -32,6 +32,7 @@ interface Application {
   city: string | null; parish: string | null;
   notes: string | null; status: string; created_at: string;
   customer_name: string | null; decided_by_name: string | null;
+  lat?: number | null; lng?: number | null; location_accuracy_m?: number | null;
 }
 interface Tier { id: string; name: string }
 interface Zone { id: string; name: string; covers: string | null; retired_at: string | null }
@@ -292,6 +293,12 @@ export default function Decisions({ session }: { session: Session }) {
             {where || 'no address given'} · {a.email} · {a.phone} · asked {when(a.created_at)}
           </div>
           {a.notes && <div className="small">“{a.notes}”</div>}
+          {a.lat != null && (
+            <div className="small">
+              They dropped a pin for the delivery address{a.location_accuracy_m != null ? ` (about ${a.location_accuracy_m} m)` : ''}:{' '}
+              <a href={`https://www.google.com/maps?q=${a.lat},${a.lng}`} target="_blank" rel="noopener">see it on the map</a>
+            </div>
+          )}
 
           {openFor === a.id && (
             <div className="decision-terms">
