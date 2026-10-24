@@ -1948,3 +1948,72 @@ The website's delivery page used `/delivery`, which is also the office's
 Delivery rounds screen, so signed-in staff landed on the website. The
 website page is now `/how-we-deliver`; `web/test/sitepaths.test.ts` fails if
 any website address ever matches an app route again.
+
+## Empties on the settlement, and who loaded the truck (23 Oct 2026, late)
+
+Everton, after further testing:
+1. "If the driver delivers to a customer and lists empty bottles collected,
+   they don't come back on the settlement report."
+2. "When logging the loading, the user making the note should not be
+   selecting staff as the loader unless it is an admin user; it should
+   automatically record the user confirming from their profile. For the
+   admin, it should be a drop-down from office users if not themselves."
+
+**1. Empties.** The stop always saved them (`bottles_empties_picked_up`);
+the settlement screen simply never showed them, and its "Empty bottles
+returned" box started blank (so a round settled without a bottle count).
+- `settlement.getSettlementReview` now returns `bottles` (fullOut,
+  emptiesFromStops, emptiesFromCollections, emptiesRecorded, lostDamaged,
+  counted, variance) and, once Completed, `settledCash` (handed in,
+  variance, notes).
+- Settlement screen: a **Bottles** column per stop ("3 full out · 2 empties
+  back · 1 lost"); "Empty bottles returned" defaults to what was counted off
+  the truck, else to the empties recorded, until someone types; new lines
+  Empties recorded across stops / Empties returned / Empties difference. A
+  settled round now shows its cash and bottle reconciliation read-only (it
+  used to show nothing).
+- `reports.roundsReport` "Empties recorded" now includes empties from
+  collection stops, as settlement always did.
+
+**2. Loader.** Loaders are now office LOGINS, not employees.
+- `trucks.resolveLoader`: office staff (`user`) are always the loader,
+  whatever is sent; an admin sends `loaderId` (an active admin/user login),
+  blank = themselves; anything else is refused ("choose who loaded it from
+  the office logins"). Used by `loadRound` and `addToLoad`. Legacy
+  `loaderIds[0]` is still read for an admin. Stored as a one-element
+  `loader_ids`/`loader_names`, so the loadings report is unchanged.
+- `loadingSummary.loaders` lists active admin/user logins (job_title
+  Administrator/Office) for the admin's drop-down.
+- `Truck.tsx`: the employee tick-boxes are gone. Office staff see "Loaded by
+  <their name> · recorded from your login"; admins get a drop-down, "Me
+  (<name>)" first. `loaderWords()` reads "Loaded by X" when the person who
+  logged it loaded it, else "Logged by X; loaded by Y".
+Tests: 617 (74 + 533 + 10). trucks.test.ts updated for loaders and a new
+describe for empties on the settlement.
+
+## Documents open in a new tab (23 Oct 2026, late)
+
+Everton: viewing a receipt (Payments, customer transaction history) downloaded
+it instead of showing it; "all viewing of statements, invoices and receipts
+should be opened in a new tab instead of the same tab."
+
+- Every PDF route now sends `content-disposition: inline` (was `attachment`),
+  keeping the filename, so the browser's viewer shows it; its own buttons
+  save or print it.
+- `lib/api.ts` `openPdfPost(path, body, filename)`: for the POST-built PDFs
+  (receipts, batch prints). Opens the tab FIRST, synchronously in the click
+  (pop-up blockers allow that), then points it at a blob of the PDF; falls
+  back to a download if the tab is blocked. Call it before any await in a
+  click handler. GET documents use the existing `openPdf(path)`.
+- Switched to a new tab: receipts (customer page, Payments - which also gets
+  a **Receipt** link on every payment row - and New sale's "View receipt"),
+  invoice and credit note PDFs, the Statement dialog and Statement page
+  ("View PDF"), batch "Print (one PDF)" on Invoices, Credit notes, Quotes,
+  Purchase orders, Payments and the customer page, quote and PO PDFs, and
+  the portal's quote/invoice PDF buttons. The portal invoice's explicit
+  "Download PDF" button still downloads; CSV/Excel exports still download.
+- New sale no longer downloads the receipt by itself after a paid sale: a
+  tab can only be opened from a click, so it is the "View receipt" link on
+  the confirmation.
+Tests unchanged at 617; checked in a browser that receipts and invoices open
+in a new tab and show, with no download.

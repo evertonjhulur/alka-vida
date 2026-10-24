@@ -120,6 +120,25 @@ async function loadableProducts(t: Queryable) {
   );
 }
 
+/**
+ * Who loaded the truck (Everton, 23 Oct 2026). Office staff do not pick: it
+ * is recorded in their own name, from their login. An administrator may name
+ * another office login (admin or office staff) from a drop-down; left blank,
+ * it is the administrator. Loaders used to be ticked from the employee list.
+ */
+export async function resolveLoader(
+  t: Queryable, actor: Actor, input: { loaderId?: string | null; loaderIds?: string[] },
+): Promise<{ id: string; name: string }> {
+  if (actor.role !== 'admin') return { id: actor.id, name: actor.name };
+  const chosen = input.loaderId || (input.loaderIds ?? []).find(Boolean) || actor.id;
+  if (chosen === actor.id) return { id: actor.id, name: actor.name };
+  const u = await t.maybeOne<{ id: string; name: string }>(
+    `SELECT id, name FROM users WHERE id = $1 AND active AND role IN ('admin','user')`, [chosen],
+  );
+  if (!u) throw new RuleViolation('choose who loaded it from the office logins');
+  return u;
+}
+
 const unitsToBottles = (bpc: number, units: number) => Math.max(0, Math.round(Number(units) || 0)) * (bpc > 0 ? bpc : 1);
 
 /**
@@ -135,8 +154,10 @@ export async function loadingSummary(db: Queryable, sheetId: string) {
   const products = await loadableProducts(db);
   const ordered = new Map((await orderedOnRound(db, sheetId)).map((r) => [r.product_id, num(r.bottles)]));
   const load = await getLoad(db, sheetId);
+  // Office logins an administrator can name as the loader (23 Oct 2026).
   const loaders = await db.query<{ id: string; name: string; job_title: string | null }>(
-    `SELECT id, name, job_title FROM employees WHERE active ORDER BY name`,
+    `SELECT id, name, CASE role WHEN 'admin' THEN 'Administrator' ELSE 'Office' END AS job_title
+     FROM users WHERE active AND role IN ('admin','user') ORDER BY name`,
   );
   const lines = products
     .filter((p) => (ordered.get(p.id) ?? 0) > 0 || load?.lines.some((l) => l.productId === p.id))
@@ -221,11 +242,9 @@ export async function listAdditions(db: Queryable, sheetId: string) {
  */
 export async function addToLoad(
   db: Db, actor: Actor, sheetId: string,
-  input: { extras?: LoadLineInput[]; loaderIds?: string[]; note?: string | null },
+  input: { extras?: LoadLineInput[]; loaderId?: string | null; loaderIds?: string[]; note?: string | null },
 ): Promise<{ id: string; addedBottles: number }> {
   requireRole(actor, 'admin', 'user');
-  const loaderIds = [...new Set((input.loaderIds ?? []).filter(Boolean))];
-  if (loaderIds.length === 0) throw new RuleViolation('say who loaded it');
   return db.tx(async (t) => {
     const sheet = await t.maybeOne<{ status: string }>(
       `SELECT status FROM delivery_sheets WHERE id = $1 FOR UPDATE`, [sheetId],
@@ -240,10 +259,7 @@ export async function addToLoad(
       throw new RuleViolation('the driver has not confirmed the load yet, so just change the loading itself');
     }
     if (load.returned_at) throw new RuleViolation('the truck has been counted back for this round');
-    const people = await t.query<{ id: string; name: string }>(
-      `SELECT id, name FROM employees WHERE id = ANY($1::uuid[]) AND active`, [loaderIds],
-    );
-    if (people.length !== loaderIds.length) throw new RuleViolation('choose the loaders from the employee list');
+    const people = [await resolveLoader(t, actor, input)];
 
     const products = new Map((await loadableProducts(t)).map((p) => [p.id, p]));
     const add = new Map<string, number>();
@@ -353,11 +369,9 @@ export async function unconfirmedAdditions(t: Queryable, sheetId: string): Promi
  */
 export async function loadRound(
   db: Db, actor: Actor, sheetId: string,
-  input: { extras?: LoadLineInput[]; loaderIds?: string[] },
+  input: { extras?: LoadLineInput[]; loaderId?: string | null; loaderIds?: string[] },
 ): Promise<{ loadedBottles: number }> {
   requireRole(actor, 'admin', 'user');
-  const loaderIds = [...new Set((input.loaderIds ?? []).filter(Boolean))];
-  if (loaderIds.length === 0) throw new RuleViolation('say who loaded the truck');
 
   const total = await db.tx(async (t) => {
     const sheet = await t.maybeOne<{ status: string }>(
@@ -387,10 +401,7 @@ export async function loadRound(
     }
     if (before?.returned_at) throw new RuleViolation('the returns are already in for this round');
 
-    const people = await t.query<{ id: string; name: string }>(
-      `SELECT id, name FROM employees WHERE id = ANY($1::uuid[]) AND active`, [loaderIds],
-    );
-    if (people.length !== loaderIds.length) throw new RuleViolation('choose the loaders from the employee list');
+    const people = [await resolveLoader(t, actor, input)];
 
     const products = new Map((await loadableProducts(t)).map((p) => [p.id, p]));
     const ordered = new Map((await orderedOnRound(t, sheetId)).map((r) => [r.product_id, num(r.bottles)]));

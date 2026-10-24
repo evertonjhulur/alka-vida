@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { api } from '../lib/api';
+import { api, getSession } from '../lib/api';
 import { money, time, toCents } from '../lib/format';
 import { payMethods, useTakeCard } from '../lib/payments';
 
@@ -19,7 +19,7 @@ export interface TruckLine {
   expectedBackBottles: number; differenceBottles: number | null;
 }
 export interface Truck {
-  loadedAt: string; loadedByName: string | null; loaderNames: string[];
+  loadedAt: string; loadedByName: string | null; loaderNames: string[]; loaderIds?: string[];
   /** The driver confirmed the totals and took responsibility (dual accountability). */
   driverConfirmedAt?: string | null; driverConfirmedName?: string | null;
   /** Last-minute additions after the driver confirmed, each reconfirmed by the driver. */
@@ -74,6 +74,46 @@ export function collectionSummary(c: Collection): string {
 
 /* ------------------------------------------------------------------ loading */
 
+/** "Loaded by Ann", or "Logged by Ann; loaded by Bob" when an admin named someone else. */
+export function loaderWords(loggedBy: string | null, loaders: string[]): string {
+  const who = loaders.join(', ');
+  if (!who) return `Logged by ${loggedBy ?? '—'}`;
+  if (loggedBy && loaders.length === 1 && loaders[0] === loggedBy) return `Loaded by ${who}`;
+  return `Logged by ${loggedBy ?? '—'}; loaded by ${who}`;
+}
+
+/**
+ * Who loaded it (Everton, 23 Oct 2026). Office staff do not choose: it is
+ * recorded in their own name from their login. An administrator picks from
+ * the office logins, themselves by default. A plain function, not a
+ * component (see the note at the top of this file).
+ */
+function loaderField(
+  s: LoadingSummary, loaderId: string, setLoaderId: (id: string) => void, label: string, htmlId: string,
+) {
+  const me = getSession();
+  if (me?.role !== 'admin') {
+    return (
+      <div className="field" style={{ marginTop: 12 }}>
+        <label>{label}</label>
+        <div><strong>{me?.name ?? 'You'}</strong> <span className="muted small">· recorded from your login</span></div>
+      </div>
+    );
+  }
+  const others = s.loaders.filter((p) => p.id !== me.id);
+  return (
+    <div className="field" style={{ marginTop: 12 }}>
+      <label htmlFor={htmlId}>{label}</label>
+      <select id={htmlId} value={loaderId || me.id} onChange={(e) => setLoaderId(e.target.value)} style={{ maxWidth: 320 }}>
+        <option value={me.id}>Me ({me.name})</option>
+        {others.map((p) => (
+          <option key={p.id} value={p.id}>{p.name}{p.job_title ? ` · ${p.job_title}` : ''}</option>
+        ))}
+      </select>
+    </div>
+  );
+}
+
 interface LoadingSummary {
   lines: Array<{ productId: string; name: string; bottlesPerCase: number; orderedBottles: number }>;
   products: Array<{ productId: string; name: string; bottlesPerCase: number }>;
@@ -96,7 +136,7 @@ export function LoadingPanel({ sheetId, onDone, onCancel }: {
   const [extra, setExtra] = useState<Record<string, string>>({});
   const [added, setAdded] = useState<string[]>([]);
   const [addPick, setAddPick] = useState('');
-  const [loaders, setLoaders] = useState<string[]>([]);
+  const [loaderId, setLoaderId] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -107,7 +147,8 @@ export function LoadingPanel({ sheetId, onDone, onCancel }: {
         setExtra(Object.fromEntries(r.load.lines.filter((l) => l.extraBottles > 0)
           .map((l) => [l.productId, String(toUnits(l.bottlesPerCase, l.extraBottles))])));
         setAdded(r.load.lines.filter((l) => l.orderedBottles === 0).map((l) => l.productId));
-        setLoaders(r.loaders.filter((p) => r.load!.loaderNames.includes(p.name)).map((p) => p.id));
+        const was = r.load.loaderIds?.find((id) => r.loaders.some((p) => p.id === id));
+        if (was) setLoaderId(was);
       }
     }).catch((e) => setError(e.message));
   }, [sheetId]);
@@ -131,7 +172,7 @@ export function LoadingPanel({ sheetId, onDone, onCancel }: {
       await api.post(`/api/delivery-sheets/${sheetId}/load`, {
         extras: rows.map((r) => ({ productId: r.productId, extraUnits: extraUnits(r.productId) }))
           .filter((x) => x.extraUnits > 0),
-        loaderIds: loaders,
+        loaderId: loaderId || undefined,
       });
       onDone('Loading logged and confirmed loaded. The driver confirms the totals to start the route.');
     } catch (e) {
@@ -144,7 +185,7 @@ export function LoadingPanel({ sheetId, onDone, onCancel }: {
       <h2 className="side-h" style={{ marginTop: 0 }}>Loading the truck</h2>
       {s.load && (
         <p className="muted small" style={{ marginTop: 0 }}>
-          Logged by {s.load.loadedByName ?? '—'}; loaded by {s.load.loaderNames.join(', ') || '—'}. You can change it until the driver confirms it.
+          {loaderWords(s.load.loadedByName, s.load.loaderNames)}. You can change it until the driver confirms it.
         </p>
       )}
       {error && <div className="notice error">{error}</div>}
@@ -185,20 +226,8 @@ export function LoadingPanel({ sheetId, onDone, onCancel }: {
         </div>
       )}
 
-      <div className="field" style={{ marginTop: 12 }}>
-        <label>Who loaded the truck?</label>
-        {s.loaders.length === 0 && <div className="notice warn">No employees yet. Add them under Settings › People.</div>}
-        <div className="loader-picks">
-          {s.loaders.map((p) => (
-            <label key={p.id} className="check">
-              <input type="checkbox" checked={loaders.includes(p.id)}
-                     onChange={(e) => setLoaders((l) => (e.target.checked ? [...l, p.id] : l.filter((x) => x !== p.id)))} />
-              {p.name}{p.job_title ? <span className="muted small"> · {p.job_title}</span> : null}
-            </label>
-          ))}
-        </div>
-      </div>
-      <button type="button" className="big-go" disabled={busy || loaders.length === 0} onClick={confirm}>
+      {loaderField(s, loaderId, setLoaderId, 'Loaded by', `loader-${sheetId}`)}
+      <button type="button" className="big-go" disabled={busy} onClick={confirm}>
         {busy ? 'Saving…' : s.load ? 'Save the change' : 'Confirm loaded: log it'}
       </button>
       <p className="muted small" style={{ textAlign: 'center', margin: '6px 0 0' }}>
@@ -254,7 +283,7 @@ export function ConfirmLoadPanel({ sheetId, onDone }: { sheetId: string; onDone:
       <h2 className="side-h" style={{ marginTop: 0 }}>Confirm the load</h2>
       {error && <div className="notice error">{error}</div>}
       <p className="muted small" style={{ marginTop: 0 }}>
-        Logged by {load.loadedByName ?? 'the office'} at {time(load.loadedAt)}; loaded by {load.loaderNames.join(', ') || '—'}.
+        {loaderWords(load.loadedByName ?? 'the office', load.loaderNames)} at {time(load.loadedAt)}.
       </p>
       {load.lines.map((l) => (
         <div key={l.productId} className="drop-row">
@@ -294,7 +323,7 @@ export function AddToLoadPanel({ sheetId, onDone, onCancel }: {
   const [qty, setQty] = useState<Record<string, string>>({});
   const [shown, setShown] = useState<string[]>([]);
   const [pick, setPick] = useState('');
-  const [loaders, setLoaders] = useState<string[]>([]);
+  const [loaderId, setLoaderId] = useState('');
   const [note, setNote] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -314,7 +343,7 @@ export function AddToLoadPanel({ sheetId, onDone, onCancel }: {
     try {
       await api.post(`/api/delivery-sheets/${sheetId}/load-additions`, {
         extras: shown.map((id) => ({ productId: id, extraUnits: n(id) })).filter((x) => x.extraUnits > 0),
-        loaderIds: loaders, note: note || null,
+        loaderId: loaderId || undefined, note: note || null,
       });
       onDone('Added to the load. The driver confirms it on My route.');
     } catch (e) {
@@ -354,25 +383,14 @@ export function AddToLoadPanel({ sheetId, onDone, onCancel }: {
                   onClick={() => { setShown((x) => [...x, pick]); setQty((q) => ({ ...q, [pick]: '1' })); setPick(''); }}>Add</button>
         </div>
       )}
-      <div className="field" style={{ marginTop: 10 }}>
-        <label>Who loaded it?</label>
-        <div className="loader-picks">
-          {s.loaders.map((p) => (
-            <label key={p.id} className="check">
-              <input type="checkbox" checked={loaders.includes(p.id)}
-                     onChange={(e) => setLoaders((l) => (e.target.checked ? [...l, p.id] : l.filter((x) => x !== p.id)))} />
-              {p.name}
-            </label>
-          ))}
-        </div>
-      </div>
+      {loaderField(s, loaderId, setLoaderId, 'Loaded by', `add-loader-${sheetId}`)}
       <div className="field">
         <label htmlFor={`an-${sheetId}`}>Why (optional)</label>
         <input id={`an-${sheetId}`} value={note} style={{ width: '100%', boxSizing: 'border-box' }}
                placeholder="e.g. customer called for 2 more cases" onChange={(e) => setNote(e.target.value)} />
       </div>
       <div className="row" style={{ gap: 8 }}>
-        <button type="button" disabled={busy || loaders.length === 0 || !shown.some((id) => n(id) > 0)} onClick={save}>
+        <button type="button" disabled={busy || !shown.some((id) => n(id) > 0)} onClick={save}>
           {busy ? 'Saving…' : 'Confirm loaded: add it'}
         </button>
         <button type="button" className="secondary" onClick={onCancel}>Cancel</button>
@@ -409,7 +427,7 @@ export function AdditionsList({ additions, role, onDone }: {
             <strong>Added {time(a.addedAt)}: </strong>
             {a.lines.map((l) => `${units(l.bottlesPerCase, l.bottles)} ${shortName(l.name)}`).join(', ')}
             <div className="muted small">
-              logged by {a.addedByName ?? '—'}; loaded by {a.loaderNames.join(', ') || '—'}{a.note ? ` · ${a.note}` : ''}
+              {loaderWords(a.addedByName, a.loaderNames)}{a.note ? ` · ${a.note}` : ''}
             </div>
             <div className="small">
               {a.driverConfirmedAt

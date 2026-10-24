@@ -650,7 +650,7 @@ export default function Portal({ session }: { session: Session }) {
                   <td className="num">
                     <span className="row" style={{ gap: 6, justifyContent: 'flex-end' }}>
                       <button type="button" className="secondary" disabled={busy}
-                              onClick={() => download(`/api/quotations/${q.id}/pdf`, `${q.quote_number}.pdf`).catch((e) => setError(e.message))}>PDF</button>
+                              onClick={() => openPdf(`/api/quotations/${q.id}/pdf`).catch((e) => setError(e.message))}>PDF</button>
                       {q.status === 'Sent' && !q.expired ? (
                         <>
                           <button type="button" className="approve-soft" disabled={busy} onClick={() => answerQuote(q, 'Accepted')}>Accept</button>
@@ -707,7 +707,7 @@ export default function Portal({ session }: { session: Session }) {
                     </td>
                     <td className="num actions">
                       <button type="button" className="secondary" disabled={busy}
-                              onClick={() => download(`/api/portal/invoices/${r.invoice_id}/pdf`, `${r.invoice_number}.pdf`)
+                              onClick={() => openPdf(`/api/portal/invoices/${r.invoice_id}/pdf`)
                                 .catch((e) => setError(e.message))}>PDF</button>
                     </td>
                   </tr>

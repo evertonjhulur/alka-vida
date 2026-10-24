@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link, useParams, useSearchParams } from 'react-router-dom';
-import { api, downloadPost, type Session } from '../lib/api';
+import { api, openPdfPost, type Session } from '../lib/api';
 import { payMethods, useTakeCard } from '../lib/payments';
 import { money, date, statusTone, toCents, todayInJamaica, when } from '../lib/format';
 import StatementDialog from '../components/StatementDialog';
@@ -460,7 +460,7 @@ export default function CustomerRecord({ session }: { session: Session }) {
     txTicks.clear();
   }, 'Could not send the invoices');
   const downloadPicked = () => run(async () => {
-    await downloadPost('/api/invoices/batch.pdf', { invoiceIds: docIds() },
+    await openPdfPost('/api/invoices/batch.pdf', { invoiceIds: docIds() },
       `invoices-${(h?.customer.name ?? 'customer').replace(/\W+/g, '-')}.pdf`);
   }, 'Could not build the PDF');
   /** Take a payment opens with these invoices filled in to be paid in full. */
@@ -478,7 +478,7 @@ export default function CustomerRecord({ session }: { session: Session }) {
     setMsg(`${open_.length} marked as sent.`);
   }, 'Could not mark them');
   const printReceipts = () => run(async () => {
-    await downloadPost('/api/batch/receipts/print.pdf', { ids: tickedPayRows }, 'Receipts.pdf');
+    await openPdfPost('/api/batch/receipts/print.pdf', { ids: tickedPayRows }, 'Receipts.pdf');
   }, 'Could not build the receipts');
   const emailReceipt = () => run(async () => {
     const r = await api.post<{ sentTo: string; receiptNumber: string }>('/api/receipts/email', { paymentIds: tickedPayRows });
@@ -487,7 +487,7 @@ export default function CustomerRecord({ session }: { session: Session }) {
   }, 'Could not email the receipt');
   const receiptFor = (t: Tx) => run(async () => {
     const ids = (t.rows ?? []).filter((r) => Number(r.amount_cents) > 0).map((r) => r.id);
-    await downloadPost('/api/receipts.pdf', { paymentIds: ids }, `Receipt-${t.number || 'payment'}.pdf`);
+    await openPdfPost('/api/receipts.pdf', { paymentIds: ids }, `Receipt-${t.number || 'payment'}.pdf`);
   }, 'Could not build the receipt');
   const exportTx = (rows: Tx[]) => downloadCsv(`transactions-${(h?.customer.name ?? 'customer').replace(/\W+/g, '-')}`, [
     ['Date', 'Type', 'No.', 'Description', 'Amount', 'Still open', 'Balance', 'Status'],

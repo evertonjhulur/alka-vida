@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import { api, download, downloadPost } from '../lib/api';
+import { api, openPdf, openPdfPost } from '../lib/api';
 import { BatchBar, SortTh, MultiStatusSelect, passes, TickAllTh, TickTd, sendSummary, useSort, useTicks } from '../components/ListTools';
 import { downloadCsv, dollars } from '../lib/csv';
 import { money, toCents, when, day, todayInJamaica } from '../lib/format';
@@ -393,7 +393,7 @@ export default function PurchaseOrders() {
                       onClear={poTicks.clear}
                       actions={[
                         { label: 'Print (one PDF)', run: () => poBatch(async () => {
-                          await downloadPost('/api/batch/purchase-orders/print.pdf', { ids: poTicks.picked }, `Purchase-orders-${poPicked.length}.pdf`);
+                          await openPdfPost('/api/batch/purchase-orders/print.pdf', { ids: poTicks.picked }, `Purchase-orders-${poPicked.length}.pdf`);
                           return `${poPicked.length} in one PDF.`;
                         }, 'Could not build the PDF') },
                         { label: 'Email each to its supplier', run: () => poBatch(async () => {
@@ -448,8 +448,8 @@ export default function PurchaseOrders() {
             <h2>{open.po_number} · {open.supplier_name}</h2>
             <span className="row" style={{ gap: 6 }}>
               <button className="secondary" disabled={busy}
-                      onClick={() => download(`/api/purchase-orders/${open.id}/pdf`, `${open.po_number}.pdf`).catch((e) => setError(e.message))}>
-                Download PDF</button>
+                      onClick={() => openPdf(`/api/purchase-orders/${open.id}/pdf`).catch((e) => setError(e.message))}>
+                View PDF</button>
               <span className={`chip ${statusChip(open.status)}`}>{statusLabel(open.status)}</span>
               {nothingReceived && open.status !== 'Cancelled' && (
                 <button className="secondary" disabled={busy} onClick={() => startEdit(open)}>Change it</button>

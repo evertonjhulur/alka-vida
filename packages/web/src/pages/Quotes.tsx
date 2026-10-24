@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
-import { api, download, downloadPost } from '../lib/api';
+import { api, openPdf, openPdfPost } from '../lib/api';
 import { BatchBar, SortTh, MultiStatusSelect, passes, TickAllTh, TickTd, sendSummary, useSort, useTicks } from '../components/ListTools';
 import { downloadCsv, dollars } from '../lib/csv';
 import { money, statusTone, todayInJamaica, when } from '../lib/format';
@@ -130,7 +130,7 @@ function QuoteList() {
                   onClear={ticks.clear}
                   actions={[
                     { label: 'Print (one PDF)', run: () => batch(async () => {
-                      await downloadPost('/api/batch/quotes/print.pdf', { ids: ticks.picked }, `Quotes-${picked.length}.pdf`);
+                      await openPdfPost('/api/batch/quotes/print.pdf', { ids: ticks.picked }, `Quotes-${picked.length}.pdf`);
                       return `${picked.length} in one PDF.`;
                     }, 'Could not build the PDF') },
                     { label: 'Email to the customers (with the accept link)', run: () => batch(async () => {
@@ -508,8 +508,8 @@ function QuoteView({ quoteId }: { quoteId: string }) {
         </div>
         <div className="record-actions">
           <button className="secondary" disabled={busy}
-                  onClick={() => act(async () => { await download(`/api/quotations/${q.id}/pdf`, `${q.quote_number}.pdf`); }, 'Could not build the PDF')}>
-            Download PDF</button>
+                  onClick={() => act(async () => { await openPdf(`/api/quotations/${q.id}/pdf`); }, 'Could not open the PDF')}>
+            View PDF</button>
           {open && <Link to={`/quotes/${q.id}/edit`}><button type="button" className="secondary">Change it</button></Link>}
           {open && <button className="secondary" disabled={busy} onClick={() => setPanel(panel === 'email' ? null : 'email')}>Email to customer</button>}
           {(q.status === 'Accepted' || open) && (

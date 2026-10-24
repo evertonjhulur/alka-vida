@@ -236,6 +236,51 @@ export async function downloadPost(path: string, body: unknown, filename: string
 export async function openPdf(path: string): Promise<void> {
   // The sign-in cookie goes with an ordinary visit now (10 Oct 2026), so the
   // tab opens the PDF's own address and the browser's viewer shows it.
+  // The server sends PDFs "inline" (23 Oct 2026), so the viewer shows them
+  // rather than the browser saving them.
   const win = window.open(path, '_blank');
   if (!win) window.location.href = path;
+}
+
+/**
+ * Everton, 23 Oct 2026: "all viewing of statements, invoices and receipts
+ * should be opened in a new tab". The documents built from a list sent to
+ * the server (a receipt for several payments, several invoices in one PDF)
+ * are a POST, so a plain address cannot carry them: the tab is opened FIRST,
+ * synchronously inside the click (a pop-up blocker allows it), then pointed
+ * at the PDF once it arrives. Call it before any await in the click handler.
+ * If the browser blocks the tab anyway, it falls back to a download.
+ */
+export async function openPdfPost(path: string, body: unknown, filename: string): Promise<void> {
+  const win = window.open('', '_blank');
+  if (win) {
+    try {
+      win.document.title = 'Preparing the PDF…';
+      win.document.body.innerHTML = '<p style="font:16px system-ui,sans-serif;color:#555;padding:24px">Preparing the PDF…</p>';
+    } catch { /* the page may not be writable yet; it is replaced in a moment */ }
+  }
+  if (!win) return downloadPost(path, body, filename);
+  try {
+    const res = await fetch(path, {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { ...APP_HEADER, 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (res.status === 401) { sessionExpired(); throw new ApiError(401, 'Your session has expired. Please sign in again.'); }
+    if (!res.ok) {
+      const text = await res.text();
+      let message = `Could not build the PDF (${res.status})`;
+      try { message = JSON.parse(text).error ?? message; } catch { message = notJsonMessage(res.status); }
+      throw new ApiError(res.status, message);
+    }
+    const blob = new Blob([await res.blob()], { type: 'application/pdf' });
+    const url = URL.createObjectURL(blob);
+    win.location.href = url;
+    // Long enough for the viewer to have read it; the tab keeps its copy.
+    setTimeout(() => URL.revokeObjectURL(url), 5 * 60_000);
+  } catch (e) {
+    try { win.close(); } catch { /* already gone */ }
+    throw e;
+  }
 }

@@ -121,7 +121,7 @@ export function registerFeedbackRoutes(
     const doc = await documents.renderInvoicePdf(db, id(req as Req));
     return reply
       .header('content-type', 'application/pdf')
-      .header('content-disposition', `attachment; filename="${doc.filename}"`)
+      .header('content-disposition', `inline; filename="${doc.filename}"`)
       .send(doc.pdf);
   });
 

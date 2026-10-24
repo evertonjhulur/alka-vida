@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import { api, downloadPost } from '../lib/api';
+import { api, openPdfPost } from '../lib/api';
 import { money, date, when } from '../lib/format';
 import { INVOICE_FILTERS, STATE_TONE, invoiceMatches, invoiceState } from '../lib/invoiceState';
 import { BatchBar, SortTh, MultiStatusSelect, passes, TickAllTh, TickTd, sendSummary, useSort, useTicks } from '../components/ListTools';
@@ -72,7 +72,7 @@ export default function Invoices() {
   }
   const ids = () => picked.map((r) => r.invoice_id);
   const printPicked = () => batch(async () => {
-    await downloadPost('/api/batch/invoices/print.pdf', { ids: ids() }, `Invoices-${picked.length}.pdf`);
+    await openPdfPost('/api/batch/invoices/print.pdf', { ids: ids() }, `Invoices-${picked.length}.pdf`);
     return `${picked.length} printed to one PDF.`;
   }, 'Could not build the PDF');
   const sendPicked = () => batch(async () => {

@@ -47,6 +47,22 @@ interface Review {
   stops: StopRow[];
   totalCollectedCents: number;
   totalExpectedCents: number;
+  /** The round's bottles across its stops and collection stops (23 Oct 2026). */
+  bottles?: {
+    fullOut: number; emptiesFromStops: number; emptiesFromCollections: number;
+    emptiesRecorded: number; lostDamaged: number; counted: number | null; variance: number | null;
+  };
+  settledCash?: { handedInCents: number | null; varianceCents: number | null; notes: string | null } | null;
+}
+
+/** "3 out · 2 empties back · 1 lost", or a dash when the stop moved no bottles. */
+function bottleWords(s: StopRow): string {
+  const bits = [
+    s.bottlesDeliveredFull > 0 ? `${s.bottlesDeliveredFull} full out` : '',
+    s.bottlesEmptiesPickedUp > 0 ? `${s.bottlesEmptiesPickedUp} empt${s.bottlesEmptiesPickedUp === 1 ? 'y' : 'ies'} back` : '',
+    s.bottlesLostDamaged > 0 ? `${s.bottlesLostDamaged} lost` : '',
+  ].filter(Boolean);
+  return bits.length ? bits.join(' · ') : '—';
 }
 
 /** Per-stop working state for the cash split: invoiceId -> amount typed. */
@@ -58,6 +74,8 @@ export default function Settlement({ session }: { session: Session }) {
   const [actualCash, setActualCash] = useState('');
   const [cashTouched, setCashTouched] = useState(false);
   const [bottlesBack, setBottlesBack] = useState('');
+  /** Until someone types, the empties box follows what was recorded. */
+  const [bottlesTouched, setBottlesTouched] = useState(false);
   const [notes, setNotes] = useState('');
   const [openStop, setOpenStop] = useState<string | null>(null);
   const [split, setSplit] = useState<Split>({});
@@ -77,7 +95,6 @@ export default function Settlement({ session }: { session: Session }) {
     setReview(r);
     const sh = await api.get<{ truck: Truck | null; collections: Collection[]; stops: Array<{ bottles_empties_picked_up?: number }> }>(`/api/delivery-sheets/${sheetId}`);
     setRound(sh);
-    if (sh.truck?.emptiesBack != null) setBottlesBack((cur) => (cur === '' ? String(sh.truck!.emptiesBack) : cur));
     // The cash handed in is almost always exactly what the driver recorded
     // collecting, so start there and let it be overridden. Only prefill until
     // the person actually types - never overwrite what they entered.
@@ -92,8 +109,14 @@ export default function Settlement({ session }: { session: Session }) {
 
   const truck = round?.truck ?? null;
   const collections = round?.collections ?? [];
-  const emptiesRecorded = (round?.stops ?? []).reduce((t, s) => t + Number(s.bottles_empties_picked_up ?? 0), 0)
-    + collections.filter((c) => c.kind === 'Empties' && c.status === 'Collected').reduce((t, c) => t + Number(c.empties_count), 0);
+  const emptiesRecorded = review.bottles?.emptiesRecorded
+    ?? ((round?.stops ?? []).reduce((t, s) => t + Number(s.bottles_empties_picked_up ?? 0), 0)
+      + collections.filter((c) => c.kind === 'Empties' && c.status === 'Collected').reduce((t, c) => t + Number(c.empties_count), 0));
+  // The empties box starts at what was counted off the truck, or else at what
+  // the stops recorded, so the empties the driver listed are always there.
+  const bottlesShown = bottlesTouched ? bottlesBack : String(truck?.emptiesBack ?? emptiesRecorded);
+  const bottlesCounted = bottlesShown === '' ? null : Math.max(0, Math.round(Number(bottlesShown) || 0));
+  const bottleDiff = bottlesCounted === null ? null : bottlesCounted - emptiesRecorded;
   const undecided = collections.filter((c) => c.kind === 'Returns' && c.status === 'Collected' && !c.credit_decision);
   const truckOut = !!truck && !truck.returnedAt;
   const unconfirmedAdds = (truck?.additions ?? []).filter((a) => !a.driverConfirmedAt).length;
@@ -203,7 +226,7 @@ export default function Settlement({ session }: { session: Session }) {
       const out = await api.post<{ paymentIds: string[]; cashVarianceCents: number }>(
         `/api/delivery-sheets/${sheetId}/settle`, {
           actualCashCents: handedIn ?? 0,
-          bottleActualReturned: bottlesBack === '' ? undefined : Number(bottlesBack),
+          bottleActualReturned: bottlesCounted ?? undefined,
           settlementNotes: notes || null,
         });
       setDone(
@@ -386,7 +409,7 @@ export default function Settlement({ session }: { session: Session }) {
         <table>
           <thead>
             <tr>
-              <th>Customer</th><th>Outcome</th><th>Delivered</th>
+              <th>Customer</th><th>Outcome</th><th>Delivered</th><th>Bottles</th>
               <th className="num">Expected</th>
               <th className="num">Collected</th>
               <th className="num">Variance</th>
@@ -407,6 +430,7 @@ export default function Settlement({ session }: { session: Session }) {
                   </span>
                 </td>
                 <td className="small muted">{s.deliveredSummary || '—'}</td>
+                <td className="small">{bottleWords(s)}</td>
                 <td className="num">{money(s.expectedCents)}</td>
                 <td className="num">{money(s.collectedCents)}</td>
                 <td className="num">
@@ -510,6 +534,40 @@ export default function Settlement({ session }: { session: Session }) {
         </div>
       )}
 
+      {locked && review.bottles && (
+        <div className="panel">
+          <h2 style={{ marginTop: 0 }}>Cash and bottle reconciliation</h2>
+          <div className="total-line"><span>Cash recorded across stops</span><span>{money(recorded)}</span></div>
+          <div className="total-line">
+            <span>Handed in</span>
+            <span>{review.settledCash?.handedInCents == null ? '—' : money(review.settledCash.handedInCents)}</span>
+          </div>
+          <div className="total-line grand">
+            <span>Driver variance</span>
+            <span>{review.settledCash?.varianceCents == null ? '—' : money(review.settledCash.varianceCents)}</span>
+          </div>
+          <div className="total-line" style={{ marginTop: 12 }}><span>Full bottles out</span><span>{review.bottles.fullOut}</span></div>
+          <div className="total-line">
+            <span>
+              Empties recorded across stops
+              {review.bottles.emptiesFromCollections > 0 && (
+                <span className="muted small"> ({review.bottles.emptiesFromStops} at deliveries, {review.bottles.emptiesFromCollections} from collection stops)</span>
+              )}
+            </span>
+            <span>{review.bottles.emptiesRecorded}</span>
+          </div>
+          <div className="total-line"><span>Empties returned</span><span>{review.bottles.counted ?? 'not counted'}</span></div>
+          <div className="total-line grand">
+            <span>Empties difference</span>
+            <span>{review.bottles.variance == null ? '—' : review.bottles.variance > 0 ? `+${review.bottles.variance}` : review.bottles.variance}</span>
+          </div>
+          {review.bottles.lostDamaged > 0 && (
+            <div className="total-line"><span>Lost or damaged</span><span>{review.bottles.lostDamaged}</span></div>
+          )}
+          {review.settledCash?.notes && <p className="small" style={{ marginBottom: 0 }}><strong>Notes:</strong> {review.settledCash.notes}</p>}
+        </div>
+      )}
+
       {!locked && (
         <div className="panel">
           <h2 style={{ marginTop: 0 }}>Cash and bottle reconciliation</h2>
@@ -524,7 +582,8 @@ export default function Settlement({ session }: { session: Session }) {
             <div className="field">
               <label htmlFor="bottles">Empty bottles returned</label>
               <input id="bottles" type="number" min="0" style={{ width: 140 }}
-                     value={bottlesBack} onChange={(e) => setBottlesBack(e.target.value)} />
+                     value={bottlesShown} onChange={(e) => { setBottlesTouched(true); setBottlesBack(e.target.value); }} />
+              <span className="muted small">defaults to the empties recorded{truck?.emptiesBack != null ? ' (counted off the truck)' : ''}</span>
             </div>
           </div>
 
@@ -546,6 +605,29 @@ export default function Settlement({ session }: { session: Session }) {
               what they physically handed in. It is a matter to take up with the
               driver — it never touches a customer's account or any invoice.
             </div>
+          )}
+
+          <div className="total-line" style={{ marginTop: 12 }}>
+            <span>
+              Empties recorded across stops
+              {review.bottles && review.bottles.emptiesFromCollections > 0 && (
+                <span className="muted small"> ({review.bottles.emptiesFromStops} at deliveries, {review.bottles.emptiesFromCollections} from collection stops)</span>
+              )}
+            </span>
+            <span>{emptiesRecorded}</span>
+          </div>
+          <div className="total-line">
+            <span>Empties returned</span><span>{bottlesCounted ?? '—'}</span>
+          </div>
+          <div className="total-line grand">
+            <span>Empties difference</span>
+            <span>{bottleDiff === null ? '—' : bottleDiff > 0 ? `+${bottleDiff}` : bottleDiff}</span>
+          </div>
+          {review.bottles && (review.bottles.fullOut > 0 || review.bottles.lostDamaged > 0) && (
+            <p className="muted small" style={{ margin: '4px 0 0' }}>
+              {review.bottles.fullOut} full 5-gallon bottle{review.bottles.fullOut === 1 ? '' : 's'} went out on this round
+              {review.bottles.lostDamaged > 0 ? `; ${review.bottles.lostDamaged} recorded lost or damaged` : ''}.
+            </p>
           )}
 
           <div className="field" style={{ marginTop: 12 }}>

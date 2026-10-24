@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { api } from '../lib/api';
+import { api, openPdf } from '../lib/api';
 import { money, todayInJamaica, when } from '../lib/format';
 import CustomerPicker, { type PickerCustomer } from './CustomerPicker';
 import { MultiStatusSelect } from './ListTools';
@@ -119,21 +119,13 @@ export default function StatementDialog({
     ? `${from ? when(from) : 'the start'} to ${to ? when(to) : 'today'}`
     : 'everything to date';
 
-  async function download() {
-    setBusy(true); setError(null);
-    try {
-      const blob = await api.getBlob(`/api/customers/${customerId}/statement.pdf?${params()}`);
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `statement-${name.replace(/\W+/g, '-')}${from ? `-${from}` : ''}${to ? `-to-${to}` : ''}.pdf`;
-      document.body.appendChild(a); a.click(); a.remove();
-      URL.revokeObjectURL(url);
-      onDone(`Statement for ${name}, ${span}, downloaded.`);
-      onClose();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'Could not build the statement');
-    } finally { setBusy(false); }
+  /** Opens in a new tab (Everton, 23 Oct 2026); its viewer prints or saves it. */
+  function download() {
+    setError(null);
+    openPdf(`/api/customers/${customerId}/statement.pdf?${params()}`)
+      .catch((e) => setError(e instanceof Error ? e.message : 'Could not open the statement'));
+    onDone(`Statement for ${name}, ${span}, opened in a new tab.`);
+    onClose();
   }
 
   async function send(e: React.FormEvent) {
@@ -237,7 +229,7 @@ export default function StatementDialog({
             <>
               <button type="button" className="secondary" disabled={busy || !customerId || badRange}
                       onClick={() => setEmailing(true)}>Email it…</button>
-              <button disabled={busy || !customerId || badRange}>{busy ? 'Building…' : 'Download PDF'}</button>
+              <button disabled={busy || !customerId || badRange}>{busy ? 'Building…' : 'View PDF'}</button>
             </>
           )}
         </div>

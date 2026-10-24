@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { api, downloadPost, idempotencyKey } from '../lib/api';
+import { api, openPdfPost, idempotencyKey } from '../lib/api';
 import { BatchBar, SortTh, MultiStatusSelect, passes, TickAllTh, TickTd, sendSummary, useSort, useTicks } from '../components/ListTools';
 import { downloadCsv, dollars } from '../lib/csv';
 import { payMethods, useTakeCard } from '../lib/payments';
@@ -378,6 +378,16 @@ function Received({ stamp }: { stamp: number }) {
     try { const m = await fn(); if (m) setMsg(m); } catch (e) { setError(e instanceof Error ? e.message : failed); }
     finally { setBusy(false); }
   }
+  /**
+   * The receipt for one payment, in a new tab (Everton, 23 Oct 2026). A
+   * payment spread over several invoices is several rows with one number:
+   * the receipt covers them all, as on the customer page.
+   */
+  const viewReceipt = (p: Paid) => batch(async () => {
+    // The server widens one row to its whole payment (paperwork.drawReceipt).
+    await openPdfPost('/api/receipts.pdf', { paymentIds: [p.id] }, `Receipt-${p.receipt_number ?? 'payment'}.pdf`);
+    return null;
+  }, 'Could not open the receipt');
   const exportRows = (list: Paid[]) => downloadCsv(`payments${from ? `-${from}` : ''}${to ? `-to-${to}` : ''}`, [
     ['Date', 'Customer', 'Against', 'How', 'Reference', 'Receipt', 'Amount', 'Reversed'],
     ...list.map((p) => [p.payment_date, p.customer_name, p.invoice_number ?? 'On account', p.method ?? '',
@@ -419,7 +429,7 @@ function Received({ stamp }: { stamp: number }) {
                   onClear={ticks.clear}
                   actions={[
                     { label: 'Print receipts (one PDF)', run: () => batch(async () => {
-                      await downloadPost('/api/batch/receipts/print.pdf', { ids: ticks.picked }, `Receipts-${picked.length}.pdf`);
+                      await openPdfPost('/api/batch/receipts/print.pdf', { ids: ticks.picked }, `Receipts-${picked.length}.pdf`);
                       return `${picked.length} receipt${picked.length === 1 ? '' : 's'} in one PDF.`;
                     }, 'Could not build the receipts') },
                     { label: 'Email receipts (one per customer)', run: () => batch(async () => {
@@ -461,7 +471,12 @@ function Received({ stamp }: { stamp: number }) {
                     : <span className="muted">on account{p.order_number ? ` (with ${p.order_number})` : ''}</span>}
                 </td>
                 <td data-label="How" className="small">{p.method === 'Bank Transfer' ? 'Bank transfer' : p.method}{p.round_zone ? ` · ${p.round_zone} round` : ''}</td>
-                <td data-label="Reference" className="small muted">{p.reference ?? '—'}{p.receipt_number ? ` · ${p.receipt_number}` : ''}</td>
+                <td data-label="Reference" className="small muted">
+                  {p.reference ?? '—'}{p.receipt_number ? ` · ${p.receipt_number}` : ''}
+                  {tickable && (
+                    <> · <button type="button" className="as-link small" disabled={busy} onClick={() => viewReceipt(p)}>Receipt</button></>
+                  )}
+                </td>
                 <td data-label="Amount" className="num">{money(Number(p.amount_cents))}</td>
               </tr>
             );

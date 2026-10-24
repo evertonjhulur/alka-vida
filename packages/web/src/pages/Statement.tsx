@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { api } from '../lib/api';
+import { api, openPdf } from '../lib/api';
 import { money, date, when } from '../lib/format';
 import { MultiStatusSelect, SortTh, useSort } from '../components/ListTools';
 
@@ -89,27 +89,16 @@ export function StatementView(
    * Fetched rather than linked, because the PDF route needs the session token
    * and a plain <a href> carries no Authorization header.
    */
-  async function downloadPdf() {
+  /** Opens in a new tab (Everton, 23 Oct 2026); its viewer prints or saves it. */
+  function downloadPdf() {
     if (!selected) return;
-    setBusy(true);
-    try {
-      const params = new URLSearchParams();
-      if (from) params.set('from', from);
-      if (to) params.set('to', to);
-      if (filter !== 'All') params.set('filter', filter);
-      if (state.length) params.set('status', state.join(','));
-      const blob = await api.getBlob(
-        `/api/customers/${selected}/statement.pdf?${params.toString()}`,
-      );
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `statement-${(data?.customerName ?? 'account').replace(/\W+/g, '-')}.pdf`;
-      a.click();
-      URL.revokeObjectURL(url);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'Could not build the statement');
-    } finally { setBusy(false); }
+    const params = new URLSearchParams();
+    if (from) params.set('from', from);
+    if (to) params.set('to', to);
+    if (filter !== 'All') params.set('filter', filter);
+    if (state.length) params.set('status', state.join(','));
+    openPdf(`/api/customers/${selected}/statement.pdf?${params.toString()}`)
+      .catch((e) => setError(e instanceof Error ? e.message : 'Could not open the statement'));
   }
 
   function exportCsv() {
@@ -175,7 +164,7 @@ export function StatementView(
                 print is kept beside it because it costs nothing and someone
                 always wants the screen exactly as it looks. */}
             <button disabled={!data || busy} onClick={downloadPdf}>
-              {busy ? 'Building…' : 'Download PDF'}
+              {busy ? 'Building…' : 'View PDF'}
             </button>
           </div>
           <div className="field">

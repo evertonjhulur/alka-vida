@@ -4,7 +4,7 @@ import { api, type Session } from '../lib/api';
 import SortStopsPanel from '../components/SortStopsPanel';
 import { money, date, day, time, when } from '../lib/format';
 import {
-  AddStopPanel, AddToLoadPanel, AdditionsList, LoadingPanel, ReturnsPanel, TruckTable, KIND_WORDS, collectionSummary,
+  AddStopPanel, AddToLoadPanel, AdditionsList, LoadingPanel, ReturnsPanel, TruckTable, KIND_WORDS, collectionSummary, loaderWords,
   type Collection, type Truck,
 } from '../components/Truck';
 
@@ -397,7 +397,7 @@ export default function RouteDetail({ session }: { session: Session }) {
             <section className="panel">
               <h2 className="side-h">The truck</h2>
               <p className="muted small" style={{ marginTop: 0 }}>
-                Logged {when(truck.loadedAt)} {time(truck.loadedAt)} by {truck.loadedByName ?? '—'}; loaded by {truck.loaderNames.join(', ') || '—'}.
+                {loaderWords(truck.loadedByName, truck.loaderNames)}, {when(truck.loadedAt)} {time(truck.loadedAt)}.
                 {truck.driverConfirmedName
                   ? ` Confirmed by ${truck.driverConfirmedName} ${time(truck.driverConfirmedAt)}.`
                   : ' Not yet confirmed by the driver.'}

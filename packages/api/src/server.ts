@@ -787,7 +787,7 @@ export async function buildServer(db: Db) {
       { from: q.from, to: q.to, filter: q.filter, status: q.status });
     return reply
       .header('content-type', 'application/pdf')
-      .header('content-disposition', `attachment; filename="${doc.filename}"`)
+      .header('content-disposition', `inline; filename="${doc.filename}"`)
       .send(doc.pdf);
   });
 
@@ -1196,7 +1196,7 @@ export async function buildServer(db: Db) {
       const doc = await documents.renderInvoicePdf(db, (req.params as { id: string }).id);
       return reply
         .header('content-type', 'application/pdf')
-        .header('content-disposition', `attachment; filename="${doc.filename}"`)
+        .header('content-disposition', `inline; filename="${doc.filename}"`)
         .send(doc.pdf);
     });
 

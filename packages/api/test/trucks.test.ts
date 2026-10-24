@@ -12,7 +12,6 @@ import { settleRoute, getSettlementReview } from '../src/services/settlement.ts'
 import { startRoute } from '../src/services/routing.ts';
 import { recordPayment } from '../src/services/payments.ts';
 import { counterSale } from '../src/services/counter.ts';
-import { createEmployee } from '../src/services/labour.ts';
 import { bottleAccount, listPools } from '../src/services/bottles.ts';
 import { loadRound, confirmLoad, addToLoad, confirmAddition, cancelAddition, confirmReturns, truckPosition, loadingsReport, loadingSummary, goodsOnTrucks } from '../src/services/trucks.ts';
 import { stockSnapshot } from '../src/services/audits.ts';
@@ -36,8 +35,11 @@ let loaderB: string;
 before(async () => {
   f = await setupFixture();
   setMailSinkForTests((m) => { sent.push(m); });
-  loaderA = (await createEmployee(f.db, f.admin, { name: 'Andre Loader', payBasis: 'Hourly', rateCents: 50000 })).id;
-  loaderB = (await createEmployee(f.db, f.admin, { name: 'Brian Loader', payBasis: 'Hourly', rateCents: 50000 })).id;
+  // Loaders are office logins since 23 Oct 2026 (they used to be employees).
+  const mkOffice = async (email: string, name: string) => (await f.db.one<{ id: string }>(
+    `INSERT INTO users (email, name, password_hash, role) VALUES ($1,$2,'x','user') RETURNING id`, [email, name])).id;
+  loaderA = await mkOffice('andre@alkavida.jm', 'Andre Loader');
+  loaderB = await mkOffice('brian@alkavida.jm', 'Brian Loader');
 });
 after(async () => { setMailSinkForTests(null); await f.close(); });
 
@@ -206,26 +208,42 @@ describe('Point 4: truck loading and returns', () => {
 
     // The office logs the loading; the driver cannot.
     await assert.rejects(loadRound(f.db, f.driver, r.sheetId, { loaderIds: [loaderA] }), /not permitted|role/i);
-    await assert.rejects(loadRound(f.db, f.office, r.sheetId, { loaderIds: [] }), /who loaded/);
     // Nor can the driver start before the office has logged it.
     await assert.rejects(confirmLoad(f.db, f.driver, r.sheetId), /has not logged the loading/);
 
+    // Office staff do not choose who loaded it: it is them, from their login,
+    // whatever is sent (23 Oct 2026).
     const out = await loadRound(f.db, f.office, r.sheetId, {
       extras: [{ productId: f.casedProductId, extraUnits: 2 }], loaderIds: [loaderA, loaderB],
     });
     assert.equal(out.loadedBottles, 120);
     assert.equal(await stock(f.casedProductId), 2400 - 120);
+    assert.deepEqual((await truckPosition(f.db, r.sheetId))!.loaderNames, ['Office']);
 
     // Saving the loading again moves only the difference.
-    await loadRound(f.db, f.office, r.sheetId, { extras: [{ productId: f.casedProductId, extraUnits: 1 }], loaderIds: [loaderA] });
+    await loadRound(f.db, f.office, r.sheetId, { extras: [{ productId: f.casedProductId, extraUnits: 1 }], loaderId: loaderA });
     assert.equal(await stock(f.casedProductId), 2400 - 96);
+    assert.deepEqual((await truckPosition(f.db, r.sheetId))!.loaderNames, ['Office']);
+    // An administrator names another office login; a driver or a stranger is refused.
+    await assert.rejects(loadRound(f.db, f.admin, r.sheetId, { extras: [{ productId: f.casedProductId, extraUnits: 1 }], loaderId: f.driver.id }),
+      /office logins/);
+    await loadRound(f.db, f.admin, r.sheetId, { extras: [{ productId: f.casedProductId, extraUnits: 1 }], loaderId: loaderA });
+    assert.equal(await stock(f.casedProductId), 2400 - 96);
+    // Left blank, it is the administrator.
+    await loadRound(f.db, f.admin, r.sheetId, { extras: [{ productId: f.casedProductId, extraUnits: 1 }] });
+    assert.deepEqual((await truckPosition(f.db, r.sheetId))!.loaderNames, ['Admin']);
+    await loadRound(f.db, f.office, r.sheetId, { extras: [{ productId: f.casedProductId, extraUnits: 1 }] });
+    await loadRound(f.db, f.admin, r.sheetId, { extras: [{ productId: f.casedProductId, extraUnits: 1 }], loaderId: loaderA });
+    const summary2 = await loadingSummary(f.db, r.sheetId);
+    assert.ok(summary2.loaders.some((p) => p.name === 'Andre Loader') && !summary2.loaders.some((p) => p.name === 'Driver'),
+      'the drop-down offers office logins only');
 
     // The driver confirms the totals and starts: dual accountability.
     const c = await confirmLoad(f.db, f.driver, r.sheetId);
     assert.ok(c.startedAt && c.confirmedAt);
     const confirmed = (await truckPosition(f.db, r.sheetId))!;
     assert.equal(confirmed.driverConfirmedName, 'Driver');
-    assert.equal(confirmed.loadedByName, 'Office', 'the office user who logged it confirmed it loaded');
+    assert.equal(confirmed.loadedByName, 'Admin', 'the user who logged it confirmed it loaded');
     // Once the driver has taken responsibility, the loading is locked.
     await assert.rejects(loadRound(f.db, f.office, r.sheetId, { loaderIds: [loaderA] }), /already confirmed/);
 
@@ -258,7 +276,7 @@ describe('Point 4: truck loading and returns', () => {
     const report = await loadingsReport(f.db, addDays(today, -1), addDays(today, 1));
     const mine = report.find((x) => x.sheetId === r.sheetId)!;
     assert.deepEqual(mine.loaders, ['Andre Loader']);
-    assert.equal(mine.loadedByName, 'Office');
+    assert.equal(mine.loadedByName, 'Admin');
     assert.equal(mine.driverConfirmedName, 'Driver');
     assert.equal(mine.lines[0].difference, 0);
   });
@@ -274,7 +292,7 @@ describe('Point 4: truck loading and returns', () => {
 
     await assert.rejects(addToLoad(f.db, f.driver, r.sheetId, { extras: [{ productId: f.casedProductId, extraUnits: 1 }], loaderIds: [loaderB] }), /not permitted|role/i);
     await assert.rejects(addToLoad(f.db, f.office, r.sheetId, { extras: [], loaderIds: [loaderB] }), /what is being added/);
-    const a1 = await addToLoad(f.db, f.office, r.sheetId, { extras: [{ productId: f.casedProductId, extraUnits: 2 }], loaderIds: [loaderB], note: 'customer called' });
+    const a1 = await addToLoad(f.db, f.admin, r.sheetId, { extras: [{ productId: f.casedProductId, extraUnits: 2 }], loaderId: loaderB, note: 'customer called' });
     assert.equal(await stock(f.casedProductId), 2400 - 96, 'the addition goes on the truck at once');
     let pos = (await truckPosition(f.db, r.sheetId))!;
     assert.equal(pos.lines[0].loadedBottles, 96);
@@ -301,6 +319,10 @@ describe('Point 4: truck loading and returns', () => {
     const mine = report.find((x) => x.sheetId === r.sheetId)!;
     assert.deepEqual([mine.lines[0].loaded, mine.lines[0].added, mine.lines[0].difference], [48, 48, 0]);
     assert.deepEqual(mine.additions.map((a) => a.loaderNames), [['Brian Loader']]);
+    // An addition by office staff is in their own name.
+    const sheetAdds = await f.db.query<{ loader_names: string[] }>(
+      `SELECT loader_names FROM round_load_additions WHERE delivery_sheet_id = $1 ORDER BY added_at`, [r.sheetId]);
+    assert.deepEqual(sheetAdds.map((a) => a.loader_names), [['Brian Loader'], ['Office']]);
   });
 
   test('a round with no loading still takes deliveries off the warehouse', async () => {
@@ -415,5 +437,38 @@ describe('Point 7: order email wording', () => {
     assert.ok(m, 'the confirmation went');
     assert.match(m.text, /Empties to be returned: 2/);
     assert.doesNotMatch(m.text, /hand over/);
+  });
+});
+
+describe('23 Oct 2026: empties a driver lists at a delivery show on the settlement', () => {
+  test('per stop, in the round total with collection stops, and as counted once settled', async () => {
+    const r = await roundWith([{ productId: f.fiveGalProductId, looseBottles: 4 }]);
+    await markStop(f.db, f.driver, {
+      stopId: r.stopId, outcome: 'Delivered', bottlesDeliveredFull: 4, bottlesEmptiesPickedUp: 3,
+    } as never);
+    await addCollection(f.db, f.office, r.sheetId, { kind: 'Empties', customerId: f.otherCustomerId, emptiesCount: 2 } as never);
+    const col = (await listCollections(f.db, r.sheetId))[0];
+    await recordCollection(f.db, f.driver, col.id, { status: 'Collected', emptiesCount: 2 });
+
+    const review = await getSettlementReview(f.db, r.sheetId);
+    const stop = review.stops.find((s) => s.stopId === r.stopId)!;
+    assert.equal(stop.bottlesEmptiesPickedUp, 3);
+    assert.equal(review.bottles.fullOut, 4);
+    assert.equal(review.bottles.emptiesFromStops, 3);
+    assert.equal(review.bottles.emptiesFromCollections, 2);
+    assert.equal(review.bottles.emptiesRecorded, 5);
+    assert.equal(review.bottles.counted, null);
+    assert.equal(review.settledCash, null);
+
+    await settleRoute(f.db, f.office, r.sheetId, { actualCashCents: 0, bottleActualReturned: 4 });
+    const after = await getSettlementReview(f.db, r.sheetId);
+    assert.equal(after.bottles.counted, 4);
+    assert.equal(after.bottles.variance, -1);
+    assert.equal(after.settledCash?.handedInCents, 0);
+
+    const { roundsReport } = await import('../src/services/reports.ts');
+    const report = await roundsReport(f.db, addDays(today, -400), addDays(today, 400));
+    const row = report.rounds.find((x) => x.id === r.sheetId)!;
+    assert.equal(row.emptiesRecorded, 5, 'the rounds report counts collection-stop empties too');
   });
 });

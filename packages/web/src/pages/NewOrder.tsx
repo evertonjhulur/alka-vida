@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
-import { api, downloadPost, getSession, idempotencyKey } from '../lib/api';
+import { api, openPdfPost, getSession, idempotencyKey } from '../lib/api';
 import { payMethods, useTakeCard } from '../lib/payments';
 import { money, day, date, todayInJamaica } from '../lib/format';
 import CustomerPicker from '../components/CustomerPicker';
@@ -583,8 +583,9 @@ export default function NewOrder() {
             + (isWalkIn && method === 'Cash' && amountCents > totals.grandTotal ? ` Change given: ${money(amountCents - totals.grandTotal)}.` : '')
             + (sale.receipt ? ` Receipt emailed to ${sale.receipt.sentTo}.` : ''),
         });
-        // The printed receipt, straight away.
-        if (ids.length) void downloadPost('/api/receipts.pdf', { paymentIds: ids }, `Receipt ${sale.invoiceNumber}.pdf`).catch(() => {});
+        // The receipt is one click away on the message above ("View receipt"):
+        // it opens in a new tab, which a browser only allows from a click
+        // (23 Oct 2026; it used to download by itself here).
       } else {
         const payment = takingNow && taking > 0 ? {
           amountCents: taking, method, reference: reference.trim() || null, paymentDate: today,
@@ -710,8 +711,9 @@ export default function NewOrder() {
           {result.text}{' '}
           {result.paymentIds.length > 0 && (
             <button type="button" className="as-link"
-                    onClick={() => void downloadPost('/api/receipts.pdf', { paymentIds: result.paymentIds }, result.receiptName)}>
-              Receipt
+                    onClick={() => void openPdfPost('/api/receipts.pdf', { paymentIds: result.paymentIds }, result.receiptName)
+                      .catch((e) => setError(e instanceof Error ? e.message : 'Could not open the receipt'))}>
+              View receipt
             </button>
           )}
           {result.customerId && <>{' · '}<Link to={`/customers/${result.customerId}?tab=orders`}>See their orders</Link></>}

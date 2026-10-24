@@ -113,9 +113,30 @@ export async function getSettlementReview(
   stops: SettlementStopRow[];
   totalCollectedCents: Cents;
   totalExpectedCents: Cents;
+  /**
+   * The round's bottles (Everton, 23 Oct 2026: the empties a driver listed at
+   * a delivery were not showing on the settlement). Full bottles out and
+   * empties picked up across the stops, plus empties from collection stops,
+   * and - once settled - what was counted and the difference.
+   */
+  bottles: {
+    fullOut: number;
+    emptiesFromStops: number;
+    emptiesFromCollections: number;
+    emptiesRecorded: number;
+    lostDamaged: number;
+    counted: number | null;
+    variance: number | null;
+  };
+  /** What the settlement recorded, for a round already closed. */
+  settledCash: { handedInCents: Cents | null; varianceCents: Cents | null; notes: string | null } | null;
 }> {
-  const sheet = await db.one<{ status: string }>(
-    `SELECT status FROM delivery_sheets WHERE id = $1`, [sheetId],
+  const sheet = await db.one<{
+    status: string; bottle_actual_returned: number | null; bottle_variance: number | null;
+    actual_cash_cents: number | null; cash_variance_cents: number | null; settlement_notes: string | null;
+  }>(
+    `SELECT status, bottle_actual_returned, bottle_variance, actual_cash_cents, cash_variance_cents, settlement_notes
+     FROM delivery_sheets WHERE id = $1`, [sheetId],
   );
 
   const stops = await db.query<{
@@ -212,12 +233,28 @@ export async function getSettlementReview(
     });
   }
 
+  const emptiesFromStops = rows.reduce((s, r) => s + r.bottlesEmptiesPickedUp, 0);
+  const emptiesFromCollections = await collectedEmpties(db, sheetId);
   return {
     sheetId,
     status: sheet.status,
     stops: rows,
     totalCollectedCents: rows.reduce((s, r) => s + r.collectedCents, 0),
     totalExpectedCents: rows.reduce((s, r) => s + r.expectedCents, 0),
+    bottles: {
+      fullOut: rows.reduce((s, r) => s + r.bottlesDeliveredFull, 0),
+      emptiesFromStops,
+      emptiesFromCollections,
+      emptiesRecorded: emptiesFromStops + emptiesFromCollections,
+      lostDamaged: rows.reduce((s, r) => s + r.bottlesLostDamaged, 0),
+      counted: sheet.bottle_actual_returned === null ? null : num(sheet.bottle_actual_returned),
+      variance: sheet.bottle_variance === null ? null : num(sheet.bottle_variance),
+    },
+    settledCash: sheet.status === 'Completed' ? {
+      handedInCents: sheet.actual_cash_cents === null ? null : num(sheet.actual_cash_cents),
+      varianceCents: sheet.cash_variance_cents === null ? null : num(sheet.cash_variance_cents),
+      notes: sheet.settlement_notes,
+    } : null,
   };
 }
 

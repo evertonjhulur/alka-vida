@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
-import { api, download, downloadPost, type Session } from '../lib/api';
+import { api, openPdf, openPdfPost, type Session } from '../lib/api';
 import { BatchBar, SortTh, MultiStatusSelect, passes, TickAllTh, TickTd, sendSummary, useSort, useTicks } from '../components/ListTools';
 import { downloadCsv, dollars } from '../lib/csv';
 import { money, toCents, when } from '../lib/format';
@@ -295,7 +295,7 @@ export default function CreditNotes({ session }: { session: Session }) {
                   onClear={cnTicks.clear}
                   actions={[
                     { label: 'Print (one PDF)', run: () => cnBatch(async () => {
-                      await downloadPost('/api/batch/invoices/print.pdf', { ids: cnTicks.picked }, `Credit-notes-${cnPicked.length}.pdf`);
+                      await openPdfPost('/api/batch/invoices/print.pdf', { ids: cnTicks.picked }, `Credit-notes-${cnPicked.length}.pdf`);
                       return `${cnPicked.length} in one PDF.`;
                     }, 'Could not build the PDF') },
                     { label: 'Email (each customer gets theirs together)', run: () => cnBatch(async () => {
@@ -344,7 +344,7 @@ export default function CreditNotes({ session }: { session: Session }) {
                   <td className="num">
                     <span className="row" style={{ gap: 6, justifyContent: 'flex-end' }}>
                       <button type="button" className="secondary" disabled={busy}
-                              onClick={() => download(`/api/invoices/${r.id}/pdf`, `${r.invoice_number}.pdf`).catch((e) => setError(e.message))}>PDF</button>
+                              onClick={() => openPdf(`/api/invoices/${r.id}/pdf`).catch((e) => setError(e.message))}>PDF</button>
                       {r.credit_status === 'Approved' && (
                         <button type="button" className="secondary" disabled={busy} onClick={email(r)}>Email</button>
                       )}

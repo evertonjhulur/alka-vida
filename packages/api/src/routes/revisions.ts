@@ -38,7 +38,7 @@ export function registerRevisionRoutes(
   const pdf = (reply: { header: (k: string, v: string) => unknown; send: (b: unknown) => unknown },
     doc: { filename: string; pdf: Buffer }) => {
     (reply.header('content-type', 'application/pdf') as typeof reply)
-      .header('content-disposition', `attachment; filename="${doc.filename}"`);
+      .header('content-disposition', `inline; filename="${doc.filename}"`);
     return reply.send(doc.pdf);
   };
   const only = (...roles: Session['role'][]) => ({ preHandler: allow(...roles) as never });

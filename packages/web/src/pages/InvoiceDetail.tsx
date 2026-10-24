@@ -1,6 +1,6 @@
 import { useEffect, useState, type ReactNode } from 'react';
 import { Link, useParams } from 'react-router-dom';
-import { api, download, type Session } from '../lib/api';
+import { api, openPdf, type Session } from '../lib/api';
 import { payMethods, useTakeCard } from '../lib/payments';
 import { money, toCents, date, day, time, statusTone } from '../lib/format';
 import Logo from '../components/Logo';
@@ -149,13 +149,10 @@ export default function InvoiceDetail({ session }: { session: Session }) {
   };
 
   /** The document, as the customer would receive it. */
-  async function downloadPdf() {
-    setBusy(true); setError(null);
-    try {
-      await download(`/api/invoices/${i.invoiceId}/pdf`, `${i.invoiceNumber}.pdf`);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'Could not download the invoice');
-    } finally { setBusy(false); }
+  function downloadPdf() {
+    // Opens in a new tab (23 Oct 2026); its viewer prints or saves it.
+    setError(null);
+    openPdf(`/api/invoices/${i.invoiceId}/pdf`).catch((e) => setError(e instanceof Error ? e.message : 'Could not open the invoice'));
   }
 
   const sendEmail = () => act(async () => {
@@ -494,7 +491,7 @@ export default function InvoiceDetail({ session }: { session: Session }) {
           </p>
         </div>
         <div className="record-actions">
-          <button className="secondary" disabled={busy} onClick={downloadPdf}>Download PDF</button>
+          <button className="secondary" disabled={busy} onClick={downloadPdf}>View PDF</button>
           <button className="secondary" disabled={busy} onClick={() => open('email')}>Email to customer</button>
           {!closed && i.balanceCents > 0 && (
             <button disabled={busy} onClick={() => open('pay')}>Record a payment</button>

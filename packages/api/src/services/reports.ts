@@ -498,7 +498,9 @@ export async function roundsReport(db: Db, from?: string | null, to?: string | n
             COALESCE(SUM(i.grand_total_cents), 0)::bigint AS invoiced_cents,
             COALESCE(SUM(s.payment_amount_cents), 0)::bigint AS recorded_cents,
             d.actual_cash_cents, d.cash_variance_cents,
-            COALESCE(SUM(s.bottles_empties_picked_up), 0)::int AS empties_recorded,
+            (COALESCE(SUM(s.bottles_empties_picked_up), 0)
+              + (SELECT COALESCE(SUM(rc.empties_count), 0) FROM round_collections rc
+                 WHERE rc.delivery_sheet_id = d.id AND rc.kind = 'Empties' AND rc.status = 'Collected'))::int AS empties_recorded,
             COALESCE(SUM(s.bottles_delivered_full), 0)::int AS full_out,
             d.bottle_actual_returned, d.bottle_variance
      FROM delivery_sheets d
