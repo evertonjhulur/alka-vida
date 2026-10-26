@@ -1,6 +1,6 @@
 import { Fragment, useEffect, useState, type ReactNode } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
-import { api } from '../lib/api';
+import { api, getSession } from '../lib/api';
 import { askText } from '../components/Dialog';
 import { BatchBar, MultiStatusSelect, SortTh, TickAllTh, TickTd, passes, useSort, useTicks } from '../components/ListTools';
 import { OPEN_STAGES, ORDER_STAGES, STAGE_WORDS, orderStage, type OrderStage } from '../lib/orderStatus';
@@ -56,7 +56,20 @@ interface OrderLine {
  */
 const ORDER_SHOW: ReadonlyArray<readonly [string, string]> = [['', 'Any status'], ...ORDER_STAGES];
 type When = 'any' | 'today' | 'week' | 'late' | 'range';
-type Panel = 'collect' | 'repeat' | 'offround' | 'cancel';
+type Panel = 'collect' | 'repeat' | 'offround' | 'cancel' | 'undo';
+
+/** What undoing a delivery recorded in error will do (26 Oct 2026). */
+interface UndoPlan {
+  orderNumber: string; customerName: string;
+  invoices: Array<{ id: string; number: string; totalCents: number }>;
+  paymentsReversed: Array<{ id: string; receipt: string | null; method: string; amountCents: number }>;
+  paymentsToCredit: Array<{ id: string; receipt: string | null; method: string; amountCents: number }>;
+  cashAtStopRemovedCents: number;
+  stockBack: Array<{ productId: string; name: string; bottles: number }>;
+  stockStaysOnTruck: boolean;
+  bottlesBack: { delivered: number; empties: number; lost: number; sold: number };
+  roundsLeft: Array<{ zone: string; date: string }>;
+}
 
 const GCT_RATE = 0.15;
 
@@ -140,6 +153,9 @@ export default function Orders() {
 
   const [menuFor, setMenuFor] = useState<string | null>(null);
   const [open, setOpen] = useState<{ id: string; kind: Panel } | null>(null);
+  const isAdmin = getSession()?.role === 'admin';
+  const [undoPlan, setUndoPlan] = useState<UndoPlan | null>(null);
+  const [undoWhy, setUndoWhy] = useState('');
   const [paidNow, setPaidNow] = useState('');
   const [paidHow, setPaidHow] = useState('Cash');
   const [repeatEvery, setRepeatEvery] = useState('Weekly');
@@ -316,6 +332,14 @@ export default function Orders() {
     }, 'Could not cancel');
   }
 
+  /** Delivered in error (26 Oct 2026): admin only; the order is cancelled. */
+  async function undo(o: Order) {
+    await act(async () => {
+      await api.post(`/api/orders/${o.id}/undo-delivery`, { reason: undoWhy.trim() });
+      return `${o.order_number} undone: the order is cancelled and everything it moved is put back.`;
+    }, 'Could not undo the delivery');
+  }
+
   /** Off the round, still waiting: it can go on another round or be collected. */
   async function offRound(o: Order) {
     await act(async () => {
@@ -338,6 +362,11 @@ export default function Orders() {
   const openPanel = (o: Order, kind: Panel) => {
     setMenuFor(null);
     setError(null);
+    if (kind === 'undo') {
+      setUndoPlan(null); setUndoWhy('');
+      api.get<UndoPlan>(`/api/orders/${o.id}/undo-delivery`).then(setUndoPlan)
+        .catch((e) => { setError(e instanceof Error ? e.message : 'Could not check the order'); setOpen(null); });
+    }
     if (kind === 'collect') { setPaidNow(''); setPaidHow('Cash'); setEmpties(''); }
     if (kind === 'repeat') setRepeatEvery('Weekly');
     setOpen(open?.id === o.id && open.kind === kind ? null : { id: o.id, kind });
@@ -527,6 +556,38 @@ export default function Orders() {
             <button className="danger-soft" disabled={busy} onClick={() => offRound(o)}>
               Take it off
             </button>
+          </div>
+          <div className="field">{close}</div>
+        </>
+      );
+    } else if (open.kind === 'undo') {
+      const p = undoPlan;
+      const b = p?.bottlesBack;
+      body = !p ? <p className="muted" style={{ margin: 0 }}>Checking what this will undo…</p> : (
+        <>
+          <p className="order-panel-note" style={{ margin: 0 }}>
+            <strong>Undo {p.orderNumber} for {p.customerName}: delivered in error.</strong> The order is cancelled and:
+          </p>
+          <ul className="small" style={{ margin: '4px 0 8px' }}>
+            {p.invoices.map((i) => <li key={i.id}>Invoice {i.number} ({money(i.totalCents)}) is cancelled, not deleted.</li>)}
+            {p.invoices.length === 0 && <li>No invoice yet (weekly/monthly billing): nothing to cancel.</li>}
+            {p.paymentsReversed.map((x) => <li key={x.id}>Payment {x.receipt ?? ''} of {money(x.amountCents)} ({x.method.toLowerCase()}) taken with it is reversed.</li>)}
+            {p.paymentsToCredit.map((x) => <li key={x.id}>Payment {x.receipt ?? ''} of {money(x.amountCents)} applied to it stays as credit on the account.</li>)}
+            {p.cashAtStopRemovedCents > 0 && <li>{money(p.cashAtStopRemovedCents)} the driver recorded at the stop is removed.</li>}
+            {p.stockBack.length > 0 && <li>Back on the stock: {p.stockBack.map((l) => `${l.bottles} × ${l.name}`).join(', ')}.</li>}
+            {p.stockStaysOnTruck && <li>The goods stay on the truck and are counted back with the returns.</li>}
+            {b && b.delivered + b.empties + b.lost + b.sold > 0 && (
+              <li>5-gallon bottles: {b.delivered} back from the customer{b.empties ? `, ${b.empties} empties given back to them` : ''}.</li>
+            )}
+            {p.roundsLeft.length > 0 && <li>It comes off the {p.roundsLeft.map((r) => `${r.zone} round of ${day(r.date)}`).join(', ')}.</li>}
+          </ul>
+          <div className="field">
+            <label htmlFor={`undo-why-${o.id}`}>Why (required, kept on the record)</label>
+            <input id={`undo-why-${o.id}`} value={undoWhy} style={{ width: '100%', maxWidth: 420 }}
+                   placeholder="e.g. entered against the wrong customer" onChange={(e) => setUndoWhy(e.target.value)} />
+          </div>
+          <div className="field">
+            <button className="danger" disabled={busy || !undoWhy.trim()} onClick={() => undo(o)}>Undo the delivery</button>
           </div>
           <div className="field">{close}</div>
         </>
@@ -864,6 +925,11 @@ export default function Orders() {
                       ) : (
                         <span className="muted small">
                           {o.status === 'Cancelled' ? '' : 'invoiced'}
+                          {isAdmin && (o.status === 'Delivered' || o.status === 'Partially Delivered') && (
+                            <>{' · '}<button type="button" className="as-link small" disabled={busy}
+                                             title="Delivered in error: cancel it and put everything back"
+                                             onClick={() => openPanel(o, 'undo')}>Undo…</button></>
+                          )}
                         </span>
                       )}
                     </td>

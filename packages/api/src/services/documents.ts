@@ -347,7 +347,8 @@ async function drawInvoice(doc: PDFKit.PDFDocument, db: Db, invoiceId: string) {
     `SELECT delivery_address FROM customers WHERE id = $1`, [ledger.customerId]);
 
   /* 1. Title, company, logo */
-  let y = await docHeader(doc, db, isCN ? 'CREDIT NOTE' : 'INVOICE');
+  // A voided one still prints (for the file), clearly marked (26 Oct 2026).
+  let y = await docHeader(doc, db, `${isCN ? 'CREDIT NOTE' : 'INVOICE'}${ledger.status === 'Cancelled' ? ' - VOID' : ''}`);
 
   /* 2. The band: who it is for, then the invoice's own details */
   const billLines = [customer.name, customer.attention ? `Attn: ${customer.attention}` : '',

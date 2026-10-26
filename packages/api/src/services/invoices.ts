@@ -234,6 +234,8 @@ export async function editInvoice(
   changes: {
     lines?: readonly InvoiceLineInput[]; discountPercent?: number;
     discountFixedCents?: Cents; gctExempt?: boolean; reason?: string;
+    /** Admins can move the dates too (Everton, 26 Oct 2026). yyyy-mm-dd. */
+    invoiceDate?: string | null; dueDate?: string | null;
   },
 ): Promise<{ invoice: InvoiceLedgerRow; creditNoteId: string | null }> {
   requireRole(actor, 'admin');
@@ -242,13 +244,48 @@ export async function editInvoice(
     const before = await getInvoiceLedger(t, invoiceId);
     if (!before) throw new RuleViolation(`invoice ${invoiceId} not found`);
     if (before.isCreditNote) throw new RuleViolation('a credit note cannot be edited');
+    if (before.status === 'Cancelled') throw new RuleViolation('this invoice is void and cannot be changed');
 
     const existing = await t.one<{
       discount_percent: number; customer_id: string; discount_fixed_cents: number; gct_exempt: boolean;
+      is_opening_balance: boolean; line_count: number;
     }>(
-      `SELECT discount_percent, customer_id, discount_fixed_cents, gct_exempt
+      `SELECT discount_percent, customer_id, discount_fixed_cents, gct_exempt, is_opening_balance,
+              (SELECT COUNT(*)::int FROM invoice_line_items WHERE invoice_id = invoices.id) AS line_count
        FROM invoices WHERE id = $1`, [invoiceId],
     );
+
+    // The dates. Checked before anything else changes.
+    const isDay = (v: unknown) => typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v) && !Number.isNaN(Date.parse(`${v}T12:00:00Z`));
+    if (changes.invoiceDate !== undefined && changes.invoiceDate !== null && !isDay(changes.invoiceDate)) {
+      throw new RuleViolation('the invoice date is not a date');
+    }
+    if (changes.dueDate !== undefined && changes.dueDate !== null && !isDay(changes.dueDate)) {
+      throw new RuleViolation('the due date is not a date');
+    }
+    const newInvoiceDate = changes.invoiceDate || before.invoiceDate;
+    const newDueDate = changes.dueDate !== undefined ? (changes.dueDate || null) : before.dueDate;
+    if (newDueDate && newDueDate < newInvoiceDate) {
+      throw new RuleViolation('the due date cannot be before the invoice date');
+    }
+
+    // A balance brought across from QuickBooks has no lines: recalculating
+    // it from lines would make it nothing. Only its dates can change (or void it).
+    const moneyChange = changes.lines !== undefined || changes.discountPercent !== undefined
+      || changes.discountFixedCents !== undefined || changes.gctExempt !== undefined;
+    const openingOnly = existing.is_opening_balance && num(existing.line_count) === 0;
+    if (openingOnly && moneyChange) {
+      throw new RuleViolation('this is a balance brought across from QuickBooks: only its dates can be changed. Void it and raise a new invoice if the amount is wrong');
+    }
+    if (changes.lines) {
+      if (changes.lines.length === 0) throw new RuleViolation('an invoice needs at least one product; void it instead');
+      for (const l of changes.lines) {
+        const ok = (n: unknown) => Number.isInteger(Number(n)) && Number(n) >= 0;
+        if (!l.productId) throw new RuleViolation('choose the product on every line');
+        if (!ok(l.cases) || !ok(l.looseBottles)) throw new RuleViolation('quantities must be whole numbers, not below nothing');
+        if (!ok(l.pricePerCaseCents) || !ok(l.pricePerBottleCents)) throw new RuleViolation('prices cannot be below nothing');
+      }
+    }
 
     const lines = changes.lines
       ? await priceLines(t, changes.lines)
@@ -281,22 +318,30 @@ export async function editInvoice(
       await insertLines(t, invoiceId, lines);
     }
 
-    await t.query(
-      `UPDATE invoices SET subtotal_cents = $2, discount_percent = $3,
-         discount_amount_cents = $4, gct_cents = $5, grand_total_cents = $6,
-         discount_fixed_cents = $7, gct_exempt = $8, updated_at = now()
-       WHERE id = $1`,
-      [invoiceId, totals.subtotal, discountPercent, totals.discountAmount,
-       totals.gct, totals.grandTotal, fixed, gctExempt],
-    );
+    if (moneyChange) {
+      await t.query(
+        `UPDATE invoices SET subtotal_cents = $2, discount_percent = $3,
+           discount_amount_cents = $4, gct_cents = $5, grand_total_cents = $6,
+           discount_fixed_cents = $7, gct_exempt = $8, updated_at = now()
+         WHERE id = $1`,
+        [invoiceId, totals.subtotal, discountPercent, totals.discountAmount,
+         totals.gct, totals.grandTotal, fixed, gctExempt],
+      );
+    }
+    const datesChanged = newInvoiceDate !== before.invoiceDate || newDueDate !== before.dueDate;
+    if (datesChanged) {
+      await t.query(`UPDATE invoices SET invoice_date = $2::date, due_date = $3::date, updated_at = now() WHERE id = $1`,
+        [invoiceId, newInvoiceDate, newDueDate]);
+    }
+    const grandTotal = moneyChange ? totals.grandTotal : before.grandTotalCents;
 
     let creditNoteId: string | null = null;
     const paid = before.amountPaidCents;
 
     // The edit reduced the bill below what the customer has already paid:
     // post a Credit Note for the difference, approved on the Admin's authority.
-    if (totals.grandTotal < paid) {
-      const difference = paid - totals.grandTotal;
+    if (grandTotal < paid) {
+      const difference = paid - grandTotal;
       const creditNumber = await nextNumber(t, 'invoice_number_seq', 'CN');
       const cn = await t.one<{ id: string }>(
         `INSERT INTO invoices
@@ -324,20 +369,87 @@ export async function editInvoice(
     await audit(t, actor, 'update', 'Invoice', invoiceId, before.invoiceNumber, {
       reason: changes.reason ?? null,
       gctExempt, discountFixedCents: fixed,
+      ...(changes.lines ? { lines: lines.map((l) => ({ productId: l.productId, cases: l.cases, looseBottles: l.looseBottles,
+        pricePerCaseCents: l.pricePerCaseCents, pricePerBottleCents: l.pricePerBottleCents })) } : {}),
       before: {
         grandTotalCents: before.grandTotalCents,
         status: before.status,
         amountPaidCents: before.amountPaidCents,
+        invoiceDate: before.invoiceDate, dueDate: before.dueDate,
       },
       after: {
         grandTotalCents: after!.grandTotalCents,
         status: after!.status,
         amountPaidCents: after!.amountPaidCents,
+        invoiceDate: after!.invoiceDate, dueDate: after!.dueDate,
       },
       creditNoteId,
     });
 
     return { invoice: after!, creditNoteId };
+  });
+}
+
+/**
+ * Void an invoice or credit note at any stage (Everton, 26 Oct 2026: "delete/
+ * void at any stage with reason"). Admin only, reason required.
+ *
+ * Nothing is deleted - the number stays used and the document stays visible,
+ * marked Cancelled, so the numbering has no gaps and the history shows what
+ * happened. It stops counting toward what the customer owes. Money paid
+ * against it is NOT refunded or lost: it goes back onto their account as
+ * credit, to apply to another invoice or refund. Credit notes raised against
+ * a voided invoice are voided with it (they would otherwise credit twice),
+ * and anything waiting in Needs a decision for it is turned down.
+ *
+ * This cancels the bill only. Goods, stock and bottles are untouched: for a
+ * delivery that never happened, use Undo on the order instead.
+ */
+export async function voidInvoice(
+  db: Db, actor: Actor, invoiceId: string, input: { reason?: string | null },
+): Promise<{ invoiceNumber: string; movedToCreditCents: Cents; creditNotesVoided: string[] }> {
+  requireRole(actor, 'admin');
+  const reason = String(input.reason ?? '').trim();
+  if (!reason) throw new RuleViolation('say why it is being voided');
+
+  return db.tx(async (t) => {
+    const inv = await t.maybeOne<{ id: string; invoice_number: string; lifecycle: string; is_credit_note: boolean }>(
+      `SELECT id, invoice_number, lifecycle, is_credit_note FROM invoices WHERE id = $1 FOR UPDATE`, [invoiceId]);
+    if (!inv) throw new RuleViolation('that invoice no longer exists');
+    if (inv.lifecycle === 'Cancelled') throw new RuleViolation(`${inv.invoice_number} is already void`);
+    const why = `Voided by ${actor.name}: ${reason}`;
+
+    const targets: Array<{ id: string; number: string }> = [{ id: inv.id, number: inv.invoice_number }];
+    const creditNotesVoided: string[] = [];
+    if (!inv.is_credit_note) {
+      const cns = await t.query<{ id: string; invoice_number: string }>(
+        `SELECT id, invoice_number FROM invoices
+         WHERE linked_invoice_id = $1 AND is_credit_note AND lifecycle <> 'Cancelled' FOR UPDATE`, [invoiceId]);
+      for (const c of cns) { targets.push({ id: c.id, number: c.invoice_number }); creditNotesVoided.push(c.invoice_number); }
+    }
+
+    let movedToCreditCents = 0;
+    for (const d of targets) {
+      const moved = await t.query<{ id: string; amount_cents: number; status: string }>(
+        `UPDATE payments SET invoice_id = NULL WHERE invoice_id = $1 RETURNING id, amount_cents, status`, [d.id]);
+      for (const p of moved) {
+        if (p.status === 'Confirmed') movedToCreditCents += num(p.amount_cents);
+        await audit(t, actor, 'adjust', 'Payment', p.id, p.id, { movedToCredit: true, from: d.number, reason: why });
+      }
+      await t.query(
+        `UPDATE approval_requests SET status = 'Rejected', reviewed_by_id = $2, reviewed_date = now(),
+                review_notes = $3
+         WHERE entity_id = $1 AND status = 'Pending' AND request_type IN ('Discount','CreditNote')`,
+        [d.id, actor.id, why]);
+      await t.query(
+        `UPDATE invoices SET lifecycle = 'Cancelled', updated_at = now(),
+                notes = concat_ws(E'\\n', NULLIF(notes, ''), $2::text) WHERE id = $1`,
+        [d.id, d.id === inv.id ? why : `${why} (with ${inv.invoice_number})`]);
+      await audit(t, actor, 'update', 'Invoice', d.id, d.number, {
+        lifecycle: 'Cancelled', voided: true, reason, ...(d.id === inv.id ? {} : { withInvoice: inv.invoice_number }),
+      });
+    }
+    return { invoiceNumber: inv.invoice_number, movedToCreditCents, creditNotesVoided };
   });
 }
 

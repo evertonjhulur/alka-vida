@@ -17,7 +17,17 @@ interface Line {
   id: string; product_id: string; product_name: string; cases: number;
   loose_bottles: number; bottles_per_case: number; line_total_cents: number;
   price_per_case_cents: number; price_per_bottle_cents: number;
-  delivered_on?: string | null; reference?: string | null;
+  delivered_on?: string | null; reference?: string | null; order_id?: string | null;
+}
+interface Priced {
+  product_id: string; name: string; bottles_per_case: number;
+  price_per_case_cents: number; price_per_bottle_cents: number;
+}
+/** One line in the admin's edit panel; price is typed in dollars, per case or per bottle. */
+interface EditRow {
+  key: string; productId: string; name: string; bpc: number; qty: string; price: string;
+  perCase: number; perBottle: number;
+  orderId: string | null; deliveredOn: string | null; reference: string | null;
 }
 interface Payment {
   id: string; amount_cents: number; payment_date: string; method: string;
@@ -64,7 +74,7 @@ interface Invoice {
   is_opening_balance?: boolean; opening_reference?: string | null; notes?: string | null;
 }
 
-type Panel = 'pay' | 'email' | 'edit' | 'discount' | 'credit' | null;
+type Panel = 'pay' | 'email' | 'edit' | 'discount' | 'credit' | 'void' | null;
 
 const METHODS = ['Cash', 'Card', 'Bank Transfer', 'Cheque', 'Other'] as const;
 
@@ -96,8 +106,11 @@ export default function InvoiceDetail({ session }: { session: Session }) {
   const [disc, setDisc] = useState({ percent: '', reason: '', as: '%' as '%' | '$' });
   const [credit, setCredit] = useState({ amount: '', reason: '' });
   const [edit, setEdit] = useState<{
-    discount: string; as: '%' | '$'; gct: boolean; reason: string; qty: Record<string, string>;
-  }>({ discount: '', as: '%', gct: true, reason: '', qty: {} });
+    discount: string; as: '%' | '$'; gct: boolean; reason: string; rows: EditRow[];
+    invoiceDate: string; dueDate: string; add: string;
+  }>({ discount: '', as: '%', gct: true, reason: '', rows: [], invoiceDate: '', dueDate: '', add: '' });
+  const [prices, setPrices] = useState<Priced[]>([]);
+  const [voidWhy, setVoidWhy] = useState('');
   const [reversing, setReversing] = useState<{ id: string; reason: string } | null>(null);
 
   async function load() { setInv(await api.get<Invoice>(`/api/invoices/${invoiceId}`)); }
@@ -116,6 +129,8 @@ export default function InvoiceDetail({ session }: { session: Session }) {
   if (error && !inv) return <div className="notice error">{error}</div>;
   if (!inv) return <p className="muted">Loading…</p>;
   const i = inv;
+  /** A QuickBooks balance with no lines: only its dates can change. */
+  const openingOnly = !!i.is_opening_balance && (i.lines ?? []).length === 0;
 
   async function act(what: () => Promise<string>, fallback: string) {
     setBusy(true); setError(null); setMsg(null);
@@ -140,11 +155,24 @@ export default function InvoiceDetail({ session }: { session: Session }) {
       const fixed = Number(i.discount_fixed_cents) || 0;
       setEdit({
         discount: fixed > 0 ? (fixed / 100).toFixed(2) : String(Number(i.discount_percent) || 0),
-        as: fixed > 0 ? '$' : '%', gct: !i.gct_exempt, reason: '',
-        qty: Object.fromEntries(i.lines.map((l) => [
-          l.id, String(Number(l.bottles_per_case) > 0 ? l.cases : l.loose_bottles)])),
+        as: fixed > 0 ? '$' : '%', gct: !i.gct_exempt, reason: '', add: '',
+        invoiceDate: date(i.invoice_date), dueDate: i.due_date ? date(i.due_date) : '',
+        rows: i.lines.map((l) => {
+          const cased = Number(l.bottles_per_case) > 0;
+          return {
+            key: l.id, productId: l.product_id, name: l.product_name, bpc: Number(l.bottles_per_case),
+            qty: String(cased ? l.cases : l.loose_bottles),
+            price: (unitPrice(l) / 100).toFixed(2),
+            perCase: Number(l.price_per_case_cents), perBottle: Number(l.price_per_bottle_cents),
+            orderId: l.order_id ?? null, deliveredOn: l.delivered_on ? date(l.delivered_on) : null, reference: l.reference ?? null,
+          };
+        }),
       });
+      if (!openingOnly) {
+        api.get<Priced[]>(`/api/customers/${i.customerId}/prices`).then(setPrices).catch(() => setPrices([]));
+      }
     }
+    if (p === 'void') setVoidWhy('');
     setPanel(p);
   };
 
@@ -204,28 +232,72 @@ export default function InvoiceDetail({ session }: { session: Session }) {
       : `Credit note ${r.invoiceNumber ?? ''} for ${money(toCents(credit.amount))} raised.`;
   }, 'Could not raise the credit note');
 
-  /** Admin only. Editing an issued invoice always demands a reason. */
+  /*
+   * Admin only, at any stage (26 Oct 2026): dates, quantities, prices,
+   * products added or taken off, discount, GCT. Always with a reason. Only
+   * what was changed is sent, so moving a date never recalculates the money.
+   */
+  const rowLine = (r: EditRow) => {
+    const qty = Math.max(0, Math.round(Number(r.qty) || 0));
+    const unit = Math.max(0, toCents(r.price));
+    return {
+      productId: r.productId,
+      cases: r.bpc > 0 ? qty : 0, looseBottles: r.bpc > 0 ? 0 : qty,
+      pricePerCaseCents: r.bpc > 0 ? unit : r.perCase,
+      pricePerBottleCents: r.bpc > 0 ? r.perBottle : unit,
+      orderId: r.orderId, deliveredOn: r.deliveredOn, reference: r.reference,
+    };
+  };
   const saveEdit = () => act(async () => {
-    await api.patch(`/api/invoices/${i.invoiceId}`, {
-      discountPercent: edit.as === '%' ? Number(edit.discount) || 0 : 0,
-      discountFixedCents: edit.as === '$' ? toCents(edit.discount) : 0,
-      gctExempt: !edit.gct,
-      reason: edit.reason,
-      lines: i.lines.map((l) => {
-        const typed = Number(edit.qty[l.id]);
-        const qty = Number.isFinite(typed) ? typed
-          : Number(l.bottles_per_case) > 0 ? Number(l.cases) : Number(l.loose_bottles);
-        return {
-          productId: l.product_id,
-          cases: Number(l.bottles_per_case) > 0 ? qty : 0,
-          looseBottles: Number(l.bottles_per_case) > 0 ? 0 : qty,
-          pricePerCaseCents: Number(l.price_per_case_cents),
-          pricePerBottleCents: Number(l.price_per_bottle_cents),
-        };
-      }),
-    });
-    return 'Invoice changed. The change is recorded against your name.';
+    const body: Record<string, unknown> = { reason: edit.reason.trim() };
+    if (edit.invoiceDate !== date(i.invoice_date)) body.invoiceDate = edit.invoiceDate;
+    if (edit.dueDate !== (i.due_date ? date(i.due_date) : '')) body.dueDate = edit.dueDate || null;
+    if (!openingOnly) {
+      const fixed = Number(i.discount_fixed_cents) || 0;
+      const wasDiscount = fixed > 0 ? (fixed / 100).toFixed(2) : String(Number(i.discount_percent) || 0);
+      const wasAs = fixed > 0 ? '$' : '%';
+      const lines = edit.rows.map(rowLine);
+      const original = i.lines.map((l) => JSON.stringify([l.product_id,
+        Number(l.bottles_per_case) > 0 ? Number(l.cases) : Number(l.loose_bottles), unitPrice(l)]));
+      const now = lines.map((l, n) => JSON.stringify([l.productId,
+        edit.rows[n].bpc > 0 ? l.cases : l.looseBottles, edit.rows[n].bpc > 0 ? l.pricePerCaseCents : l.pricePerBottleCents]));
+      if (JSON.stringify(original) !== JSON.stringify(now)) body.lines = lines;
+      if (edit.discount !== wasDiscount || edit.as !== wasAs || edit.gct !== !i.gct_exempt || body.lines) {
+        body.discountPercent = edit.as === '%' ? Number(edit.discount) || 0 : 0;
+        body.discountFixedCents = edit.as === '$' ? toCents(edit.discount) : 0;
+        body.gctExempt = !edit.gct;
+      }
+    }
+    if (Object.keys(body).length === 1) return 'Nothing was changed.';
+    const r = await api.patch<{ creditNoteId: string | null }>(`/api/invoices/${i.invoiceId}`, body);
+    return 'Invoice changed. The change is recorded against your name.'
+      + (r.creditNoteId ? ' It is now below what was paid, so a credit note was raised for the difference.' : '');
   }, 'Could not change the invoice');
+
+  const addRow = (productId: string) => {
+    const p = prices.find((x) => x.product_id === productId);
+    if (!p) return;
+    const cased = Number(p.bottles_per_case) > 0;
+    setEdit({
+      ...edit, add: '',
+      rows: [...edit.rows, {
+        key: `new-${Date.now()}`, productId: p.product_id, name: p.name, bpc: Number(p.bottles_per_case), qty: '1',
+        price: (Number(cased ? p.price_per_case_cents : p.price_per_bottle_cents) / 100).toFixed(2),
+        perCase: Number(p.price_per_case_cents), perBottle: Number(p.price_per_bottle_cents),
+        orderId: null, deliveredOn: null, reference: null,
+      }],
+    });
+  };
+  const setRow = (key: string, patch: Partial<EditRow>) =>
+    setEdit({ ...edit, rows: edit.rows.map((r) => (r.key === key ? { ...r, ...patch } : r)) });
+
+  const doVoid = () => act(async () => {
+    const r = await api.post<{ invoiceNumber: string; movedToCreditCents: number; creditNotesVoided: string[] }>(
+      `/api/invoices/${i.invoiceId}/void`, { reason: voidWhy.trim() });
+    return `${r.invoiceNumber} is void.`
+      + (r.movedToCreditCents ? ` ${money(r.movedToCreditCents)} paid on it is back on their account as credit.` : '')
+      + (r.creditNotesVoided.length ? ` Credit note${r.creditNotesVoided.length === 1 ? '' : 's'} ${r.creditNotesVoided.join(', ')} voided with it.` : '');
+  }, 'Could not void it');
 
   const reverse = () => act(async () => {
     await api.post(`/api/payments/${reversing!.id}/reverse`, { reason: reversing!.reason || undefined });
@@ -236,9 +308,9 @@ export default function InvoiceDetail({ session }: { session: Session }) {
   const order = i.orders?.[0];
   const mode = order?.delivery_mode;
   const dueIn = daysUntil(i.due_date);
-  const statusWords = i.is_credit_note ? 'Credit note'
+  const statusWords = i.status === 'Cancelled' ? 'Void' : i.is_credit_note ? 'Credit note'
     : i.status === 'Paid' ? 'Paid'
-      : i.status === 'Cancelled' ? 'Cancelled'
+      : i.status === 'Cancelled' ? 'Void'
         : `${i.status === 'Overdue' ? 'Overdue' : i.status === 'Partial' ? 'Part paid' : 'Open'}${i.due_date ? ` · due ${day(i.due_date)}` : ''}`;
   const origin = i.delivery
     ? <>delivered {day(i.delivery.delivery_date)} on the {i.delivery.zone} round</>
@@ -269,6 +341,7 @@ export default function InvoiceDetail({ session }: { session: Session }) {
     let title = '';
     if (d.emailedTo) title = `Emailed to ${String(d.emailedTo)}`;
     else if (d.lifecycle === 'Sent') title = 'Marked as sent';
+    else if (d.voided) title = 'Voided';
     else if (d.approvedInline) title = `${String(d.discountPercent)}% discount given`;
     else if ('before' in d) title = 'Changed';
     else title = 'Updated';
@@ -277,7 +350,7 @@ export default function InvoiceDetail({ session }: { session: Session }) {
       meta: <>{day(h.ts)}, {time(h.ts)}{h.user_name ? ` · ${h.user_name}` : ''}{d.reason ? ` · “${String(d.reason)}”` : ''}</>,
     });
   }
-  if (!i.sent_date && !(i.history ?? []).some((h) => h.details?.emailedTo)) {
+  if (i.status !== 'Cancelled' && !i.sent_date && !(i.history ?? []).some((h) => h.details?.emailedTo)) {
     steps.push({ tone: 'todo', title: 'Not emailed yet', meta: 'Use Email to customer, or it goes with their next statement' });
   }
   if (i.discount_status === 'Pending') {
@@ -419,46 +492,113 @@ export default function InvoiceDetail({ session }: { session: Session }) {
       );
     }
     if (panel === 'edit') {
+      const sub = edit.rows.reduce((a, r) => a + Math.max(0, Math.round(Number(r.qty) || 0)) * Math.max(0, toCents(r.price)), 0);
+      const off = edit.as === '$' ? Math.min(sub, toCents(edit.discount)) : Math.round(sub * (Number(edit.discount) || 0) / 100);
+      const gct = edit.gct ? Math.round((sub - off) * 0.15) : 0;
+      const newTotal = sub - off + gct;
+      const toAdd = prices.filter((p) => !edit.rows.some((r) => r.productId === p.product_id));
       return (
         <>
-          <h2>Change quantities, discount or GCT</h2>
+          <h2>{openingOnly ? 'Change the dates' : 'Change this invoice'}</h2>
           <p className="muted small" style={{ marginTop: 0 }}>
-            Recorded against your name. If the total drops below what is already paid, a credit note is raised for the difference.
+            {openingOnly
+              ? 'This is a balance brought across from QuickBooks, so only its dates can change. If the amount is wrong, void it and raise a new one.'
+              : 'Recorded against your name, with the reason. This changes the bill only: stock and bottles stay as delivered. If the total drops below what is already paid, a credit note is raised for the difference.'}
           </p>
-          <table>
-            <thead><tr><th>Product</th><th>Quantity</th></tr></thead>
-            <tbody>
-              {i.lines.map((l) => (
-                <tr key={l.id}>
-                  <td>{l.product_name}</td>
-                  <td>
-                    <input type="number" min="0" style={{ width: 100 }} aria-label={`Quantity of ${l.product_name}`}
-                           value={edit.qty[l.id] ?? ''}
-                           onChange={(e) => setEdit({ ...edit, qty: { ...edit.qty, [l.id]: e.target.value } })} />
-                    <span className="muted small"> {Number(l.bottles_per_case) > 0 ? 'cases' : 'bottles'}</span>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-          <div className="row" style={{ marginTop: 10 }}>
-            <div className="field"><label htmlFor="e-pct">Discount</label>
-              <span className="money-toggle" role="group" aria-label="Discount as">
-                {(['%', '$'] as const).map((k) => (
-                  <button key={k} type="button" className={edit.as === k ? 'on' : ''}
-                          onClick={() => setEdit({ ...edit, as: k, discount: '0' })}>{k === '%' ? '%' : '$ amount'}</button>
-                ))}
-              </span>{' '}
-              <input id="e-pct" type="number" min="0" max={edit.as === '%' ? 100 : undefined} step="0.01" style={{ width: 100 }}
-                     value={edit.discount} onChange={(e) => setEdit({ ...edit, discount: e.target.value })} /></div>
-            <label className="check">
-              <input type="checkbox" checked={edit.gct} onChange={(e) => setEdit({ ...edit, gct: e.target.checked })} />
-              Charge GCT
-            </label>
+          <div className="row">
+            <div className="field"><label htmlFor="e-date">Invoice date</label>
+              <input id="e-date" type="date" value={edit.invoiceDate}
+                     onChange={(e) => setEdit({ ...edit, invoiceDate: e.target.value })} /></div>
+            <div className="field"><label htmlFor="e-due">Due date</label>
+              <input id="e-due" type="date" value={edit.dueDate} min={edit.invoiceDate || undefined}
+                     onChange={(e) => setEdit({ ...edit, dueDate: e.target.value })} /></div>
+          </div>
+          {!openingOnly && (
+            <>
+              <div className="table-scroll">
+                <table>
+                  <thead><tr><th>Product</th><th>Quantity</th><th>Price each</th><th className="num">Amount</th><th /></tr></thead>
+                  <tbody>
+                    {edit.rows.map((r) => (
+                      <tr key={r.key}>
+                        <td>{r.name}{r.deliveredOn && <div className="muted small">{day(r.deliveredOn)}{r.reference ? ` · ${r.reference}` : ''}</div>}</td>
+                        <td style={{ whiteSpace: 'nowrap' }}>
+                          <input type="number" min="0" step="1" style={{ width: 80 }} aria-label={`Quantity of ${r.name}`}
+                                 value={r.qty} onChange={(e) => setRow(r.key, { qty: e.target.value })} />
+                          <span className="muted small"> {r.bpc > 0 ? 'cases' : 'bottles'}</span>
+                        </td>
+                        <td style={{ whiteSpace: 'nowrap' }}>
+                          <input inputMode="decimal" style={{ width: 100 }} aria-label={`Price of ${r.name}`}
+                                 value={r.price} onChange={(e) => setRow(r.key, { price: e.target.value })} />
+                          <span className="muted small"> per {r.bpc > 0 ? 'case' : 'bottle'}</span>
+                        </td>
+                        <td className="num">{money(Math.max(0, Math.round(Number(r.qty) || 0)) * Math.max(0, toCents(r.price)))}</td>
+                        <td>
+                          <button type="button" className="link-button bad-text" aria-label={`Take ${r.name} off`}
+                                  disabled={edit.rows.length <= 1}
+                                  onClick={() => setEdit({ ...edit, rows: edit.rows.filter((x) => x.key !== r.key) })}>Remove</button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <div className="row" style={{ marginTop: 8, alignItems: 'flex-end' }}>
+                <div className="field"><label htmlFor="e-add">Add a product</label>
+                  <select id="e-add" value={edit.add} onChange={(e) => addRow(e.target.value)}>
+                    <option value="">{toAdd.length ? 'Choose…' : prices.length ? 'All their products are on it' : 'Loading…'}</option>
+                    {toAdd.map((p) => <option key={p.product_id} value={p.product_id}>{p.name}</option>)}
+                  </select></div>
+                <div className="muted small" style={{ paddingBottom: 10 }}>Added at their usual price; change it if needed. To take a product off, use Remove.</div>
+              </div>
+              <div className="row" style={{ marginTop: 6 }}>
+                <div className="field"><label htmlFor="e-pct">Discount</label>
+                  <span className="money-toggle" role="group" aria-label="Discount as">
+                    {(['%', '$'] as const).map((k) => (
+                      <button key={k} type="button" className={edit.as === k ? 'on' : ''}
+                              onClick={() => setEdit({ ...edit, as: k, discount: '0' })}>{k === '%' ? '%' : '$ amount'}</button>
+                    ))}
+                  </span>{' '}
+                  <input id="e-pct" type="number" min="0" max={edit.as === '%' ? 100 : undefined} step="0.01" style={{ width: 100 }}
+                         value={edit.discount} onChange={(e) => setEdit({ ...edit, discount: e.target.value })} /></div>
+                <label className="check">
+                  <input type="checkbox" checked={edit.gct} onChange={(e) => setEdit({ ...edit, gct: e.target.checked })} />
+                  Charge GCT
+                </label>
+                <div className="small" style={{ alignSelf: 'center' }}>
+                  New total <strong>{money(newTotal)}</strong>
+                  {newTotal !== i.grandTotalCents && <span className="muted"> (was {money(i.grandTotalCents)})</span>}
+                </div>
+              </div>
+            </>
+          )}
+          <div className="row" style={{ marginTop: 6 }}>
             <div className="field" style={{ flex: '1 1 280px' }}><label htmlFor="e-why">Why (required)</label>
               <input id="e-why" style={{ width: '100%' }} value={edit.reason}
                      onChange={(e) => setEdit({ ...edit, reason: e.target.value })} /></div>
-            <div className="field"><button disabled={busy || !edit.reason.trim()} onClick={saveEdit}>Save changes</button></div>
+            <div className="field"><button disabled={busy || !edit.reason.trim() || !edit.invoiceDate
+              || (!!edit.dueDate && edit.dueDate < edit.invoiceDate)} onClick={saveEdit}>Save changes</button></div>
+          </div>
+        </>
+      );
+    }
+    if (panel === 'void') {
+      const paidOn = (i.payments ?? []).filter((p) => p.status === 'Confirmed').reduce((a, p) => a + Number(p.amount_cents), 0);
+      const cns = (i.creditNotes ?? []).filter((c) => c.credit_status !== 'Rejected');
+      return (
+        <>
+          <h2>Void {i.invoiceNumber}</h2>
+          <ul className="small" style={{ marginTop: 0 }}>
+            <li>It stays on file marked void, and stops counting toward what {i.customer?.name ?? 'the customer'} owes.</li>
+            {paidOn > 0 && <li>The {money(paidOn)} paid on it goes back on their account as credit, to apply elsewhere or refund.</li>}
+            {!i.is_credit_note && cns.length > 0 && <li>Credit note{cns.length === 1 ? '' : 's'} {cns.map((c) => c.invoice_number).join(', ')} against it {cns.length === 1 ? 'is' : 'are'} voided too.</li>}
+            {!i.is_credit_note && <li>Stock and bottles are not changed. If the delivery itself never happened, use Undo on the order instead.</li>}
+            <li>This cannot be undone.</li>
+          </ul>
+          <div className="row">
+            <div className="field" style={{ flex: '1 1 280px' }}><label htmlFor="v-why">Why (required)</label>
+              <input id="v-why" style={{ width: '100%' }} value={voidWhy} onChange={(e) => setVoidWhy(e.target.value)} /></div>
+            <div className="field"><button className="danger" disabled={busy || !voidWhy.trim()} onClick={doVoid}>Void it</button></div>
           </div>
         </>
       );
@@ -467,6 +607,7 @@ export default function InvoiceDetail({ session }: { session: Session }) {
   })();
 
   const closed = i.is_credit_note || i.status === 'Cancelled';
+  const canVoid = isAdmin && i.status !== 'Cancelled';
 
   return (
     <>
@@ -496,17 +637,20 @@ export default function InvoiceDetail({ session }: { session: Session }) {
           {!closed && i.balanceCents > 0 && (
             <button disabled={busy} onClick={() => open('pay')}>Record a payment</button>
           )}
-          {!closed && (
+          {(!closed || canVoid) && (
             <span className="deskbar-menu">
               <button type="button" className="secondary" aria-haspopup="true" aria-expanded={moreOpen}
-                      aria-label="More: change quantities, discount, credit note"
+                      aria-label="More: change the invoice, discount, credit note, void"
                       onClick={(e) => { e.stopPropagation(); setMoreOpen(!moreOpen); }}>More ▾</button>
               {moreOpen && (
                 <div className="deskbar-pop deskbar-pop-right" role="menu">
-                  {isAdmin && <button role="menuitem" className="pop-item pop-button" onClick={() => open('edit')}>Change quantities, discount or GCT</button>}
-                  <button role="menuitem" className="pop-item pop-button" onClick={() => open('discount')}>Give a discount</button>
-                  <div className="pop-rule" />
-                  <button role="menuitem" className="pop-item pop-button pop-danger" onClick={() => open('credit')}>Credit note</button>
+                  {!closed && isAdmin && <button role="menuitem" className="pop-item pop-button" onClick={() => open('edit')}>
+                    {openingOnly ? 'Change the dates' : 'Change dates, products or prices'}</button>}
+                  {!closed && !openingOnly && <button role="menuitem" className="pop-item pop-button" onClick={() => open('discount')}>Give a discount</button>}
+                  {!closed && <><div className="pop-rule" />
+                    <button role="menuitem" className="pop-item pop-button pop-danger" onClick={() => open('credit')}>Credit note</button></>}
+                  {canVoid && <button role="menuitem" className="pop-item pop-button pop-danger" onClick={() => open('void')}>
+                    Void {i.is_credit_note ? 'this credit note' : 'this invoice'}…</button>}
                 </div>
               )}
             </span>
@@ -516,6 +660,12 @@ export default function InvoiceDetail({ session }: { session: Session }) {
 
       {error && <div className="notice error">{error}</div>}
       {msg && <div className="notice ok">{msg}</div>}
+      {i.status === 'Cancelled' && (
+        <div className="notice warn">
+          <strong>Void.</strong> This {i.is_credit_note ? 'credit note' : 'invoice'} no longer counts toward what the customer owes.
+          {i.notes && <div className="small" style={{ whiteSpace: 'pre-line', marginTop: 4 }}>{i.notes}</div>}
+        </div>
+      )}
       {i.discount_status === 'Pending' && (
         <div className="notice warn">
           A {Number(i.discount_fixed_cents) > 0 ? money(Number(i.discount_fixed_cents)) : `${Number(i.discount_percent)}%`} discount on this invoice is waiting in Needs a decision.
@@ -597,7 +747,10 @@ export default function InvoiceDetail({ session }: { session: Session }) {
               <div className="total-line"><span>{i.gct_exempt ? 'GCT (exempt)' : 'GCT 15%'}</span><span>{money(Number(i.gct_cents))}</span></div>
             )}
             <div className="total-line grand"><span>Total</span><span>{money(i.grandTotalCents)}</span></div>
-            {!i.is_credit_note && (
+            {i.status === 'Cancelled' && (
+              <div className="total-line grand"><span>Void</span><span>nothing owed</span></div>
+            )}
+            {!i.is_credit_note && i.status !== 'Cancelled' && (
               <>
                 <div className="total-line"><span>Paid</span><span>{money(i.amountPaidCents)}</span></div>
                 <div className={`total-line grand${i.balanceCents > 0 ? ' due' : ''}`}>
@@ -653,9 +806,10 @@ export default function InvoiceDetail({ session }: { session: Session }) {
                   : 'Changes by office staff go to Needs a decision; the balance stays as it is until they are approved.'}
               </p>
               <div className="row" style={{ gap: 6 }}>
-                {isAdmin && <button className="secondary" onClick={() => open('edit')}>Change quantities</button>}
-                <button className="secondary" onClick={() => open('discount')}>Give a discount</button>
+                {isAdmin && <button className="secondary" onClick={() => open('edit')}>{openingOnly ? 'Change the dates' : 'Change the invoice'}</button>}
+                {!openingOnly && <button className="secondary" onClick={() => open('discount')}>Give a discount</button>}
                 <button className="danger-soft" onClick={() => open('credit')}>Credit note</button>
+                {canVoid && <button className="danger-soft" onClick={() => open('void')}>Void…</button>}
               </div>
             </section>
           )}

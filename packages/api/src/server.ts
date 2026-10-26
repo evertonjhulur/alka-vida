@@ -21,6 +21,7 @@ import { BUSINESS_TIMEZONE, assertMethodAllowed, type Actor } from './services/c
 import * as orders from './services/orders.ts';
 import * as delivery from './services/delivery.ts';
 import * as roundsheet from './services/roundsheet.ts';
+import * as undoDelivery from './services/undodelivery.ts';
 import * as routing from './services/routing.ts';
 import * as settlement from './services/settlement.ts';
 import * as invoices from './services/invoices.ts';
@@ -972,6 +973,13 @@ export async function buildServer(db: Db) {
     async (req) => orders.editOrder(db, actorOf(req),
       (req.params as { id: string }).id, req.body as never));
 
+  // Undo a delivery recorded in error (26 Oct 2026): GET explains, POST does it.
+  app.get('/api/orders/:id/undo-delivery', { preHandler: allow('admin') },
+    async (req) => undoDelivery.undoDelivery(db, actorOf(req), (req.params as { id: string }).id, { dryRun: true }));
+  app.post('/api/orders/:id/undo-delivery', { preHandler: allow('admin') },
+    async (req) => undoDelivery.undoDelivery(db, actorOf(req), (req.params as { id: string }).id,
+      { reason: (req.body as { reason?: string })?.reason }));
+
   app.post('/api/orders/:id/cancel', { preHandler: allow('admin', 'user') },
     async (req) => {
       await orders.cancelOrder(db, actorOf(req), (req.params as { id: string }).id,
@@ -1202,6 +1210,10 @@ export async function buildServer(db: Db) {
   app.patch('/api/invoices/:id', { preHandler: allow('admin') },
     async (req) => invoices.editInvoice(db, actorOf(req),
       (req.params as { id: string }).id, req.body as never));
+  // Void at any stage, with a reason (26 Oct 2026). Money paid on it goes back to credit.
+  app.post('/api/invoices/:id/void', { preHandler: allow('admin') },
+    async (req) => invoices.voidInvoice(db, actorOf(req),
+      (req.params as { id: string }).id, (req.body ?? {}) as { reason?: string }));
 
   // The invoice as a document: the same figures the screen shows.
   app.get('/api/invoices/:id/pdf', { preHandler: allow('admin', 'user') },

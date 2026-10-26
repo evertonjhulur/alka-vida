@@ -503,3 +503,38 @@ export async function correctStopBottles(
     return { was, now: args.delivered, poolMoved: delta };
   });
 }
+
+/**
+ * Put back the pool movements of a delivery that was recorded in error
+ * (25 Oct 2026, "Undo - delivered in error"): the exact opposite of
+ * applyDeliveryMovement, plus bottles bought outright.
+ */
+export async function reverseDeliveryMovement(
+  t: Queryable,
+  actor: Actor | null,
+  args: { delivered?: number; emptiesPickedUp?: number; lostDamaged?: number; sold?: number; reference: string },
+): Promise<void> {
+  const out = Math.max(0, args.delivered ?? 0);
+  const back = Math.max(0, args.emptiesPickedUp ?? 0);
+  const lost = Math.max(0, args.lostDamaged ?? 0);
+  const sold = Math.max(0, args.sold ?? 0);
+  if (out + back + lost + sold === 0) return;
+  const pool = await defaultPool(t);
+  if (!pool) return;
+  await t.query(
+    `UPDATE five_gal_bottle_pool
+     SET clean_ready = clean_ready + $2,
+         filled_with_customer = GREATEST(filled_with_customer - $2 + $3 + $4 + $5, 0),
+         returned_dirty = GREATEST(returned_dirty - $3, 0),
+         lost_damaged = GREATEST(lost_damaged - $4, 0),
+         sold = GREATEST(sold - $5, 0)
+     WHERE id = $1`,
+    [pool.id, out, back, lost, sold],
+  );
+  await logMovement(t, actor, pool, out, 'in', 'Adjustment', args.reference,
+    `${out} full bottles back: delivery recorded in error, undone`);
+  await logMovement(t, actor, pool, back, 'out', 'Adjustment', args.reference,
+    `${back} empties taken back off: delivery recorded in error, undone`);
+  await logMovement(t, actor, pool, lost + sold, 'in', 'Adjustment', args.reference,
+    `${lost + sold} bottles written back: delivery recorded in error, undone`);
+}

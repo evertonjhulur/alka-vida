@@ -2123,3 +2123,66 @@ prices -> set the five zones' run days. The Receivables report lists active
 customers only, so it shows J$3,551,188.08 (the J$11,300 owed by four
 inactive customers sits on their accounts).
 Tests: 627 (74 + 543 + 10). New `api/test/golive.test.ts` (8).
+
+## Undo a delivery recorded in error (26 Oct 2026)
+
+Everton: two 7 Basiks orders were entered and marked delivered in error and
+could not be deleted. Rulings: an administrator's button with a reason; the
+order ends up Cancelled.
+
+- `services/undodelivery.ts` `undoDelivery(db, actor, orderId, { reason, dryRun })`,
+  admin only. `GET /api/orders/:id/undo-delivery` = dry run (what will
+  happen), `POST` = do it (reason required). One transaction:
+  - its invoice(s) -> lifecycle **Cancelled** (kept; the reason appended to
+    notes; out of balances via the existing views);
+  - payments taken WITH it (order_id = the order, delivery_stop_id = its stop,
+    or created in the same transaction as its invoice - a counter sale or a
+    sale for an earlier day; same `created_at`) are **reversed**; any other
+    payment applied to its invoice is moved back to the account as credit
+    (`invoice_id = NULL`), never lost;
+  - finished goods back on the warehouse (ledger 'in', Adjustment) - for a
+    sale with no round, or a stop on a round with no load; on a loaded round
+    they stay on the truck and come back at the returns;
+  - 5-gallon bottles: `bottles.reverseDeliveryMovement` (the exact inverse of
+    applyDeliveryMovement, plus bottles sold) and the order's
+    customer_bottle_moves rows deleted;
+  - its stop(s), and any payment-after-delivery stops, deleted from the round;
+  - order lines' delivered quantities zeroed, order Cancelled, audit entry.
+- Refused (credit note instead): a stop on a SETTLED round; an invoice that
+  also covers other orders (weekly/monthly); an invoice that already has a
+  credit note; an order not delivered (cancel it instead).
+- Screen: Orders list, a delivered row shows "Undo…" for administrators; the
+  panel lists exactly what will happen, takes the reason, and does it.
+- Tests: new `api/test/undodelivery.test.ts` (3).
+
+## Admins change or void invoices at any stage (26 Oct 2026)
+
+Everton: "Admin should also have access to edit invoices at any stage" -
+invoice date and due date, prices on each line, add or remove products, and
+delete/void at any stage with a reason.
+
+- `invoices.editInvoice` now also takes `invoiceDate`, `dueDate`
+  (yyyy-mm-dd; due not before the invoice date). Lines carry their own
+  prices (already did) and may add or drop products; at least one line,
+  whole quantities, no negative prices. Money is recalculated ONLY when
+  lines/discount/GCT are sent, so moving a date never touches the total.
+  Refused on a voided invoice. A QuickBooks opening balance with no lines
+  (`is_opening_balance`) can only have its dates changed - recalculating
+  from no lines would zero it. Still: credit note automatically if the new
+  total is below what is paid; audit with before/after (dates included).
+  It changes the BILL only - stock and bottles are not adjusted.
+- `invoices.voidInvoice(db, actor, id, { reason })`, admin only, reason
+  required; `POST /api/invoices/:id/void`. Works on invoices and credit
+  notes, at any stage. Nothing deleted: lifecycle -> Cancelled (number kept,
+  reason appended to notes), so it drops out of balances via the existing
+  views. Payments on it -> `invoice_id = NULL` (credit on the account, never
+  lost). Credit notes against it are voided with it; Pending discount/credit
+  approvals for it are Rejected. The PDF title reads "INVOICE - VOID".
+  For a delivery that never happened use Undo on the order (that also puts
+  stock and bottles back).
+- Screen (InvoiceDetail): "Change the invoice" panel - dates, per-line
+  quantity and price, Remove, Add a product (customer's usual price from
+  `/api/customers/:id/prices`), discount, GCT, running new total; only
+  changed parts are sent. "Void…" (admin) with what will happen listed.
+  A voided invoice shows "Void", the reason, and "nothing owed".
+- Tests: new `api/test/invoiceedit.test.ts` (4). 550 API tests pass.
