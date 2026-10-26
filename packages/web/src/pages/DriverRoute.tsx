@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import SortStopsPanel from '../components/SortStopsPanel';
 import { sendWaitingPins } from '../components/StopLocation';
-import { api, type Session } from '../lib/api';
+import { api, openPdf, type Session } from '../lib/api';
 import { time, when } from '../lib/format';
 import {
   AddStopPanel, AdditionsList, ConfirmLoadPanel, ReturnsPanel, TruckTable, KIND_WORDS, collectionSummary,
@@ -175,6 +175,11 @@ export default function DriverRoute({ session }: { session: Session }) {
       <span className="muted small">
         {visitsOf(sheet).filter((v) => !pending(v)).length} of{' '}
         {visitsOf(sheet).length} done
+        {' · '}
+        <button type="button" className="as-link small"
+                onClick={() => openPdf(`/api/delivery-sheets/${sheet.id}/sheet.pdf`).catch((e) => setError(e.message))}>
+          Delivery sheet (PDF)
+        </button>
       </span>
     </div>
   );

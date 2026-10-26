@@ -305,6 +305,9 @@ export default function Pricing({ session }: { session: Session }) {
         Each price list is a rate card. A customer is put on one, and pays those
         rates. Leave a cell blank and that customer pays the list price instead.
       </p>
+      {session.role === 'admin' && (
+        <p className="small"><Link to="/products/import">Upload products &amp; prices from the QuickBooks list</Link></p>
+      )}
 
       {error && <div className="notice error">{error}</div>}
       {msg && <div className="notice ok">{msg}</div>}

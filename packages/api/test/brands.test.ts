@@ -202,10 +202,16 @@ describe('Customer upload', () => {
     assert.equal(Number(ad.balance_cents), 0);
   });
 
-  test('uploading the same file again skips everyone already in', async () => {
+  test('uploading the same file again never brings a balance in twice', async () => {
+    const before = await f.db.one<{ n: number }>(`SELECT COUNT(*)::int AS n FROM invoices`);
     const r = await importCustomers(f.db, f.office, { rows: rows(), asOf: '2026-10-15' });
-    assert.equal(r.created, 0);
-    assert.equal(r.toSkip, 4);
+    // Those with invoices or payments are left alone; one with nothing on the
+    // account is simply updated from the file again (25 Oct 2026).
+    assert.equal(r.toSkip, 3);
+    assert.equal(r.toUpdate, 1);
+    assert.equal(r.rows.find((x) => x.name === 'Adrianna')!.action, 'update');
+    const after = await f.db.one<{ n: number }>(`SELECT COUNT(*)::int AS n FROM invoices`);
+    assert.equal(after.n, before.n);
   });
 
   test('Open Items that do not add up come in as one balance line', async () => {
@@ -217,7 +223,7 @@ describe('Customer upload', () => {
     const inv = await f.db.one<{ invoice_number: string; grand_total_cents: number }>(
       `SELECT i.invoice_number, i.grand_total_cents FROM invoices i JOIN customers c ON c.id = i.customer_id
        WHERE c.name = 'Odd Sums Ltd'`);
-    assert.match(inv.invoice_number, /^OB-\d{6}$/);
+    assert.match(inv.invoice_number, /^OB-20261015-\d+$/, 'never from the invoice sequence');
     assert.equal(Number(inv.grand_total_cents), 100000);
   });
 });

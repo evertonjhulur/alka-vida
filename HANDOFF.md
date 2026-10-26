@@ -2017,3 +2017,109 @@ should be opened in a new tab instead of the same tab."
   the confirmation.
 Tests unchanged at 617; checked in a browser that receipts and invoices open
 in a new tab and show, with no download.
+
+## Printed delivery sheet for a round (25 Oct 2026)
+
+Everton: "even though the app should be available offline, I would like the
+ability to download the delivery sheet for the round. Showing customer name,
+address, phone number, order, slot for empties collected and slot for if
+payment is collected."
+
+- `services/roundsheet.ts` `renderDeliverySheetPdf(db, sheetId)`: landscape
+  Letter, stops in visit order (payment-after-delivery stops left out). Per
+  stop: customer, phone (stop's, else the address's, else the customer's) and
+  contact person; address and delivery instructions; order number and lines;
+  To collect = `owedAtStop` (tax-inclusive, less money already paid/credit),
+  or "On account" for weekly/monthly customers and orders agreed on account;
+  an Empties collected box ("expect N" when the order said); Payment collected
+  tick boxes Cash/Cheque/Transfer/None and an Amount line. Then collection
+  stops, the round total to collect, and lines for cash/cheques handed in,
+  empties returned, driver and office signatures. "On the truck" line when
+  the load is logged. Page numbers; repeats the column heads on each page.
+- `GET /api/delivery-sheets/:id/sheet.pdf` (admin, user, driver), inline.
+- Buttons: round page header "Delivery sheet (PDF)"; driver's My route next
+  to each round's "x of y done". Both open in a new tab (his standing rule),
+  where it prints or saves - the paper copy if the phone is offline.
+- Tests: new `api/test/roundsheet.test.ts` (2).
+
+## Entering the paper delivery sheet (25 Oct 2026)
+
+Everton, on the printed sheet: "can this be entered quickly as a short cut to
+settle the round manually?"
+
+- `pages/SheetEntry.tsx`, route `/delivery/:sheetId/enter`, linked from the
+  round page's step 3 ("Enter from the paper sheet", office, open rounds with
+  stops still to work). Laid out like the sheet: per pending stop What
+  happened (Delivered / Not home / Refused / Not delivered / Leave for now;
+  payment-only stops: Payment taken / Not paid), Empties collected, Payment
+  (None/Cash/Cheque/Transfer, Card when card payments are on) and Amount -
+  choosing a payment fills in the amount owed. Empties collection stops:
+  Collected / Not collected and a count. Running totals; one "Save the
+  sheet"; then "Go to settlement".
+- No new API: each row goes through `POST /api/stops/:id/outcome` exactly as
+  the driver's phone does (Delivered = every line's remaining quantity, full
+  bottles out = the returnable lines), collections through
+  `POST /api/collections/:id/record`. Rows are saved one by one; a row that
+  fails is listed and the rest still save. Recorded stops show read-only;
+  part deliveries, another day and the bottle charge are done on the stop
+  itself (Open), as before.
+
+## Go-live: start fresh, customer upload v5, products & prices (25 Oct 2026)
+
+Everton's rulings are in project doc claude/upload-review-25-oct-2026.md and
+claude/go-live-cleanup-plan-oct-2026.md. In short: all transactions go; kept
+customers keep their information only; red rows in his file are inactive;
+tiers follow the customer type (3D Connect Distributor, Tropical Catering
+Wholesale); Corporate pays Retail for cases; 5-gallon J$500 Retail, J$600 on
+the other tiers; ALD/Sunra/Treasure Isle special prices; client brands seen
+only by their client; bottle charge J$1,304.35 + GCT; invoice numbers carry on
+from QuickBooks (INV-016393), the rest restart at 001000.
+
+**Start fresh** (`services/cleanup.ts`, `routes/golive.ts`, page
+`/settings/start-fresh`, Settings card, admin only).
+- `GET /api/start-fresh`: counts of what goes, customers and logins to tick.
+- `POST /api/start-fresh { keepCustomerIds, keepUserIds, nextInvoiceNumber,
+  confirm: 'CLEAR' }`: ONE transaction. TRUNCATEs every transaction and list
+  table (`EMPTIED`, which includes every table referencing them), deletes
+  client (non-Owned) brands and their pools, zeroes the bottle pool, deletes
+  customers not kept (walk-in always kept; kept ones lose their zone), deletes
+  logins not kept (the admin doing it and kept customers' portal logins
+  always stay - deletable because audit_log etc. are already empty), setval
+  invoice_number_seq to the given number, others to 1000. Audit log restarts
+  with one "Start fresh" entry. Keeps system_settings, price_tiers (names),
+  Owned brands, material categories/sizes.
+
+**Customer upload** (`services/imports.ts`, `lib/customerUpload.ts`,
+`pages/CustomerImport.tsx`):
+- New columns Price Tier (must name an existing tier) and Status
+  (Active/Inactive; inactive come in `active = false`, auto emails off).
+- A name already in the app (active, not walk-in) with NO invoices or
+  payments is now 'update': contact details kept; zone, days, tier, terms,
+  cycle, brands, status and the opening balance from the file. One with
+  invoices/payments is still skipped, so re-running never doubles a balance.
+- Opening lines with no QuickBooks number are numbered `OB-yyyymmdd-n`, never
+  from invoice_number_seq (which now carries on from QuickBooks).
+- `openingItems()` factored out.
+
+**Products & prices upload** (`services/productimport.ts`,
+`lib/productUpload.ts`, page `/products/import`, linked from Products &
+pricing, admin only). Workbook sheets "Products" (Product Name, Brand,
+Bottled For, Size, Bottles per Case, Returnable 5-gallon, Bottle Charge, List
+Price, then one column per tier named after it) and "Special Prices"
+(Customer Name, Product Name, Price). Dry run then one transaction. Brands
+matched by name or created (Co-Pack when Bottled For names a customer, who
+must exist - so customers first); the client is linked in customer_brands.
+Products matched by name are updated (tier prices replaced). Bottle Charge
+row updates the single is_bottle_charge product. Special prices upsert
+customer_prices.
+
+**Files** (made from his 25 Oct files; not in git - real customer data):
+`Alka Vida_Customer Upload v5.xlsx` (252 customers, 204 active, 48 inactive,
+459 open items = J$3,562,488.08, ties to the 25 Oct Open Invoices report;
+Changes sheet lists every change from his review file) and
+`Alka Vida_Products & Prices.xlsx` (18 products, 11 special prices).
+Order on the site: Start fresh -> Upload customers -> Upload products &
+prices -> set the five zones' run days. The Receivables report lists active
+customers only, so it shows J$3,551,188.08 (the J$11,300 owed by four
+inactive customers sits on their accounts).
+Tests: 627 (74 + 543 + 10). New `api/test/golive.test.ts` (8).

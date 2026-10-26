@@ -27,11 +27,25 @@
  *     an unattached payment - credit on the account. With no Open Items for
  *     the customer, or items that do not add up to the balance column, the
  *     balance comes in as one line dated the "as of" date.
+ *
+ * Go-live round (Everton, 25 Oct 2026):
+ *   * a Price Tier column (Retail, Corporate, Wholesale, Distributor) puts
+ *     the customer on that tier; blank keeps the old rule (Distributor type =
+ *     Distributor tier, otherwise none);
+ *   * a Status column: Inactive customers come in inactive - kept with their
+ *     balance for collection or write-off, but off ordering, rounds and
+ *     messages, and never emailed automatically;
+ *   * a customer already in the app (one he kept at the clean-up) is no
+ *     longer skipped: their contact details stay as they are, and the file
+ *     sets their zone, days, tier, terms, cycle, brands and status and brings
+ *     in their QuickBooks balance. One that already has invoices or payments
+ *     in the app is still left alone, so running the file twice never brings
+ *     a balance in twice.
  */
 
 import type { Db, Queryable } from '../db/index.ts';
 import type { Actor } from './core.ts';
-import { audit, nextNumber, requireRole } from './core.ts';
+import { audit, requireRole } from './core.ts';
 import { RuleViolation, PARISHES, composeAddress } from '@alka/shared';
 import { insertPayment } from './payments.ts';
 import { CO_PACK } from './brands.ts';
@@ -71,6 +85,10 @@ export interface ImportRow {
   paymentTerms?: string | null;
   /** Every delivery, Weekly or Monthly. Weekly and Monthly are due on receipt. */
   invoiceCycle?: string | null;
+  /** Retail, Corporate, Wholesale or Distributor (25 Oct 2026). */
+  priceTier?: string | null;
+  /** Active (or blank) / Inactive (25 Oct 2026). */
+  status?: string | null;
   deliveryInstructions?: string | null;
   notes?: string | null;
   openItems?: ImportOpenItem[] | null;
@@ -88,7 +106,9 @@ export interface ImportInput {
 export interface RowResult {
   row: number;
   name: string;
-  action: 'create' | 'skip' | 'error';
+  /** update = already in the app (kept at the clean-up): details kept, the rest set from the file. */
+  action: 'create' | 'update' | 'skip' | 'error';
+  active: boolean;
   accountType: 'Individual' | 'Corporate' | null;
   priceList: string | null;
   paymentTerms: string | null;
@@ -109,6 +129,7 @@ export interface ImportResult {
   dryRun: boolean;
   rows: RowResult[];
   toCreate: number;
+  toUpdate: number;
   toSkip: number;
   withErrors: number;
   newZones: string[];
@@ -164,6 +185,8 @@ const money = (c: number) => `J$${(c / 100).toLocaleString('en-JM', { minimumFra
 
 interface Plan {
   r: RowResult;
+  /** The customer already in the app, for an update. */
+  existingId: string | null;
   src: ImportRow;
   phone: string;
   email: string;
@@ -178,8 +201,12 @@ interface Plan {
 const STANDARD_TERMS = ['Due on receipt', 'Cash on delivery', 'Net 15', 'Net 30', 'Net 60', 'Net 90'];
 
 async function plan(t: Queryable, input: ImportInput) {
-  const existing = new Set((await t.query<{ name: string }>(
-    `SELECT name FROM customers WHERE active`)).map((c) => squash(c.name)));
+  const existing = new Map((await t.query<{ id: string; name: string; busy: boolean }>(
+    `SELECT c.id, c.name,
+            (EXISTS (SELECT 1 FROM invoices i WHERE i.customer_id = c.id)
+             OR EXISTS (SELECT 1 FROM payments p WHERE p.customer_id = c.id)) AS busy
+     FROM customers c WHERE c.active AND NOT c.is_walk_in`)).map((c) => [squash(c.name), c]));
+  const tiers = await t.query<{ id: string; name: string }>(`SELECT id, name FROM price_tiers`);
   const zones = await t.query<{ name: string; retired_at: string | null }>(
     `SELECT name, retired_at FROM delivery_zones`);
   const brands = await t.query<{ name: string; type: string }>(`SELECT name, type FROM brands`);
@@ -194,12 +221,12 @@ async function plan(t: Queryable, input: ImportInput) {
   input.rows.forEach((src, i) => {
     const name = clean(src.name);
     const r: RowResult = {
-      row: i + 2, name, action: 'create', accountType: null, priceList: null,
+      row: i + 2, name, action: 'create', active: true, accountType: null, priceList: null,
       paymentTerms: null, invoiceCycle: 'PerDelivery', zone: null,
       days: [], brands: [], buysOwnBrand: true, balanceCents: 0, balanceAs: 'none', itemCount: 0,
       errors: [], warnings: [],
     };
-    const p: Plan = { r, src, phone: '', email: '', line1: null, city: null, parish: null,
+    const p: Plan = { r, src, existingId: null, phone: '', email: '', line1: null, city: null, parish: null,
       billing: null, tierId: null, items: [] };
     plans.push(p);
 
@@ -207,10 +234,23 @@ async function plan(t: Queryable, input: ImportInput) {
     const key = squash(name);
     if (seen.has(key)) { r.errors.push('this name is in the file twice'); r.action = 'error'; return; }
     seen.add(key);
-    if (existing.has(key)) {
+    const was = existing.get(key);
+    if (was?.busy) {
       r.action = 'skip';
-      r.warnings.push('already in the app - left as it is');
+      r.warnings.push('already in the app with invoices or payments - left as it is');
       return;
+    }
+    if (was) {
+      r.action = 'update';
+      p.existingId = was.id;
+      r.warnings.push('already in the app - contact details kept; zone, days, tier, terms and balance from the file');
+    }
+
+    // Status (25 Oct 2026)
+    const status = clean(src.status).toLowerCase();
+    if (status === 'inactive' || status === 'no') r.active = false;
+    else if (status && status !== 'active' && status !== 'yes') {
+      r.errors.push(`Status "${clean(src.status)}" should be Active or Inactive`);
     }
 
     // Customer type
@@ -226,6 +266,13 @@ async function plan(t: Queryable, input: ImportInput) {
       r.warnings.push('no Customer Type - brought in as Individual');
     } else {
       r.errors.push(`Customer Type "${clean(src.customerType)}" is not Individual, Corporate or Distributor`);
+    }
+    // Price tier (25 Oct 2026): the column decides when it is filled in.
+    const tierName = clean(src.priceTier);
+    if (tierName) {
+      const found = tiers.find((x) => x.name.toLowerCase() === tierName.toLowerCase());
+      if (found) { r.priceList = found.name; p.tierId = found.id; }
+      else r.errors.push(`Price Tier "${tierName}" is not one of the price tiers (${tiers.map((x) => x.name).join(', ') || 'none set up'})`);
     }
 
     // Contact
@@ -329,6 +376,55 @@ async function plan(t: Queryable, input: ImportInput) {
   return { plans, newZones: [...newZones.values()], newBrands: [...newBrands.values()] };
 }
 
+/** OB-20261025-1, -2 ... for an opening line with no QuickBooks number. */
+async function openingNumber(t: Queryable, asOf: string): Promise<string> {
+  const stem = `OB-${asOf.replace(/-/g, '')}-`;
+  const r = await t.one<{ n: number }>(
+    `SELECT COUNT(*)::int AS n FROM invoices WHERE invoice_number LIKE $1`, [`${stem}%`]);
+  return `${stem}${Number(r.n) + 1}`;
+}
+
+/**
+ * A customer's open QuickBooks items: each open invoice becomes an opening
+ * invoice carrying its QuickBooks number and dates; each unapplied payment
+ * becomes credit on the account.
+ */
+async function openingItems(t: Queryable, actor: Actor, customerId: string, items: ImportOpenItem[], asOf: string) {
+  for (const item of items) {
+    const date = isoDate(item.date) ?? asOf;
+    const ref = clean(item.reference) || null;
+    if (item.openCents > 0) {
+      // Never from the invoice sequence (25 Oct 2026): that now carries on
+      // from QuickBooks' own numbers, and an opening line must not use one up.
+      let number = ref ? `OB-${ref}` : await openingNumber(t, asOf);
+      if (ref && await t.maybeOne(`SELECT 1 FROM invoices WHERE invoice_number = $1`, [number])) {
+        number = await openingNumber(t, asOf);
+      }
+      const was = item.amountCents && Math.round(Number(item.amountCents)) !== item.openCents
+        ? ` (invoice total ${money(Math.round(Number(item.amountCents)))}, ${money(item.openCents)} still open)` : '';
+      const inv = await t.one<{ id: string }>(
+        `INSERT INTO invoices
+           (invoice_number, invoice_date, due_date, sent_date, customer_id, lifecycle,
+            subtotal_cents, gct_cents, grand_total_cents, is_opening_balance, opening_reference, notes)
+         VALUES ($1,$2,$3,$2,$4,'Sent',$5,0,$5,true,$6,$7) RETURNING id`,
+        [number, date, isoDate(item.dueDate) ?? date, customerId, item.openCents, ref,
+         ref ? `Opening balance brought across from QuickBooks invoice ${ref}${was}.`
+             : clean(item.description) ? `Opening balance brought across from QuickBooks: ${clean(item.description)}.`
+             : `Opening balance brought across from QuickBooks, as at ${asOf}.`],
+      );
+      await audit(t, actor, 'create', 'Invoice', inv.id, number,
+        { openingBalance: true, quickbooks: ref, amountCents: item.openCents });
+    } else {
+      await insertPayment(t, actor, {
+        customerId: customerId, amountCents: -item.openCents, method: 'Other',
+        paymentDate: date, kind: 'Opening credit',
+        reference: 'QuickBooks opening credit',
+        notes: `Unapplied QuickBooks payment brought across as credit on account (as at ${asOf}).`,
+      });
+    }
+  }
+}
+
 export async function importCustomers(db: Db, actor: Actor, input: ImportInput): Promise<ImportResult> {
   requireRole(actor, 'admin', 'user');
   if (!Array.isArray(input.rows) || input.rows.length === 0) throw new RuleViolation('the file has no customers in it');
@@ -341,10 +437,12 @@ export async function importCustomers(db: Db, actor: Actor, input: ImportInput):
     dryRun: !!input.dryRun,
     rows: plans.map((p) => p.r),
     toCreate: plans.filter((p) => p.r.action === 'create').length,
+    toUpdate: plans.filter((p) => p.r.action === 'update').length,
     toSkip: plans.filter((p) => p.r.action === 'skip').length,
     withErrors: plans.filter((p) => p.r.action === 'error').length,
     newZones, newBrands,
-    totalBalanceCents: plans.filter((p) => p.r.action === 'create').reduce((s, p) => s + p.r.balanceCents, 0),
+    totalBalanceCents: plans.filter((p) => p.r.action === 'create' || p.r.action === 'update')
+      .reduce((s, p) => s + p.r.balanceCents, 0),
     created,
   });
 
@@ -381,16 +479,40 @@ export async function importCustomers(db: Db, actor: Actor, input: ImportInput):
 
     let created = 0;
     for (const p of plans) {
-      if (p.r.action !== 'create') continue;
+      if (p.r.action !== 'create' && p.r.action !== 'update') continue;
       const { r, src } = p;
-      const hold = !!input.holdAutoEmails;
+      // Inactive customers are never emailed automatically.
+      const hold = !!input.holdAutoEmails || !r.active;
+      if (p.existingId) {
+        // Kept at the clean-up: their details stay, the rest comes from the file.
+        await t.query(
+          `UPDATE customers
+           SET delivery_zone = $2, delivery_days = $3::text[], default_delivery_day = $4,
+               price_tier_id = COALESCE($5, price_tier_id), buys_own_brand = $6,
+               payment_terms = COALESCE($7, payment_terms), invoice_cycle = $8, active = $9,
+               auto_statements = auto_statements AND NOT $10, auto_reminders = auto_reminders AND NOT $10,
+               imported_at = now()
+           WHERE id = $1`,
+          [p.existingId, r.zone, r.days, r.days[0] ?? null, p.tierId, r.buysOwnBrand,
+           r.paymentTerms, r.invoiceCycle, r.active, hold],
+        );
+        await audit(t, actor, 'update', 'Customer', p.existingId, r.name, { from: 'customer upload', asOf });
+        for (const name of r.brands) {
+          await t.query(
+            `INSERT INTO customer_brands (customer_id, brand_id) VALUES ($1,$2) ON CONFLICT DO NOTHING`,
+            [p.existingId, brandIds.get(name.toLowerCase())]);
+        }
+        await openingItems(t, actor, p.existingId, p.items, asOf);
+        created++;
+        continue;
+      }
       const c = await t.one<{ id: string }>(
         `INSERT INTO customers
            (name, account_type, contact_person, phone, email, address_line1, city, parish, delivery_address,
             delivery_zone, delivery_days, default_delivery_day, price_tier_id, buys_own_brand,
             auto_statements, auto_reminders, imported_at, notes,
-            payment_terms, invoice_cycle, delivery_instructions)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::text[],$12,$13,$14,$15,$16,now(),$17,$18,$19,$20)
+            payment_terms, invoice_cycle, delivery_instructions, active)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::text[],$12,$13,$14,$15,$16,now(),$17,$18,$19,$20,$21)
          RETURNING id`,
         [r.name, r.accountType, clean(src.contactPerson) || null, p.phone, p.email,
          p.line1, p.city, p.parish,
@@ -401,7 +523,7 @@ export async function importCustomers(db: Db, actor: Actor, input: ImportInput):
          r.zone, r.days, r.days[0] ?? null, p.tierId, r.buysOwnBrand, !hold, !hold,
          [clean(src.notes), `Brought across from QuickBooks on ${new Date().toISOString().slice(0, 10)}`]
            .filter(Boolean).join('\n'),
-         r.paymentTerms, r.invoiceCycle, clean(src.deliveryInstructions) || null],
+         r.paymentTerms, r.invoiceCycle, clean(src.deliveryInstructions) || null, r.active],
       );
       await audit(t, actor, 'create', 'Customer', c.id, r.name, { from: 'customer upload', asOf });
 
@@ -416,37 +538,7 @@ export async function importCustomers(db: Db, actor: Actor, input: ImportInput):
           [c.id, brandIds.get(name.toLowerCase())]);
       }
 
-      for (const item of p.items) {
-        const date = isoDate(item.date) ?? asOf;
-        const ref = clean(item.reference) || null;
-        if (item.openCents > 0) {
-          let number = ref ? `OB-${ref}` : await nextNumber(t, 'invoice_number_seq', 'OB');
-          if (ref && await t.maybeOne(`SELECT 1 FROM invoices WHERE invoice_number = $1`, [number])) {
-            number = await nextNumber(t, 'invoice_number_seq', 'OB');
-          }
-          const was = item.amountCents && Math.round(Number(item.amountCents)) !== item.openCents
-            ? ` (invoice total ${money(Math.round(Number(item.amountCents)))}, ${money(item.openCents)} still open)` : '';
-          const inv = await t.one<{ id: string }>(
-            `INSERT INTO invoices
-               (invoice_number, invoice_date, due_date, sent_date, customer_id, lifecycle,
-                subtotal_cents, gct_cents, grand_total_cents, is_opening_balance, opening_reference, notes)
-             VALUES ($1,$2,$3,$2,$4,'Sent',$5,0,$5,true,$6,$7) RETURNING id`,
-            [number, date, isoDate(item.dueDate) ?? date, c.id, item.openCents, ref,
-             ref ? `Opening balance brought across from QuickBooks invoice ${ref}${was}.`
-                 : clean(item.description) ? `Opening balance brought across from QuickBooks: ${clean(item.description)}.`
-                 : `Opening balance brought across from QuickBooks, as at ${asOf}.`],
-          );
-          await audit(t, actor, 'create', 'Invoice', inv.id, number,
-            { openingBalance: true, quickbooks: ref, amountCents: item.openCents });
-        } else {
-          await insertPayment(t, actor, {
-            customerId: c.id, amountCents: -item.openCents, method: 'Other',
-            paymentDate: date, kind: 'Opening credit',
-            reference: 'QuickBooks opening credit',
-            notes: `Unapplied QuickBooks payment brought across as credit on account (as at ${asOf}).`,
-          });
-        }
-      }
+      await openingItems(t, actor, c.id, p.items, asOf);
       created++;
     }
     return summary(plans, newZones, newBrands, created);

@@ -20,6 +20,7 @@ import { BUSINESS_TIMEZONE, assertMethodAllowed, type Actor } from './services/c
 
 import * as orders from './services/orders.ts';
 import * as delivery from './services/delivery.ts';
+import * as roundsheet from './services/roundsheet.ts';
 import * as routing from './services/routing.ts';
 import * as settlement from './services/settlement.ts';
 import * as invoices from './services/invoices.ts';
@@ -51,6 +52,7 @@ import { registerTruckRoutes } from './routes/trucks.ts';
 import { registerBrandRoutes } from './routes/brands.ts';
 import { registerWebsiteRoutes } from './routes/website.ts';
 import { registerLocationRoutes } from './routes/locations.ts';
+import { registerGoLiveRoutes } from './routes/golive.ts';
 import { productAvailableSql, ownProductSql } from './services/brands.ts';
 import * as messaging from './services/messaging.ts';
 import * as paperwork from './services/paperwork.ts';
@@ -1087,6 +1089,17 @@ export async function buildServer(db: Db) {
   app.get('/api/delivery-sheets/:id', { preHandler: allow('admin', 'user', 'driver') },
     async (req) => delivery.getSheet(db, (req.params as { id: string }).id));
 
+  // The round's printed delivery sheet (25 Oct 2026). Opens in the browser's
+  // viewer, which saves or prints it.
+  app.get('/api/delivery-sheets/:id/sheet.pdf', { preHandler: allow('admin', 'user', 'driver') },
+    async (req, reply) => {
+      const doc = await roundsheet.renderDeliverySheetPdf(db, (req.params as { id: string }).id);
+      return reply
+        .header('content-type', 'application/pdf')
+        .header('content-disposition', `inline; filename="${doc.filename}"`)
+        .send(doc.pdf);
+    });
+
   app.get('/api/stops/:id', { preHandler: allow('admin', 'user', 'driver') },
     async (req) => delivery.getStopForDriver(db, (req.params as { id: string }).id));
 
@@ -1690,6 +1703,7 @@ export async function buildServer(db: Db) {
   registerBrandRoutes(app as never, db, { allow: allow as never, actorOf });
   registerWebsiteRoutes(app as never, db, { allow: allow as never, actorOf });
   registerLocationRoutes(app as never, db, { allow: allow as never, actorOf });
+  registerGoLiveRoutes(app as never, db, { allow: allow as never, actorOf });
 
   return app;
 }

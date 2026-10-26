@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
-import { api, type Session } from '../lib/api';
+import { api, openPdf, type Session } from '../lib/api';
 import SortStopsPanel from '../components/SortStopsPanel';
 import { money, date, day, time, when } from '../lib/format';
 import {
@@ -200,6 +200,11 @@ export default function RouteDetail({ session }: { session: Session }) {
       <div className="inv-title">
         <h1>{sheet.zone} · {day(sheet.delivery_date)} {date(sheet.delivery_date).slice(0, 4)}</h1>
         <span className={`chip ${statusChip[1]}`}>{statusChip[0]}</span>
+        {/* The paper copy for the driver (25 Oct 2026): opens in a new tab to print or save. */}
+        <button type="button" className="secondary" style={{ marginLeft: 'auto' }}
+                onClick={() => openPdf(`/api/delivery-sheets/${sheet.id}/sheet.pdf`).catch((e) => setError(e.message))}>
+          Delivery sheet (PDF)
+        </button>
       </div>
       <p className="subtitle">
         {[sheet.driver_name ?? 'No driver yet', sheet.vehicle,
@@ -250,6 +255,10 @@ export default function RouteDetail({ session }: { session: Session }) {
         <li className={stepClass(3)}>
           <strong>3 · Delivering</strong>
           <div className="small">{worked} of {visitCount} stops worked</div>
+          {/* The paper sheet typed in by the office, in one go (25 Oct 2026). */}
+          {office && open && worked < visitCount && (
+            <Link to={`/delivery/${sheet.id}/enter`} className="small">Enter from the paper sheet</Link>
+          )}
         </li>
         <li className={stepClass(4)}>
           <strong>4 · Settle</strong>

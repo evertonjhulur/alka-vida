@@ -15,6 +15,9 @@ import Recurring from './pages/Recurring';
 import DeliverySheets from './pages/DeliverySheets';
 import RouteDetail from './pages/RouteDetail';
 import Settlement from './pages/Settlement';
+import SheetEntry from './pages/SheetEntry';
+import StartFresh from './pages/StartFresh';
+import ProductImport from './pages/ProductImport';
 import Invoices from './pages/Invoices';
 import InvoiceDetail from './pages/InvoiceDetail';
 import Reports from './pages/Reports';
@@ -333,6 +336,7 @@ function Shell({ session }: { session: Session }) {
           <Route path="/delivery" element={<DeliverySheets />} />
           <Route path="/delivery/:sheetId" element={<RouteDetail session={session} />} />
           <Route path="/delivery/:sheetId/settlement" element={<Settlement session={session} />} />
+          <Route path="/delivery/:sheetId/enter" element={<SheetEntry />} />
           <Route path="/invoices" element={<><SectionTabs tabs={INVOICES} /><Invoices /></>} />
           <Route path="/quotes" element={<><SectionTabs tabs={ORDERS} badges={tabBadges} /><Quotes /></>} />
           <Route path="/quotes/:quoteId" element={<Quotes />} />
@@ -342,6 +346,8 @@ function Shell({ session }: { session: Session }) {
           <Route path="/settings" element={<SettingsHub session={session} pending={pending} />} />
           <Route path="/settings/money" element={<><BackToSettings /><MoneySettings session={session} /></>} />
           <Route path="/settings/audit-log" element={<><BackToSettings /><AuditLog session={session} /></>} />
+          <Route path="/settings/start-fresh" element={<StartFresh session={session} />} />
+          <Route path="/products/import" element={<ProductImport />} />
           <Route path="/settings/notifications" element={<><BackToSettings /><NotificationSettings session={session} /></>} />
           <Route path="/messages" element={<><SectionTabs tabs={CUSTOMERS} /><Messages session={session} /></>} />
           <Route path="/reminders" element={<Reminders />} />

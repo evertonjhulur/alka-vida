@@ -7,7 +7,7 @@ import { readSheets } from '../lib/sheetfile';
 import { readUpload, type ReadResult } from '../lib/customerUpload';
 
 interface RowResult {
-  row: number; name: string; action: 'create' | 'skip' | 'error';
+  row: number; name: string; action: 'create' | 'update' | 'skip' | 'error'; active?: boolean;
   accountType: string | null; priceList: string | null; zone: string | null; days: string[];
   paymentTerms?: string | null; invoiceCycle?: string;
   brands: string[]; buysOwnBrand: boolean; balanceCents: number;
@@ -15,10 +15,10 @@ interface RowResult {
   errors: string[]; warnings: string[];
 }
 interface Result {
-  dryRun: boolean; rows: RowResult[]; toCreate: number; toSkip: number; withErrors: number;
+  dryRun: boolean; rows: RowResult[]; toCreate: number; toUpdate?: number; toSkip: number; withErrors: number;
   newZones: string[]; newBrands: string[]; totalBalanceCents: number; created: number;
 }
-type Show = 'all' | 'problems' | 'notes' | 'create' | 'skip';
+type Show = 'all' | 'problems' | 'notes' | 'create' | 'update' | 'skip' | 'inactive';
 
 const todayJm = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Jamaica' }).format(new Date());
 
@@ -75,7 +75,8 @@ export default function CustomerImport() {
   async function bringIn() {
     if (!read || !result) return;
     const ok = await ask(
-      `Bring in ${result.toCreate} customer${result.toCreate === 1 ? '' : 's'}, with opening balances totalling ` +
+      `Bring in ${result.toCreate} customer${result.toCreate === 1 ? '' : 's'}` +
+      (result.toUpdate ? ` and update ${result.toUpdate} already here` : '') + `, with opening balances totalling ` +
       `${money(result.totalBalanceCents)} as at ${asOf}?` +
       (result.newZones.length ? ` ${result.newZones.length} new zone(s) will be added to the zone list.` : ''),
       { confirmLabel: 'Bring them in' },
@@ -95,7 +96,8 @@ export default function CustomerImport() {
     show === 'all' ? true
       : show === 'problems' ? r.action === 'error'
         : show === 'notes' ? r.warnings.length > 0 && r.action !== 'skip'
-          : r.action === show));
+          : show === 'inactive' ? r.active === false
+            : r.action === show));
 
   return (
     <>
@@ -111,6 +113,7 @@ export default function CustomerImport() {
       {done && (
         <div className="notice ok">
           {done.created} customer{done.created === 1 ? '' : 's'} brought in
+          {done.toUpdate ? ` (${done.toUpdate} of them already here, updated)` : ''}
           {done.toSkip ? `, ${done.toSkip} already here left as they were` : ''}. Opening balances total{' '}
           <strong>{money(done.totalBalanceCents)}</strong>.
           {done.newZones.length > 0 && <> New zones added: {done.newZones.join(', ')} — set their days on{' '}
@@ -159,6 +162,10 @@ export default function CustomerImport() {
               <h2 style={{ marginTop: 0 }}>What will happen</h2>
               <div className="row" style={{ gap: 8 }}>
                 <span className="chip ok">{result.toCreate} to add</span>
+                {(result.toUpdate ?? 0) > 0 && <span className="chip info">{result.toUpdate} already here — to update</span>}
+                {result.rows.some((r) => r.active === false) && (
+                  <span className="chip neutral">{result.rows.filter((r) => r.active === false).length} inactive</span>
+                )}
                 {result.toSkip > 0 && <span className="chip neutral">{result.toSkip} already here — left alone</span>}
                 {result.withErrors > 0 && <span className="chip bad">{result.withErrors} with a problem</span>}
                 <span className="chip info">Opening balances {money(result.totalBalanceCents)}</span>
@@ -172,7 +179,7 @@ export default function CustomerImport() {
               )}
             </div>
             <div style={{ textAlign: 'right' }}>
-              <button className="go" disabled={busy || result.withErrors > 0 || result.toCreate === 0} onClick={bringIn}>
+              <button className="go" disabled={busy || result.withErrors > 0 || result.toCreate + (result.toUpdate ?? 0) === 0} onClick={bringIn}>
                 Bring them in
               </button>
               {result.withErrors > 0 && <div className="muted small">Fix the rows with a problem and choose the file again.</div>}
@@ -187,6 +194,8 @@ export default function CustomerImport() {
                 <option value="problems">With a problem ({result.withErrors})</option>
                 <option value="notes">With a note</option>
                 <option value="create">To add ({result.toCreate})</option>
+                <option value="update">Already here, to update ({result.toUpdate ?? 0})</option>
+                <option value="inactive">Inactive ({result.rows.filter((r) => r.active === false).length})</option>
                 <option value="skip">Already here ({result.toSkip})</option>
               </select>
             </div>
@@ -204,6 +213,8 @@ export default function CustomerImport() {
                     <td>
                       <strong>{r.name || '—'}</strong>
                       {r.action === 'skip' && <div><span className="chip neutral">already here</span></div>}
+                      {r.action === 'update' && <div><span className="chip info">already here — update</span></div>}
+                      {r.active === false && <div><span className="chip neutral">inactive</span></div>}
                       {r.action === 'error' && <div><span className="chip bad">problem</span></div>}
                     </td>
                     <td>{r.accountType ?? ''}{r.priceList ? <div className="muted small">{r.priceList} prices</div> : null}

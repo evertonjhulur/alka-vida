@@ -18,6 +18,7 @@ const CARDS: Card[] = [
   { to: '/employees', title: 'Employees', text: 'Staff and drivers.', officeOnly: true },
   { to: '/settings/notifications', title: 'Notifications', text: 'Who is told about new orders and decisions on their phone, quiet hours, and their devices.', adminOnly: true },
   { to: '/settings/audit-log', title: 'Audit log', text: 'Who did what, and when: every change made in Alka Vida, searchable.', adminOnly: true },
+  { to: '/settings/start-fresh', title: 'Start fresh', text: 'Clear the test data before going live, keeping the customers and logins you choose.', adminOnly: true },
 ];
 
 export default function SettingsHub(

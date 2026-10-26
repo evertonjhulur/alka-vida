@@ -22,6 +22,10 @@ export interface UploadRow {
   bottledBrands: string; canOrderOwnBrand: string; openItems: OpenItem[];
   paymentTerms: string; invoiceCycle: string;
   deliveryInstructions: string; notes: string;
+  /** Retail, Corporate, Wholesale or Distributor (25 Oct 2026). */
+  priceTier: string;
+  /** Active / Inactive (25 Oct 2026). */
+  status: string;
 }
 export interface ReadResult {
   sheet: string;
@@ -60,6 +64,8 @@ const COLUMNS: Record<string, keyof UploadRow | 'asOf' | 'skip'> = {
   invoicecycle: 'invoiceCycle', cycle: 'invoiceCycle',
   deliveryinstructions: 'deliveryInstructions', instructions: 'deliveryInstructions',
   notes: 'notes', note: 'notes',
+  pricetier: 'priceTier', tier: 'priceTier', pricelist: 'priceTier',
+  status: 'status', active: 'status',
   zonebasis: 'skip', suggestedtype: 'skip', suggestedzone: 'skip', check: 'skip', sources: 'skip',
   // Price columns from his lists are reference only - prices are set in the app (16 Oct 2026).
   '5gallonpricejmd': 'skip', '5gallonpriceon1506listreference': 'skip', '5gallonpricereference': 'skip',
@@ -149,6 +155,7 @@ export function readUpload(sheets: Record<string, Table>): ReadResult {
       bottledBrands: at(row, 'bottledBrands'), canOrderOwnBrand: at(row, 'canOrderOwnBrand'),
       paymentTerms: at(row, 'paymentTerms'), invoiceCycle: at(row, 'invoiceCycle'),
       deliveryInstructions: at(row, 'deliveryInstructions'), notes: at(row, 'notes'),
+      priceTier: at(row, 'priceTier'), status: at(row, 'status'),
       openItems: own,
     });
   }
