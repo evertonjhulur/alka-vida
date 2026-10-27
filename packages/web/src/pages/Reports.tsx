@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
-import { api } from '../lib/api';
+import { api, openPdf } from '../lib/api';
 import { downloadCsv } from '../lib/csv';
 import { money, day, todayInJamaica } from '../lib/format';
 
@@ -19,11 +19,47 @@ interface Sales {
     newCustomers: number | null; creditNoteCents: number; creditNotes: number;
     creditNoteNetCents: number; creditNoteGctCents: number;
     netAfterCreditsCents: number; grossAfterCreditsCents: number; gctCents: number; gctAfterCreditsCents: number;
+    totalSalesNetCents?: number; totalSalesGrossCents?: number;
   };
+  /** Delivered to weekly/monthly customers, not invoiced yet (27 Oct 2026). */
+  notInvoiced?: NotInvoiced;
   byProduct: Array<{ productId: string; name: string; bottlesPerCase: number; cases: number; bottles: number; cents: number }>;
   byZone: Array<{ zone: string; invoices: number; cents: number }>;
   topCustomers: Array<{ customerId: string; name: string; invoices: number; cents: number }>;
   bottles: { out: number; back: number; lost: number };
+}
+interface NotInvoiced {
+  deliveries: number; netCents: number; grossCents: number; gctCents: number;
+  customers: Array<{ customerId: string; name: string; cycle: string; deliveries: number; netCents: number; grossCents: number }>;
+  items: Array<{ date: string; customerId: string; customer: string; cycle: string; orderNumber: string; kind: string;
+    lines: Array<{ name: string; cases: number; bottles: number; bottlesPerCase: number; cents: number }> }>;
+}
+/** The end-of-day report (27 Oct 2026); see services/endofday.ts. */
+interface EndOfDay {
+  day: string; tomorrow: string;
+  sales: {
+    invoices: Array<{ invoiceId: string; number: string; customerId: string; customer: string; how: string; orders: string | null;
+      netCents: number; gctCents: number; totalCents: number; paidCents: number; balanceCents: number; status: string }>;
+    byProduct: Array<{ name: string; bottlesPerCase: number; cases: number; bottles: number; cents: number }>;
+    byHow: Array<{ how: string; count: number; netCents: number }>;
+    credits: Array<{ invoiceId: string; number: string; customer: string; against: string | null; netCents: number; totalCents: number; reason: string | null }>;
+    notInvoiced: NotInvoiced;
+    totals: { invoices: number; customers: number; invoicedNetCents: number; invoicedGrossCents: number; creditNetCents: number;
+      creditGrossCents: number; netAfterCreditsCents: number; grossAfterCreditsCents: number; notInvoicedNetCents: number;
+      notInvoicedGrossCents: number; totalSalesNetCents: number; totalSalesGrossCents: number; paidOnTheseCents: number; stillOwedOnTheseCents: number };
+  };
+  money: {
+    payments: Array<{ id: string; amountCents: number; method: string; confirmed: boolean; reversal: boolean; receipt: string | null;
+      reference: string | null; customer: string; invoice: string | null; takenBy: string; onRound: boolean; at: string }>;
+    byMethod: Array<{ label: string; count: number; cents: number }>;
+    byWho: Array<{ label: string; count: number; cents: number }>;
+    confirmedCents: number; provisionalCents: number; totalCents: number;
+  };
+  rounds: Rounds;
+  orders: {
+    taken: Array<{ orderId: string; number: string; customer: string; zone: string | null; mode: string; source: string; status: string; forDay: string | null; totalCents: number; items: string }>;
+    booked: Array<{ orderId: string; number: string; customer: string; zone: string | null; mode: string; source: string; status: string; forDay: string | null; totalCents: number; items: string }>;
+  };
 }
 interface Txn {
   invoiceId: string; number: string; date: string; type: string; customerId: string; customer: string;
@@ -58,7 +94,7 @@ interface MaterialCost {
 }
 
 const TABS = [
-  ['sales', 'Sales'], ['transactions', 'Sales transactions'], ['margin', 'Margin'], ['rounds', 'Rounds and cash'], ['loadings', 'Truck loadings'],
+  ['sales', 'Sales'], ['eod', 'End of day'], ['transactions', 'Sales transactions'], ['margin', 'Margin'], ['rounds', 'Rounds and cash'], ['loadings', 'Truck loadings'],
   ['owed', 'Money owed'], ['bottles', 'Bottles'], ['discounts', 'Discounts'], ['materials', 'Material cost'],
 ] as const;
 
@@ -74,7 +110,12 @@ interface Loading {
 }
 const qtyOf = (bpc: number, bottles: number) => (bpc > 0 ? `${Math.round((bottles / bpc) * 100) / 100} cs` : `${bottles}`);
 type Tab = typeof TABS[number][0];
-type Period = 'month' | 'last' | 'year' | 'all' | 'custom';
+type Period = 'today' | 'yesterday' | 'week' | 'month' | 'last' | 'year' | 'all' | 'custom';
+/** One click each (Everton, 27 Oct 2026). */
+const PERIODS: Array<[Period, string]> = [
+  ['today', 'Today'], ['yesterday', 'Yesterday'], ['week', 'This week'], ['month', 'This month'],
+  ['last', 'Last month'], ['year', 'This year'], ['all', 'All time'], ['custom', 'Choose dates…'],
+];
 
 const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
 const short = (n: string) => n.replace(/^Alka Vida\s+/i, '');
@@ -85,6 +126,15 @@ function rangeFor(p: Period, custom: { from: string; to: string }): { from: stri
   const [y, m] = today.split('-').map(Number);
   const pad = (n: number) => String(n).padStart(2, '0');
   const last = (yy: number, mm: number) => new Date(Date.UTC(yy, mm, 0)).getUTCDate();
+  const shift = (iso: string, n: number) => new Date(Date.parse(`${iso}T12:00:00Z`) + n * 86_400_000).toISOString().slice(0, 10);
+  if (p === 'today') return { from: today, to: today, label: `today, ${day(today)}` };
+  if (p === 'yesterday') { const yd = shift(today, -1); return { from: yd, to: yd, label: `yesterday, ${day(yd)}` }; }
+  if (p === 'week') {
+    // Monday to Sunday, the same week the weekly invoices use.
+    const back = (new Date(`${today}T12:00:00Z`).getUTCDay() + 6) % 7;
+    const mon = shift(today, -back); const sun = shift(mon, 6);
+    return { from: mon, to: sun, label: `this week, ${day(mon)} to ${day(sun)}` };
+  }
   if (p === 'month') return { from: `${y}-${pad(m)}-01`, to: `${y}-${pad(m)}-${last(y, m)}`, label: `${MONTHS[m - 1]} ${y}` };
   if (p === 'last') {
     const ly = m === 1 ? y - 1 : y; const lm = m === 1 ? 12 : m - 1;
@@ -100,7 +150,18 @@ const dollars = (c: number | null) => (c === null ? '' : (c / 100).toFixed(2));
 export default function Reports() {
   const [params, setParams] = useSearchParams();
   const tab = (TABS.some(([k]) => k === params.get('tab')) ? params.get('tab') : 'sales') as Tab;
-  const [period, setPeriod] = useState<Period>('month');
+  const [period, setPeriodState] = useState<Period>(() => {
+    try {
+      const saved = localStorage.getItem('reports.period') as Period | null;
+      return saved && PERIODS.some(([k]) => k === saved) ? saved : 'month';
+    } catch { return 'month'; }
+  });
+  const setPeriod = (p: Period) => {
+    setPeriodState(p);
+    try { localStorage.setItem('reports.period', p); } catch { /* not kept; fine */ }
+  };
+  const [eodDay, setEodDay] = useState(todayInJamaica());
+  const [eod, setEod] = useState<EndOfDay | null>(null);
   const [custom, setCustom] = useState({ from: '', to: '' });
   const range = rangeFor(period, custom);
 
@@ -128,15 +189,16 @@ export default function Reports() {
     if (tab === 'margin') api.get<Margin[]>(`/api/reports/margin?${qs}`).then(setMargin).catch(fail);
     if (tab === 'loadings') api.get<Loading[]>(`/api/reports/loadings?${qs}`).then(setLoadings).catch(fail);
     if (tab === 'transactions') api.get<Txn[]>(`/api/reports/sales-transactions?${qs}`).then(setTxns).catch(fail);
+    if (tab === 'eod') { setEod(null); api.get<EndOfDay>(`/api/reports/end-of-day?day=${eodDay}`).then(setEod).catch(fail); }
     if (tab === 'discounts') api.get<{ totals: DiscountTotals; byClient: PerClient[] }>(`/api/reports/discounts?${qs}`).then(setDisc).catch(fail);
-  }, [tab, qs]);
+  }, [tab, qs, eodDay]);
   useEffect(() => {
     if (tab === 'owed' && !owed) api.get<Owed[]>('/api/reports/receivables').then(setOwed).catch((e) => setError(e.message));
     if (tab === 'bottles' && !pool) api.get<Pool[]>('/api/reports/bottle-pool').then(setPool).catch(() => setPool([]));
     if (tab === 'materials' && !materials) api.get<MaterialCost[]>('/api/reports/material-costs').then(setMaterials).catch((e) => setError(e.message));
   }, [tab]);
 
-  const periodMatters = !['owed', 'materials'].includes(tab);
+  const periodMatters = !['owed', 'materials', 'eod'].includes(tab);
   const file = (what: string) => `alka-vida-${what}${range.from ? `-${range.from}-to-${range.to}` : ''}.csv`;
 
   function exportTab() {
@@ -148,6 +210,11 @@ export default function Reports() {
         ['Net sales before GCT (post this)', dollars(sales.totals.netAfterCreditsCents)],
         ['GCT, after credit notes', dollars(sales.totals.gctAfterCreditsCents)],
         ['Net sales with GCT', dollars(sales.totals.grossAfterCreditsCents)],
+        ...(sales.notInvoiced?.deliveries ? [
+          ['Delivered to weekly/monthly customers, not invoiced yet, before GCT', dollars(sales.notInvoiced.netCents)],
+          ['Total sales before GCT', dollars(sales.totals.totalSalesNetCents ?? sales.totals.netAfterCreditsCents)],
+          ['Total sales with GCT', dollars(sales.totals.totalSalesGrossCents ?? sales.totals.grossAfterCreditsCents)],
+        ] : []),
         ['Invoices', sales.totals.invoices], ['Credit notes', sales.totals.creditNotes],
         ['Customers buying', sales.totals.customers], [],
         ['Product', 'Cases', 'Bottles', 'Sales (before discount and GCT)'],
@@ -156,6 +223,29 @@ export default function Reports() {
         ...sales.byZone.map((z) => [z.zone, z.invoices, dollars(z.cents)]), [],
         ['Customer', 'Invoices', 'Sales before GCT'],
         ...sales.topCustomers.map((c) => [c.name, c.invoices, dollars(c.cents)]),
+        ...(sales.notInvoiced?.deliveries ? [[], ['Not invoiced yet: customer', 'Invoiced', 'Deliveries', 'Before GCT'],
+          ...sales.notInvoiced.customers.map((c) => [c.name, c.cycle, c.deliveries, dollars(c.netCents)])] : []),
+      ]);
+    } else if (tab === 'eod' && eod) {
+      const e = eod;
+      downloadCsv(`alka-vida-end-of-day-${e.day}.csv`, [
+        ['End of day', e.day], [],
+        ['Invoiced before GCT', dollars(e.sales.totals.invoicedNetCents)],
+        ['Less credit notes before GCT', dollars(-e.sales.totals.creditNetCents)],
+        ['Not invoiced yet (weekly/monthly) before GCT', dollars(e.sales.totals.notInvoicedNetCents)],
+        ['Total sales before GCT', dollars(e.sales.totals.totalSalesNetCents)],
+        ['Money received (confirmed)', dollars(e.money.confirmedCents)],
+        ['Recorded on rounds, not settled', dollars(e.money.provisionalCents)], [],
+        ['Invoice', 'Customer', 'How', 'Before GCT', 'GCT', 'Total', 'Still owed'],
+        ...e.sales.invoices.map((i) => [i.number, i.customer, i.how, dollars(i.netCents), dollars(i.gctCents), dollars(i.totalCents), dollars(Math.max(i.balanceCents, 0))]), [],
+        ['Time', 'Customer', 'Method', 'Receipt', 'Invoice', 'Taken by', 'Settled', 'Amount'],
+        ...e.money.payments.map((p) => [p.at, p.customer, p.method, p.receipt ?? '', p.invoice ?? 'on account', p.takenBy, p.confirmed ? 'yes' : 'no', dollars(p.amountCents)]), [],
+        ['Round', 'Driver', 'Stops', 'Delivered', 'Not delivered', 'Not done', 'Recorded', 'Handed in', 'Bottles out', 'Empties back'],
+        ...e.rounds.rounds.map((r) => [r.zone, r.driver ?? '', r.stops, r.delivered, r.missed, r.pending, dollars(r.recordedCents), dollars(r.handedInCents), r.fullOut, r.emptiesCounted ?? r.emptiesRecorded]), [],
+        ['Orders taken', 'Customer', 'For', 'Items', 'From'],
+        ...e.orders.taken.map((o) => [o.number, o.customer, o.forDay ?? '', o.items, o.source]), [],
+        [`Booked for ${e.tomorrow}`, 'Customer', 'Zone', 'Items', 'From'],
+        ...e.orders.booked.map((o) => [o.number, o.customer, o.zone ?? (o.mode === 'Pickup' ? 'collect' : ''), o.items, o.source]),
       ]);
     } else if (tab === 'transactions' && txns) {
       downloadCsv(file('sales-transactions'), [
@@ -276,16 +366,19 @@ export default function Reports() {
     const top = sales.byProduct[0];
     const productTotal = sales.byProduct.reduce((s, p) => s + p.cents, 0);
     const zoneTotal = sales.byZone.reduce((s, z) => s + z.cents, 0);
-    if (t.invoices === 0) return <div className="panel"><p className="muted" style={{ margin: 0 }}>No sales in {range.label}.</p></div>;
+    const wait = sales.notInvoiced;
+    const waiting = wait?.deliveries ?? 0;
+    if (t.invoices === 0 && waiting === 0) return <div className="panel"><p className="muted" style={{ margin: 0 }}>No sales in {range.label}.</p></div>;
     return (
       <>
         <div className="stat-row">
-          <div className="stat"><div className="stat-label">Net sales</div><div className="stat-value">{money(t.netAfterCreditsCents)}</div>
-            <div className="stat-note">{money(t.grossAfterCreditsCents)} with GCT{t.creditNotes > 0 ? ', after credit notes' : ''}</div></div>
-          <div className="stat"><div className="stat-label">Deliveries and collections</div><div className="stat-value">{t.invoices}</div>
-            <div className="stat-note">average {money(Math.round(t.netCents / Math.max(t.invoices, 1)))}</div></div>
+          <div className="stat"><div className="stat-label">Total sales</div><div className="stat-value">{money(t.totalSalesNetCents ?? t.netAfterCreditsCents)}</div>
+            <div className="stat-note">{money(t.totalSalesGrossCents ?? t.grossAfterCreditsCents)} with GCT
+              {waiting > 0 ? `; ${money(wait!.netCents)} not invoiced yet` : t.creditNotes > 0 ? ', after credit notes' : ''}</div></div>
+          <div className="stat"><div className="stat-label">Deliveries and collections</div><div className="stat-value">{t.invoices + waiting}</div>
+            <div className="stat-note">{waiting > 0 ? `${t.invoices} invoiced, ${waiting} not invoiced yet` : `average ${money(Math.round(t.netCents / Math.max(t.invoices, 1)))}`}</div></div>
           <div className="stat"><div className="stat-label">Customers buying</div><div className="stat-value">{t.customers}</div>
-            <div className="stat-note">{t.newCustomers !== null ? `${t.newCustomers} new in this period` : ' '}</div></div>
+            <div className="stat-note">{waiting > 0 ? `+ ${wait!.customers.length} on weekly/monthly invoices` : t.newCustomers !== null ? `${t.newCustomers} new in this period` : ' '}</div></div>
           <div className="stat"><div className="stat-label">Returnable bottles</div><div className="stat-value">{sales.bottles.out} out · {sales.bottles.back} back</div>
             <div className="stat-note">{Math.max(sales.bottles.out - sales.bottles.back - sales.bottles.lost, 0)} still with customers</div></div>
         </div>
@@ -296,14 +389,23 @@ export default function Reports() {
           <div className="total-line grand"><span>Net sales, before GCT</span><span>{money(t.netAfterCreditsCents)}</span></div>
           <div className="total-line"><span>GCT collected, after credit notes</span><span>{money(t.gctAfterCreditsCents)}</span></div>
           <div className="total-line"><span>Net sales with GCT</span><span>{money(t.grossAfterCreditsCents)}</span></div>
+          {waiting > 0 && (
+            <>
+              <div className="total-line" style={{ marginTop: 10 }}>
+                <span>Delivered to weekly/monthly customers, not invoiced yet ({waiting})</span><span>{money(wait!.netCents)}</span></div>
+              <div className="total-line grand"><span>Total sales, before GCT</span><span>{money(t.totalSalesNetCents ?? t.netAfterCreditsCents)}</span></div>
+              <div className="total-line"><span>Total sales with GCT</span><span>{money(t.totalSalesGrossCents ?? t.grossAfterCreditsCents)}</span></div>
+            </>
+          )}
           <p className="muted small" style={{ marginBottom: 0 }}>
+            {waiting > 0 && <>Post the invoiced figure; the rest goes on the weekly or monthly invoice, dated the last day of its week or month. </>}
             Credit notes are taken off. The charts below are what was invoiced, before credit notes.{' '}
             <button type="button" className="as-link small" onClick={() => setParams({ tab: 'transactions' }, { replace: true })}>
               See every invoice and credit note
             </button>
           </p>
         </section>
-        <div className="report-grid">
+        {t.invoices > 0 && <div className="report-grid">
           <section className="panel">
             {top && <h2 className="side-h">{short(top.name)} brings in the most: {pct(top.cents, productTotal)}% of sales</h2>}
             <div className="muted small" style={{ marginBottom: 10 }}>Sales by product, {range.label}, before discounts and GCT</div>
@@ -334,7 +436,191 @@ export default function Reports() {
             ))}
             <p className="muted small" style={{ marginBottom: 0 }}>Before GCT, after approved discounts.</p>
           </section>
+        </div>}
+        {waiting > 0 && (
+          <section className="panel">
+            <h2 className="side-h">Delivered, not invoiced yet</h2>
+            <div className="muted small" style={{ marginBottom: 8 }}>
+              Customers invoiced weekly or monthly. Counted on the day the goods went out; their invoice is raised when the week or month closes.
+            </div>
+            <table>
+              <thead><tr><th>Customer</th><th>Invoiced</th><th className="num">Deliveries</th><th className="num">Before GCT</th><th className="num">With GCT</th></tr></thead>
+              <tbody>
+                {wait!.customers.map((c) => (
+                  <tr key={c.customerId}>
+                    <td><Link to={`/customers/${c.customerId}`}>{c.name}</Link></td><td className="small">{c.cycle === 'PerDelivery' ? 'every delivery' : c.cycle.toLowerCase()}</td>
+                    <td className="num">{c.deliveries}</td><td className="num">{money(c.netCents)}</td><td className="num">{money(c.grossCents)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </section>
+        )}
+      </>
+    );
+  };
+
+  const qty = (bpc: number, cases: number, bottles: number) => (bpc > 0 && cases > 0
+    ? `${cases} cs${bottles > 0 ? ` + ${bottles}` : ''}` : `${bottles} ${bottles === 1 ? 'bottle' : 'bottles'}`);
+
+  const eodTab = () => {
+    if (!eod) return <p className="muted">Loading…</p>;
+    const t = eod.sales.totals;
+    const m = eod.money;
+    const rt = eod.rounds.totals;
+    const wait = eod.sales.notInvoiced;
+    const out = eod.rounds.rounds.reduce((a, r) => a + r.fullOut, 0);
+    const back = eod.rounds.rounds.reduce((a, r) => a + (r.emptiesCounted ?? r.emptiesRecorded), 0);
+    return (
+      <>
+        <div className="stat-row">
+          <div className="stat"><div className="stat-label">Total sales</div><div className="stat-value">{money(t.totalSalesNetCents)}</div>
+            <div className="stat-note">{money(t.totalSalesGrossCents)} with GCT{wait.deliveries ? `; ${money(wait.netCents)} not invoiced yet` : ''}</div></div>
+          <div className="stat"><div className="stat-label">Money received</div><div className="stat-value">{money(m.confirmedCents)}</div>
+            <div className="stat-note">{m.provisionalCents ? `+ ${money(m.provisionalCents)} on rounds not settled` : `${m.payments.length} payment${m.payments.length === 1 ? '' : 's'}`}</div></div>
+          <div className="stat"><div className="stat-label">Stops delivered</div><div className="stat-value">{rt.delivered} of {rt.stops}</div>
+            <div className="stat-note">{eod.rounds.rounds.length} round{eod.rounds.rounds.length === 1 ? '' : 's'} · {out} bottles out, {back} back</div></div>
+          <div className="stat"><div className="stat-label">Orders taken</div><div className="stat-value">{eod.orders.taken.length}</div>
+            <div className="stat-note">{eod.orders.booked.length} booked for {day(eod.tomorrow)}</div></div>
         </div>
+
+        <section className="panel">
+          <h2 className="side-h">1. Sales</h2>
+          <div style={{ maxWidth: 560 }}>
+            <div className="total-line"><span>Invoiced, before GCT ({t.invoices} invoice{t.invoices === 1 ? '' : 's'}, {t.customers} customer{t.customers === 1 ? '' : 's'})</span><span>{money(t.invoicedNetCents)}</span></div>
+            {eod.sales.credits.length > 0 && <div className="total-line"><span>Less {eod.sales.credits.length} credit note{eod.sales.credits.length === 1 ? '' : 's'}</span><span>−{money(t.creditNetCents)}</span></div>}
+            {wait.deliveries > 0 && <div className="total-line"><span>Delivered to weekly/monthly customers, not invoiced yet ({wait.deliveries})</span><span>{money(wait.netCents)}</span></div>}
+            <div className="total-line grand"><span>Total sales, before GCT</span><span>{money(t.totalSalesNetCents)}</span></div>
+            <div className="total-line"><span>Paid so far on this day's invoices</span><span>{money(t.paidOnTheseCents)}</span></div>
+            <div className="total-line"><span>Still owed on this day's invoices</span><span>{money(t.stillOwedOnTheseCents)}</span></div>
+          </div>
+          {eod.sales.byHow.length > 0 && (
+            <div className="row" style={{ gap: 24, margin: '10px 0' }}>
+              {eod.sales.byHow.map((h) => <div key={h.how}><div className="muted small">{h.how} ({h.count})</div><strong>{money(h.netCents)}</strong></div>)}
+            </div>
+          )}
+          {eod.sales.byProduct.length > 0 && (
+            <table style={{ marginTop: 8 }}>
+              <thead><tr><th>Product</th><th className="num">Quantity</th><th className="num">Before discount and GCT</th></tr></thead>
+              <tbody>{eod.sales.byProduct.map((p) => (
+                <tr key={p.name}><td>{short(p.name)}</td><td className="num">{qty(p.bottlesPerCase, p.cases, p.bottles)}</td><td className="num">{money(p.cents)}</td></tr>
+              ))}</tbody>
+            </table>
+          )}
+          {eod.sales.invoices.length > 0 ? (
+            <div className="table-scroll" style={{ marginTop: 12 }}>
+              <table className="phone-cards">
+                <thead><tr><th>Invoice</th><th>Customer</th><th>How</th><th className="num">Before GCT</th><th className="num">Total</th><th className="num">Still owed</th></tr></thead>
+                <tbody>{eod.sales.invoices.map((i) => (
+                  <tr key={i.invoiceId}>
+                    <td data-label="Invoice"><Link to={`/invoices/${i.invoiceId}`}>{i.number}</Link></td>
+                    <td data-label="Customer">{i.customer}</td><td data-label="How" className="small">{i.how}</td>
+                    <td data-label="Before GCT" className="num">{money(i.netCents)}</td><td data-label="Total" className="num">{money(i.totalCents)}</td>
+                    <td data-label="Still owed" className="num">{i.balanceCents > 0 ? money(i.balanceCents) : <span className="muted">paid</span>}</td>
+                  </tr>
+                ))}</tbody>
+              </table>
+            </div>
+          ) : <p className="muted">No invoices dated this day.</p>}
+          {eod.sales.credits.length > 0 && (
+            <p className="small">Credit notes: {eod.sales.credits.map((c) => (
+              <span key={c.invoiceId}><Link to={`/invoices/${c.invoiceId}`}>{c.number}</Link> {c.customer} −{money(c.totalCents)}{c.against ? ` on ${c.against}` : ''}; </span>))}</p>
+          )}
+          {wait.items.length > 0 && (
+            <>
+              <h3 style={{ marginBottom: 4 }}>Not invoiced yet</h3>
+              <table>
+                <tbody>{wait.items.map((d) => (
+                  <tr key={d.orderNumber}><td>{d.orderNumber}</td><td><Link to={`/customers/${d.customerId}`}>{d.customer}</Link> <span className="muted small">({d.cycle.toLowerCase()})</span></td>
+                    <td className="small">{d.lines.map((l) => `${qty(l.bottlesPerCase, l.cases, l.bottles)} ${short(l.name)}`).join(', ')}</td></tr>
+                ))}</tbody>
+              </table>
+            </>
+          )}
+        </section>
+
+        <section className="panel">
+          <h2 className="side-h">2. Money collected</h2>
+          {m.payments.length === 0 ? <p className="muted" style={{ margin: 0 }}>No payments dated this day.</p> : (
+            <>
+              <div className="report-grid">
+                <div>
+                  <div className="muted small">By method</div>
+                  {m.byMethod.map((g) => <div className="total-line" key={g.label}><span>{g.label} ({g.count})</span><span>{money(g.cents)}</span></div>)}
+                  <div className="total-line grand"><span>Received and confirmed</span><span>{money(m.confirmedCents)}</span></div>
+                  {m.provisionalCents !== 0 && <div className="total-line"><span>On rounds, not settled yet</span><span>{money(m.provisionalCents)}</span></div>}
+                </div>
+                <div>
+                  <div className="muted small">Taken by</div>
+                  {m.byWho.map((g) => <div className="total-line" key={g.label}><span>{g.label} ({g.count})</span><span>{money(g.cents)}</span></div>)}
+                </div>
+              </div>
+              <div className="table-scroll" style={{ marginTop: 12 }}>
+                <table className="phone-cards">
+                  <thead><tr><th>Time</th><th>Customer</th><th>Method</th><th>Receipt · invoice</th><th>Taken by</th><th className="num">Amount</th></tr></thead>
+                  <tbody>{m.payments.map((p) => (
+                    <tr key={p.id}>
+                      <td data-label="Time" className="small">{p.at}</td><td data-label="Customer">{p.customer}</td>
+                      <td data-label="Method">{p.method}{p.reversal && <span className="muted small"> (reversed)</span>}</td>
+                      <td data-label="Receipt" className="small">{[p.receipt, p.invoice].filter(Boolean).join(' · ') || 'on account'}</td>
+                      <td data-label="Taken by" className="small">{p.takenBy}{!p.confirmed && <div className="muted">not settled</div>}</td>
+                      <td data-label="Amount" className="num">{money(p.amountCents)}</td>
+                    </tr>
+                  ))}</tbody>
+                </table>
+              </div>
+            </>
+          )}
+        </section>
+
+        <section className="panel">
+          <h2 className="side-h">3. Rounds and bottles</h2>
+          {eod.rounds.rounds.length === 0 ? <p className="muted" style={{ margin: 0 }}>No rounds this day.</p> : (
+            <div className="table-scroll">
+              <table className="phone-cards">
+                <thead><tr><th>Round</th><th>Driver</th><th className="num">Stops</th><th className="num">Recorded</th><th className="num">Handed in</th><th className="num">Bottles out / back</th></tr></thead>
+                <tbody>{eod.rounds.rounds.map((r) => (
+                  <tr key={r.id}>
+                    <td data-label="Round"><Link to={`/delivery/${r.id}`}>{r.zone}</Link>
+                      <div className="muted small">{r.status === 'Completed' ? 'settled' : !r.started ? 'not started' : r.pending > 0 ? 'on the road' : 'back, to settle'}</div></td>
+                    <td data-label="Driver" className="small">{r.driver ?? '—'}</td>
+                    <td data-label="Stops" className="num">{r.delivered} of {r.stops} delivered
+                      {(r.missed > 0 || r.pending > 0) && <div className="muted small">{[r.missed ? `${r.missed} not delivered` : '', r.pending ? `${r.pending} not done` : ''].filter(Boolean).join(', ')}</div>}</td>
+                    <td data-label="Recorded" className="num">{money(r.recordedCents)}</td>
+                    <td data-label="Handed in" className="num">{r.handedInCents === null ? <span className="muted">not settled</span> : money(r.handedInCents)}
+                      {r.cashVarianceCents ? <div className={`small ${r.cashVarianceCents < 0 ? 'bad-text' : 'muted'}`}>{r.cashVarianceCents < 0 ? 'short ' : 'over '}{money(Math.abs(r.cashVarianceCents))}</div> : null}</td>
+                    <td data-label="Bottles" className="num">{r.fullOut} / {r.emptiesCounted ?? r.emptiesRecorded}</td>
+                  </tr>
+                ))}</tbody>
+              </table>
+            </div>
+          )}
+        </section>
+
+        <section className="panel">
+          <h2 className="side-h">4. Orders</h2>
+          {([['Taken today', eod.orders.taken, true], [`Booked for ${day(eod.tomorrow)}`, eod.orders.booked, false]] as const).map(([title, rows, withFor]) => (
+            <div key={title} style={{ marginBottom: 12 }}>
+              <h3 style={{ margin: '4px 0' }}>{title} ({rows.length})</h3>
+              {rows.length === 0 ? <p className="muted" style={{ margin: 0 }}>None.</p> : (
+                <div className="table-scroll">
+                  <table className="phone-cards">
+                    <thead><tr><th>Order</th><th>Customer</th><th>{withFor ? 'For' : 'Zone'}</th><th>Items</th><th>From</th></tr></thead>
+                    <tbody>{rows.map((o) => (
+                      <tr key={o.orderId}>
+                        <td data-label="Order"><Link to={`/orders?find=${o.number}`}>{o.number}</Link></td>
+                        <td data-label="Customer">{o.customer}</td>
+                        <td data-label={withFor ? 'For' : 'Zone'} className="small">{withFor ? `${o.mode === 'Pickup' ? 'collect ' : ''}${o.forDay ? day(o.forDay) : '—'}` : (o.zone ?? (o.mode === 'Pickup' ? 'collect' : '—'))}</td>
+                        <td data-label="Items" className="small">{o.items}</td>
+                        <td data-label="From" className="small">{o.source}</td>
+                      </tr>
+                    ))}</tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+          ))}
+        </section>
       </>
     );
   };
@@ -641,7 +927,7 @@ export default function Reports() {
     );
   };
 
-  const body = tab === 'sales' ? salesTab() : tab === 'transactions' ? transactionsTab() : tab === 'margin' ? marginTab() : tab === 'rounds' ? roundsTab() : tab === 'loadings' ? loadingsTab() : tab === 'owed' ? owedTab()
+  const body = tab === 'sales' ? salesTab() : tab === 'eod' ? eodTab() : tab === 'transactions' ? transactionsTab() : tab === 'margin' ? marginTab() : tab === 'rounds' ? roundsTab() : tab === 'loadings' ? loadingsTab() : tab === 'owed' ? owedTab()
     : tab === 'bottles' ? bottlesTab() : tab === 'discounts' ? discountsTab() : materialsTab();
 
   return (
@@ -650,29 +936,42 @@ export default function Reports() {
         <div>
           <h1>Reports</h1>
           <p className="subtitle" style={{ marginBottom: 0 }}>
-            {!periodMatters ? 'As of today.'
+            {tab === 'eod' ? <>One day: sales, money collected, rounds and orders.</>
+              : !periodMatters ? 'As of today.'
               : tab === 'bottles' ? <>From rounds dated {range.label === 'all time' ? 'at any time' : `in ${range.label}`}, and where the bottles are today.</>
                 : tab === 'rounds' ? <>Rounds dated {range.label === 'all time' ? 'at any time' : `in ${range.label}`}.</>
                 : <>From invoices dated {range.label === 'all time' ? 'at any time' : `in ${range.label}`}, before GCT unless it says otherwise.</>}
           </p>
         </div>
         <div className="record-actions">
-          {periodMatters && (
-            <>
-              <label htmlFor="period" className="visually-hidden">Period</label>
-              <select id="period" value={period} onChange={(e) => setPeriod(e.target.value as Period)}>
-                <option value="month">{rangeFor('month', custom).label}</option>
-                <option value="last">{rangeFor('last', custom).label}</option>
-                <option value="year">{rangeFor('year', custom).label}</option>
-                <option value="all">All time</option>
-                <option value="custom">Choose dates…</option>
-              </select>
-            </>
+          {tab === 'eod' && (
+            <button className="secondary" onClick={() => { setError(null); openPdf(`/api/reports/end-of-day.pdf?day=${eodDay}`).catch((e) => setError(e.message)); }}>
+              Open PDF</button>
           )}
           <button className="secondary" onClick={exportTab}>Export to Excel</button>
-          <button className="secondary" onClick={() => window.print()}>Print</button>
+          {tab !== 'eod' && <button className="secondary" onClick={() => window.print()}>Print</button>}
         </div>
       </div>
+      {periodMatters && (
+        <div className="pills" role="group" aria-label="Period">
+          {PERIODS.map(([k, label]) => (
+            <button key={k} type="button" className={`pill${period === k ? ' active' : ''}`} aria-pressed={period === k}
+                    onClick={() => setPeriod(k)}>{label}</button>
+          ))}
+        </div>
+      )}
+      {tab === 'eod' && (
+        <div className="row" style={{ marginBottom: 10, alignItems: 'center', gap: 8 }}>
+          <div className="pills" role="group" aria-label="Day" style={{ margin: 0 }}>
+            {([['Today', todayInJamaica()], ['Yesterday', new Date(Date.parse(`${todayInJamaica()}T12:00:00Z`) - 86_400_000).toISOString().slice(0, 10)]] as const).map(([label, d]) => (
+              <button key={label} type="button" className={`pill${eodDay === d ? ' active' : ''}`} aria-pressed={eodDay === d} onClick={() => setEodDay(d)}>{label}</button>
+            ))}
+          </div>
+          <label htmlFor="eod-day" className="visually-hidden">Day</label>
+          <input id="eod-day" type="date" value={eodDay} max={todayInJamaica()} onChange={(e) => e.target.value && setEodDay(e.target.value)} />
+          <span className="muted small">{day(eodDay)}</span>
+        </div>
+      )}
       {periodMatters && period === 'custom' && (
         <div className="row" style={{ marginBottom: 10 }}>
           <div className="field"><label htmlFor="rf">From</label>

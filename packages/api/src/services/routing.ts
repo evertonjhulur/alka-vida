@@ -234,3 +234,71 @@ export async function removeStop(
     return { orderRef: stop.order_ref };
   });
 }
+
+/**
+ * Delete a round (Everton, 27 Oct 2026: "I cannot delete a round when it is
+ * created"). Office or admin, for a round that has not started and has
+ * nothing recorded on it: no stop worked, no money taken, no collection done.
+ * Its orders come off it and wait for delivery again (put them on another
+ * round, or they go on the next one made for their day). A logged loading
+ * that the driver has not confirmed goes back on the warehouse shelf.
+ */
+export async function deleteRound(
+  db: Db, actor: Actor, sheetId: string,
+): Promise<{ zone: string; day: string; ordersBackToWaiting: string[]; stockBack: Array<{ name: string; bottles: number }> }> {
+  requireRole(actor, 'admin', 'user');
+  return db.tx(async (t) => {
+    const s = await t.maybeOne<{ zone: string; day: string; status: string; started_at: string | null }>(
+      `SELECT zone, delivery_date::text AS day, status, started_at FROM delivery_sheets WHERE id = $1 FOR UPDATE`, [sheetId]);
+    if (!s) throw new RuleViolation('that round no longer exists');
+    if (s.status !== 'Open') throw new RuleViolation('a settled round cannot be deleted');
+    if (s.started_at) throw new RuleViolation('this round has started; take the stops off it one by one, or settle it');
+    const worked = await t.one<{ n: number }>(
+      `SELECT COUNT(*)::int AS n FROM delivery_stops WHERE delivery_sheet_id = $1
+         AND (stop_outcome <> 'Pending' OR invoice_id IS NOT NULL OR settled_at IS NOT NULL OR payment_amount_cents > 0)`, [sheetId]);
+    if (Number(worked.n) > 0) {
+      throw new RuleViolation(`${worked.n} stop${Number(worked.n) === 1 ? ' is' : 's are'} already recorded on this round, so it cannot be deleted. Settle it instead.`);
+    }
+    const money = await t.one<{ n: number }>(`SELECT COUNT(*)::int AS n FROM payments WHERE delivery_sheet_id = $1`, [sheetId]);
+    if (Number(money.n) > 0) throw new RuleViolation('money is recorded on this round, so it cannot be deleted. Settle it instead.');
+    const coll = await t.one<{ n: number }>(
+      `SELECT COUNT(*)::int AS n FROM round_collections WHERE delivery_sheet_id = $1 AND status <> 'Pending'`, [sheetId]);
+    if (Number(coll.n) > 0) throw new RuleViolation('a collection is recorded on this round, so it cannot be deleted. Settle it instead.');
+
+    // A loading logged but not confirmed by the driver: the goods go back on the shelf.
+    const stockBack: Array<{ name: string; bottles: number }> = [];
+    const load = await t.maybeOne<{ returned_at: string | null }>(
+      `SELECT returned_at FROM round_loads WHERE delivery_sheet_id = $1`, [sheetId]);
+    if (load && !load.returned_at) {
+      const lines = await t.query<{ product_id: string; name: string; loaded: number }>(
+        `SELECT l.product_id, p.name, l.loaded_bottles AS loaded
+         FROM round_load_lines l JOIN products p ON p.id = l.product_id
+         WHERE l.delivery_sheet_id = $1 AND l.loaded_bottles > 0`, [sheetId]);
+      for (const l of lines) {
+        const qty = Number(l.loaded);
+        await t.query(
+          `INSERT INTO finished_goods_stock (product_id, quantity_on_hand) VALUES ($1, $2)
+           ON CONFLICT (product_id) DO UPDATE
+             SET quantity_on_hand = finished_goods_stock.quantity_on_hand + EXCLUDED.quantity_on_hand`,
+          [l.product_id, qty]);
+        await t.query(
+          `INSERT INTO inventory_transactions
+             (item_type, item_id, item_name, quantity, direction, reference, reference_type, notes)
+           VALUES ('FinishedGoods',$1,$2,$3,'in',$4,'TruckReturn',$5)`,
+          [l.product_id, l.name, qty, `Round ${s.day}, ${s.zone}`, `Round deleted by ${actor.name}; loading put back`]);
+        stockBack.push({ name: l.name, bottles: qty });
+      }
+    }
+
+    const orders = await t.query<{ order_ref: string | null }>(
+      `SELECT order_ref FROM delivery_stops WHERE delivery_sheet_id = $1 AND order_id IS NOT NULL ORDER BY sequence_no`, [sheetId]);
+    // Stops, their lines, the loading and planned collections go with the round (ON DELETE CASCADE).
+    await t.query(`DELETE FROM delivery_stops WHERE delivery_sheet_id = $1 AND after_stop_id IS NOT NULL`, [sheetId]);
+    await t.query(`DELETE FROM delivery_sheets WHERE id = $1`, [sheetId]);
+    const ordersBackToWaiting = orders.map((o) => o.order_ref).filter((x): x is string => !!x);
+    await audit(t, actor, 'delete', 'DeliverySheet', sheetId, `${s.zone} ${s.day}`, {
+      roundDeleted: true, ordersBackToWaiting, stockBack,
+    });
+    return { zone: s.zone, day: s.day, ordersBackToWaiting, stockBack };
+  });
+}

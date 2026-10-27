@@ -9,8 +9,9 @@
  *
  * When the week (Monday to Sunday) or the calendar month has closed, one real
  * invoice is raised for everything delivered in it, each line carrying the
- * date and order it came from. It is due ON RECEIPT (Everton's ruling), so
- * its due date is its invoice date. Money the driver collected in the
+ * date and order it came from. It is dated the last day of the week or month
+ * (27 Oct 2026) and due ON RECEIPT (Everton's ruling): due the day it is
+ * raised. Money the driver collected in the
  * meantime is already on the account as an unattached payment, and is
  * applied to the new invoice straight away.
  *
@@ -225,8 +226,12 @@ export async function raiseCycleInvoices(
         lines: items.flatMap((it) => it.lines),
         discountFixedCents: discount,
         gctExempt,
-        invoiceDate: today,
-        // Due on receipt.
+        // A closed week or month is dated its LAST day (Everton, 27 Oct 2026),
+        // so October's deliveries are October's sales even though the invoice
+        // is raised on 1 November. Still due on receipt: due the day it is
+        // raised, so it is never overdue the moment it exists. "Invoice now"
+        // is dated the day it is raised.
+        invoiceDate: mode === 'closed' && g.cycle !== null ? g.to : today,
         dueDate: today,
         cycle: (g.cycle as 'Weekly' | 'Monthly' | null) ?? null,
         periodFrom: g.from,

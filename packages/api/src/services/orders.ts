@@ -593,6 +593,27 @@ export async function placeOnDeliverySheet(
   addressId: string | null = null,
 ): Promise<{ sheetId: string | null; stopId: string | null; warnings: string[] }> {
   const warnings: string[] = [];
+
+  // Never a second time (Everton, 27 Oct 2026: SO-001018 was delivered on a
+  // round, then approving its same-day request put it on a new round). An
+  // order already delivered or cancelled is not placed; one already waiting
+  // on an open round stays where it is.
+  const state = await t.one<{ status: string; order_number: string }>(
+    `SELECT status, order_number FROM customer_orders WHERE id = $1`, [orderId]);
+  if (state.status === 'Delivered' || state.status === 'Cancelled') {
+    return { sheetId: null, stopId: null,
+      warnings: [`${state.order_number} is already ${state.status.toLowerCase()}, so it was not put on a round again.`] };
+  }
+  const already = await t.maybeOne<{ stop_id: string; sheet_id: string; zone: string; day: string }>(
+    `SELECT st.id AS stop_id, ds.id AS sheet_id, ds.zone, ds.delivery_date::text AS day
+     FROM delivery_stops st JOIN delivery_sheets ds ON ds.id = st.delivery_sheet_id
+     WHERE st.order_id = $1 AND st.stop_outcome = 'Pending' AND ds.status = 'Open'
+     ORDER BY ds.delivery_date LIMIT 1`, [orderId]);
+  if (already) {
+    return { sheetId: already.sheet_id, stopId: already.stop_id,
+      warnings: [`${state.order_number} is already on the ${already.zone} round for ${already.day}.`] };
+  }
+
   const customer = await deliveryTarget(t, customerId, addressId);
 
   // Warn rather than silently proceeding, so the office is prompted to set one.
@@ -636,6 +657,28 @@ export async function placeOnDeliverySheet(
   );
 
   return { sheetId: sheet.id, stopId: stop.id, warnings };
+}
+
+/**
+ * An order waiting under Needs a decision for its day (same-day after the
+ * cut-off, or not one of the customer's days) that the office puts on a round
+ * or records delivered anyway: that IS the decision. The request is marked
+ * approved with a note, so approving it later cannot place the order a second
+ * time (27 Oct 2026).
+ */
+export async function settleDateRequest(t: Queryable, actor: Actor, orderId: string, how: string): Promise<boolean> {
+  const o = await t.maybeOne<{ needs_review: boolean; order_number: string }>(
+    `SELECT needs_review, order_number FROM customer_orders WHERE id = $1`, [orderId]);
+  const pending = await t.query<{ id: string }>(
+    `UPDATE approval_requests SET status = 'Approved', reviewed_by_id = $2, reviewed_date = now(), review_notes = $3
+     WHERE entity_id = $1 AND status = 'Pending' AND request_type IN ('SameDayOrder','SpecialDayOrder')
+     RETURNING id`, [orderId, actor.id, how]);
+  if (!o?.needs_review && pending.length === 0) return false;
+  await t.query(`UPDATE customer_orders SET needs_review = false WHERE id = $1`, [orderId]);
+  await audit(t, actor, 'update', 'CustomerOrder', orderId, o?.order_number ?? orderId, {
+    dateRequestSettled: how, approvalRequests: pending.map((r) => r.id),
+  });
+  return true;
 }
 
 export async function summariseOrderLines(t: Queryable, orderId: string): Promise<string> {
@@ -925,8 +968,12 @@ export async function listOrders(
    * against.
    */
   return db.query(
-    `SELECT o.*, c.name AS customer_name, c.delivery_zone AS customer_zone,
+    `SELECT o.*, c.name AS customer_name, c.delivery_zone AS customer_zone, c.email AS customer_email,
             business_today() AS today,
+            -- The last order-confirmation email, sent or tried (27 Oct 2026).
+            (SELECT json_build_object('at', ae.created_at, 'to', ae.sent_to, 'ok', ae.ok, 'detail', ae.detail)
+               FROM auto_emails ae WHERE ae.kind = 'OrderPlaced' AND ae.period_key = o.order_number
+              ORDER BY ae.created_at DESC LIMIT 1) AS confirmation_email,
             (SELECT string_agg(
                       CASE WHEN oli.cases > 0 AND oli.loose_bottles > 0
                              THEN oli.cases || ' cs + ' || oli.loose_bottles || ' '

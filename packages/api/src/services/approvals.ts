@@ -311,6 +311,15 @@ async function decideSameDayOrder(
      FROM customer_orders WHERE id = $1 FOR UPDATE`, [orderId],
   );
   if (o.status === 'Cancelled') return;
+  // Already delivered (or part delivered) while it waited for this decision:
+  // nothing to place and no date to change (27 Oct 2026, SO-001018).
+  if (o.status === 'Delivered' || o.status === 'Partially Delivered') {
+    await t.query(`UPDATE customer_orders SET needs_review = false WHERE id = $1`, [orderId]);
+    await audit(t, actor, 'update', 'CustomerOrder', orderId, o.order_number, {
+      [specialDay ? 'specialDayDecision' : 'sameDayDecision']: decision, alreadyDelivered: true,
+    });
+    return;
+  }
   const today = businessToday();
   let date: string | null;
   if (chosenDate) {

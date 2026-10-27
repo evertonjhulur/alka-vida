@@ -20,7 +20,7 @@ import { RuleViolation, validateAllocation, assertQuantityShape, totalBottles } 
 import { createInvoice, openInvoicesForCustomer } from './invoices.ts';
 import { applyAccountCredit } from './payments.ts';
 import {
-  addBottleChargeLine, bottleChargeProduct, deliveryTarget, placeOnDeliverySheet, recomputeDelivered,
+  addBottleChargeLine, bottleChargeProduct, deliveryTarget, placeOnDeliverySheet, recomputeDelivered, settleDateRequest,
   refreshOrderStatus, summariseOrderLines, summariseRemaining,
 } from './orders.ts';
 import { applyDeliveryMovement, bottleAccount, recordBottlesSold } from './bottles.ts';
@@ -934,6 +934,12 @@ export async function addOrderToSheet(
       );
     }
     const customer = await deliveryTarget(t, order.customer_id, order.address_id);
+    // Waiting for a same-day / special-day decision? Putting it on a round decides it.
+    const sheetInfo = await t.one<{ zone: string; day: string }>(
+      `SELECT zone, delivery_date::text AS day FROM delivery_sheets WHERE id = $1`, [sheetId]);
+    if (await settleDateRequest(t, actor, orderId, `Put on the ${sheetInfo.zone} round for ${sheetInfo.day} by ${actor.name}`)) {
+      await t.query(`UPDATE customer_orders SET requested_delivery_date = $2::date WHERE id = $1`, [orderId, sheetInfo.day]);
+    }
 
     // Without this the driver gets a stop with no idea what to put on the
     // van - the auto-routed path has always filled it, the manual one did not.

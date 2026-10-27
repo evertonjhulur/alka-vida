@@ -113,9 +113,14 @@ async function sendLogged(
  * for occurrences a standing order raises on its own a week ahead (the
  * delivery email covers those), nor counter sales.
  */
-export async function sendOrderPlacedEmail(db: Db, orderId: string): Promise<{ sent: boolean; reason?: string }> {
+export async function sendOrderPlacedEmail(
+  db: Db, orderId: string, opts: { to?: string | null; manual?: boolean } = {},
+): Promise<{ sent: boolean; reason?: string; sentTo?: string }> {
   if (!mailConfigured()) return { sent: false, reason: 'email is not set up' };
-  if ((await getSetting(db, 'order_placed_emails', 'true')) !== 'true') return { sent: false, reason: 'switched off' };
+  // Sent by hand from the Orders screen (27 Oct 2026): goes even when the
+  // automatic ones are switched off, and again if it went before.
+  const manual = !!opts.manual;
+  if (!manual && (await getSetting(db, 'order_placed_emails', 'true')) !== 'true') return { sent: false, reason: 'switched off' };
   const o = await db.maybeOne<{
     order_number: string; customer_id: string; name: string; email: string | null;
     delivery_mode: string; requested_delivery_date: string | null; grand_total_cents: number;
@@ -134,10 +139,11 @@ export async function sendOrderPlacedEmail(db: Db, orderId: string): Promise<{ s
      WHERE o.id = $1`, [orderId],
   );
   if (!o) return { sent: false, reason: 'no such order' };
-  if (o.delivery_mode === 'Counter' || o.parent_recurring_id) return { sent: false, reason: 'not for this kind of order' };
-  if (!o.email?.trim()) return { sent: false, reason: 'no email for this customer' };
-  if (!(await customerWants(db, o.customer_id, 'orders'))) return { sent: false, reason: 'they have turned these off' };
-  if (await alreadySent(db, 'OrderPlaced', o.order_number)) return { sent: false, reason: 'already sent' };
+  if (o.delivery_mode === 'Counter' || (!manual && o.parent_recurring_id)) return { sent: false, reason: 'not for this kind of order' };
+  const to = (opts.to ?? '').trim() || o.email?.trim() || '';
+  if (!to) return { sent: false, reason: 'no email for this customer' };
+  if (!manual && !(await customerWants(db, o.customer_id, 'orders'))) return { sent: false, reason: 'they have turned these off' };
+  if (!manual && await alreadySent(db, 'OrderPlaced', o.order_number)) return { sent: false, reason: 'already sent' };
 
   const collect = o.delivery_mode === 'Pickup';
   const whenText = collect
@@ -168,8 +174,38 @@ export async function sendOrderPlacedEmail(db: Db, orderId: string): Promise<{ s
     outro: (o.empties_expected != null ? `Empties to be returned: ${o.empties_expected}\n\n` : '')
       + 'The invoice is made out from what is actually delivered.',
   });
-  return sendLogged(db, 'OrderPlaced', o.order_number, o.customer_id, o.email.trim(),
-    `Alka Vida order ${o.order_number} received`, mail, 'order confirmation');
+  const r = await sendLogged(db, 'OrderPlaced', o.order_number, o.customer_id, to,
+    `Alka Vida order ${o.order_number} received`, mail, manual ? 'order confirmation, sent by hand' : 'order confirmation');
+  return { ...r, sentTo: to };
+}
+
+/**
+ * The office emails an order's confirmation by hand (Everton, 27 Oct 2026:
+ * "I cannot manually email a customer the confirmation of their order").
+ * To the address on file or one typed in; any order still to be delivered or
+ * collected; again as often as needed. Says plainly why when it cannot go.
+ */
+export async function emailOrderConfirmation(
+  db: Db, actor: Actor, orderId: string, input: { to?: string | null },
+): Promise<{ sentTo: string; orderNumber: string }> {
+  requireRole(actor, 'admin', 'user');
+  if (!mailConfigured()) throw new RuleViolation('Email is not set up yet, so nothing can be sent.');
+  const o = await db.maybeOne<{ order_number: string; status: string; delivery_mode: string; name: string; email: string | null }>(
+    `SELECT o.order_number, o.status, o.delivery_mode, c.name, c.email
+     FROM customer_orders o JOIN customers c ON c.id = o.customer_id WHERE o.id = $1`, [orderId]);
+  if (!o) throw new RuleViolation('that order no longer exists');
+  if (o.delivery_mode === 'Counter') throw new RuleViolation('a counter sale has its receipt and invoice instead');
+  if (o.status === 'Cancelled') throw new RuleViolation(`${o.order_number} is cancelled`);
+  if (o.status === 'Delivered') throw new RuleViolation(`${o.order_number} is already delivered; email the invoice instead`);
+  const typed = String(input.to ?? '').trim();
+  if (typed && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(typed)) throw new RuleViolation(`"${typed}" is not an email address`);
+  if (!typed && !o.email?.trim()) {
+    throw new RuleViolation(`${o.name} has no email address on file. Add one to their record, or type an address to send this to.`);
+  }
+  const r = await sendOrderPlacedEmail(db, orderId, { to: typed || null, manual: true });
+  if (!r.sent) throw new RuleViolation(`The confirmation could not be sent: ${r.reason ?? 'unknown reason'}`);
+  await audit(db, actor, 'update', 'Order', orderId, o.order_number, { emailedConfirmationTo: r.sentTo });
+  return { sentTo: r.sentTo!, orderNumber: o.order_number };
 }
 
 /** "Your water was delivered", with the invoice attached when there is one. */

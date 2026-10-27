@@ -2186,3 +2186,88 @@ delete/void at any stage with a reason.
   changed parts are sent. "Void…" (admin) with what will happen listed.
   A voided invoice shows "Void", the reason, and "nothing owed".
 - Tests: new `api/test/invoiceedit.test.ts` (4). 550 API tests pass.
+
+## Total sales, one-click periods, end of day (27 Oct 2026)
+
+Everton: the Sales report "only shows orders paid for and not a total
+sales"; wants an end-of-day report and one-click Today / Yesterday / This
+week / This month / Last month / This year. Cause: customers invoiced weekly
+or monthly (33 in the upload) raise no invoice per delivery, so their
+deliveries were missing until the period's invoice - and that invoice was
+dated the day it was raised (1 Nov for October).
+
+Rulings: Sales keeps counting invoices by invoice date, PLUS a separate line
+for deliveries not invoiced yet; weekly/monthly invoices are dated the LAST
+day of their period; end of day = sales, money collected, rounds and bottles,
+orders taken + booked for tomorrow; on screen + printable PDF (no email).
+
+- `cycles.raiseCycleInvoices` (mode 'closed'): invoice_date = the period's
+  last day (Sunday / month end); due_date = the day it is raised (due on
+  receipt, never overdue at birth). "Invoice now" still dated today.
+- `reports.notYetInvoiced(db, from, to)`: `pendingDeliveries` in the range,
+  counted on the delivery day, after the order's discount, GCT as the
+  invoice will charge it. `salesReport` returns `notInvoiced` and
+  `totals.totalSalesNetCents / totalSalesGrossCents` (= invoiced after credit
+  notes + not invoiced). The invoiced figure stays the one to post.
+- Sales and Sales transactions now leave out QuickBooks opening balances
+  (`is_opening_balance`) - they are carried-over balances, not sales.
+- `services/endofday.ts`: `endOfDay(db, day)` and `renderEndOfDayPdf`;
+  `GET /api/reports/end-of-day?day=` and `/api/reports/end-of-day.pdf?day=`
+  (admin, office). Orders "taken" = created that day, not standing-order
+  copies, not counter sales, not sales recorded for an earlier day.
+- Reports screen: period pills (choice remembered per browser); new
+  "End of day" tab with Today / Yesterday / date, Open PDF (new tab),
+  Export to Excel. Sales tab shows Total sales, the not-invoiced line and a
+  "Delivered, not invoiced yet" table.
+- Tests: new `api/test/endofday.test.ts` (3); revisions test updated for the
+  month-end invoice date. 553 API tests pass.
+
+## Email an order's confirmation by hand (27 Oct 2026)
+
+Everton: "I cannot manually email a customer the confirmation of their order."
+
+- `messaging.sendOrderPlacedEmail(db, orderId, { to?, manual? })`: with
+  `manual` it goes even when the automatic order emails are switched off or
+  the customer opted out, again if it went before, and to `to` when given.
+  Logged in auto_emails as 'OrderPlaced' like the automatic one.
+- `messaging.emailOrderConfirmation(db, actor, orderId, { to })` (admin,
+  office): refuses counter sales, cancelled and delivered orders (email the
+  invoice instead), a typed address that is not an email, and a customer
+  with no address on file when none is typed; says plainly why when sending
+  fails. Audited on the order. `POST /api/orders/:id/email-confirmation`.
+- `listOrders` now returns `customer_email` and `confirmation_email` (the
+  last OrderPlaced email: when, to whom, sent or failed and why).
+- Orders screen: ⋯ menu -> "Email the order confirmation": address filled
+  from the customer's record (can be changed for this one send), Send it,
+  and when it was last sent or why the last try failed.
+- Tests: new `api/test/orderemail.test.ts`. 554 API tests pass.
+
+## One round per order; delete a round (27 Oct 2026)
+
+Everton: "I cannot delete a round when it is created" and SO-001018 (7 Basiks)
+was on two rounds the same day. Audit of the live data: Collin entered it
+after the same-day cut-off (so it waited under Needs a decision), added it
+to the Portmore/Downtown round by hand, recorded it delivered and settled the
+round; approving the same-day request afterwards placed it again, and as the
+round was settled `placeOnDeliverySheet` opened a second Portmore/Downtown
+round for the day with the order "to deliver".
+
+- `orders.placeOnDeliverySheet`: never places an order already Delivered or
+  Cancelled, and returns the existing stop when the order is already waiting
+  on an open round. Covers every caller (new order, edit, approval,
+  reschedule, remainder).
+- `orders.settleDateRequest`: putting an order that waits for a same-day /
+  special-day decision on a round by hand (`delivery.addOrderToSheet`) IS the
+  decision: its pending request is marked Approved with a note, needs_review
+  cleared, delivery date set to the round's day.
+- `approvals.decideSameDayOrder`: an order already (part) delivered is not
+  placed and its date is not changed; the decision is just recorded.
+- `routing.deleteRound(db, actor, sheetId)` (admin, office),
+  `DELETE /api/delivery-sheets/:id`: only an Open round not started, with no
+  stop recorded, no money and no collection done. Its orders come off and
+  wait again; a loading logged but not confirmed by the driver goes back on
+  the warehouse (ledger 'TruckReturn'). Round page: "Made by mistake? Delete
+  this round".
+- Tests: new `api/test/rounds.test.ts` (4). 558 API tests pass.
+- Live data left to tidy by hand: take SO-001018 off the second
+  Portmore/Downtown round of 26 Oct, then delete that round.

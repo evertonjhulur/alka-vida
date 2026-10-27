@@ -289,7 +289,9 @@ describe('Weekly and monthly invoicing', () => {
 
     const inv = await f.db.one<Record<string, unknown>>(
       `SELECT invoice_date::text AS d, due_date::text AS due, cycle FROM invoices WHERE id = $1`, [mine[0].invoiceId]);
-    assert.equal(inv.due, inv.d, 'due on receipt');
+    // Dated the month's last day (27 Oct 2026), due the day it was raised.
+    assert.equal(inv.d, '2026-08-31', 'dated the last day of the month');
+    assert.equal(inv.due, '2026-09-01', 'due on receipt: the day it was raised');
     assert.equal(inv.cycle, 'Monthly');
     const lines = await f.db.query<{ delivered_on: string; reference: string }>(
       `SELECT delivered_on::text AS delivered_on, reference FROM invoice_line_items

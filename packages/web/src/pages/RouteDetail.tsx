@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
-import { Link, useParams } from 'react-router-dom';
+import { Link, useNavigate, useParams } from 'react-router-dom';
+import { ask } from '../components/Dialog';
 import { api, openPdf, type Session } from '../lib/api';
 import SortStopsPanel from '../components/SortStopsPanel';
 import { money, date, day, time, when } from '../lib/format';
@@ -85,6 +86,7 @@ export default function RouteDetail({ session }: { session: Session }) {
   const [adding2, setAdding2] = useState(false);
 
   const office = session.role === 'admin' || session.role === 'user';
+  const navigate = useNavigate();
 
   const load = useCallback(async () => {
     try {
@@ -140,6 +142,25 @@ export default function RouteDetail({ session }: { session: Session }) {
     return `${stop.order_ref ?? stop.customer_name} taken off this route. ` +
            `The order is waiting for delivery again.`;
   });
+
+  /** Delete a round made by mistake (27 Oct 2026): not started, nothing recorded. */
+  async function deleteRound() {
+    if (!sheet) return;
+    const n = sheet.stops.filter((s) => s.order_ref).length;
+    const ok = await ask(`Delete the ${sheet.zone} round for ${day(sheet.delivery_date)}?`
+      + (n ? (n === 1 ? ' Its order comes off it and waits for delivery again.' : ` Its ${n} orders come off it and wait for delivery again.`) : ' It has no orders on it.')
+      + (sheet.truck ? ' The loading logged for it goes back on the warehouse shelf.' : ''),
+    { confirmLabel: 'Delete the round', danger: true });
+    if (!ok) return;
+    setBusy(true); setError(null); setMsg(null);
+    try {
+      await api.del(`/api/delivery-sheets/${sheet.id}`);
+      navigate('/delivery', { replace: true });
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'The round could not be deleted');
+      setBusy(false);
+    }
+  }
 
   /** Move a stop up or down, then persist the whole visit order. */
   const move = (index: number, by: number) => act(async () => {
@@ -218,6 +239,12 @@ export default function RouteDetail({ session }: { session: Session }) {
         <div className="notice info">
           This round has been settled. It is shown for reference and cannot be changed.
         </div>
+      )}
+      {office && open && !sheet.started_at && worked === 0 && (
+        <p className="small" style={{ marginTop: -6 }}>
+          Made by mistake?{' '}
+          <button type="button" className="as-link small bad-text" disabled={busy} onClick={deleteRound}>Delete this round</button>
+        </p>
       )}
 
       <ol className="steps" aria-label="Round progress">

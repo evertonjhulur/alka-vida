@@ -6,7 +6,7 @@ import { BatchBar, MultiStatusSelect, SortTh, TickAllTh, TickTd, passes, useSort
 import { OPEN_STAGES, ORDER_STAGES, STAGE_WORDS, orderStage, type OrderStage } from '../lib/orderStatus';
 import { downloadCsv, dollars } from '../lib/csv';
 import { payMethods, useTakeCard } from '../lib/payments';
-import { money, date, day, relDay, toCents, todayInJamaica } from '../lib/format';
+import { money, date, day, time, relDay, toCents, todayInJamaica } from '../lib/format';
 
 /**
  * Orders: what is waiting, and what happened to the rest.
@@ -37,6 +37,9 @@ interface Order {
   /** Pending until the round's load is logged or it is marked ready (15 Oct 2026). */
   ready_at?: string | null; load_logged_at?: string | null; seen_at?: string | null;
   fulfilled_on?: string | null;
+  /** For emailing the confirmation by hand (27 Oct 2026). */
+  customer_email?: string | null;
+  confirmation_email?: { at: string; to: string | null; ok: boolean; detail: string | null } | null;
 }
 interface Addr { id: string; label: string; address_line1: string | null; is_delivery: boolean }
 interface Product {
@@ -56,7 +59,7 @@ interface OrderLine {
  */
 const ORDER_SHOW: ReadonlyArray<readonly [string, string]> = [['', 'Any status'], ...ORDER_STAGES];
 type When = 'any' | 'today' | 'week' | 'late' | 'range';
-type Panel = 'collect' | 'repeat' | 'offround' | 'cancel' | 'undo';
+type Panel = 'collect' | 'repeat' | 'offround' | 'cancel' | 'undo' | 'email';
 
 /** What undoing a delivery recorded in error will do (26 Oct 2026). */
 interface UndoPlan {
@@ -156,6 +159,7 @@ export default function Orders() {
   const isAdmin = getSession()?.role === 'admin';
   const [undoPlan, setUndoPlan] = useState<UndoPlan | null>(null);
   const [undoWhy, setUndoWhy] = useState('');
+  const [mailTo, setMailTo] = useState('');
   const [paidNow, setPaidNow] = useState('');
   const [paidHow, setPaidHow] = useState('Cash');
   const [repeatEvery, setRepeatEvery] = useState('Weekly');
@@ -332,6 +336,14 @@ export default function Orders() {
     }, 'Could not cancel');
   }
 
+  /** The order confirmation, emailed by hand (27 Oct 2026). */
+  async function emailConfirmation(o: Order) {
+    await act(async () => {
+      const r = await api.post<{ sentTo: string }>(`/api/orders/${o.id}/email-confirmation`, { to: mailTo.trim() || undefined });
+      return `Confirmation of ${o.order_number} emailed to ${r.sentTo}.`;
+    }, 'Could not send the confirmation');
+  }
+
   /** Delivered in error (26 Oct 2026): admin only; the order is cancelled. */
   async function undo(o: Order) {
     await act(async () => {
@@ -369,6 +381,7 @@ export default function Orders() {
     }
     if (kind === 'collect') { setPaidNow(''); setPaidHow('Cash'); setEmpties(''); }
     if (kind === 'repeat') setRepeatEvery('Weekly');
+    if (kind === 'email') setMailTo(o.customer_email ?? '');
     setOpen(open?.id === o.id && open.kind === kind ? null : { id: o.id, kind });
   };
 
@@ -472,6 +485,10 @@ export default function Orders() {
         {orderStage(o) === 'ready' && o.ready_at && !o.load_logged_at && (
           <button role="menuitem" className="pop-item pop-button" onClick={() => markReady(o, false)}>Not ready yet</button>
         )}
+        {o.delivery_mode !== 'Counter' && (
+          <button role="menuitem" className="pop-item pop-button"
+                  onClick={() => openPanel(o, 'email')}>Email the order confirmation</button>
+        )}
         <div className="pop-rule" />
         <button role="menuitem" className="pop-item pop-button pop-danger"
                 onClick={() => openPanel(o, 'cancel')}>Cancel order</button>
@@ -558,6 +575,31 @@ export default function Orders() {
             </button>
           </div>
           <div className="field">{close}</div>
+        </>
+      );
+    } else if (open.kind === 'email') {
+      const last = o.confirmation_email;
+      body = (
+        <>
+          <div className="field" style={{ flex: '1 1 260px' }}>
+            <label htmlFor={`mail-${o.id}`}>Send the confirmation of {o.order_number} to</label>
+            <input id={`mail-${o.id}`} type="email" style={{ width: '100%', maxWidth: 340 }} value={mailTo}
+                   placeholder={o.customer_email ? undefined : 'no email on file: type one'}
+                   onChange={(e) => setMailTo(e.target.value)} />
+          </div>
+          <div className="field">
+            <button disabled={busy || !mailTo.trim()} onClick={() => emailConfirmation(o)}>{busy ? 'Sending…' : 'Send it'}</button>
+          </div>
+          <div className="field">{close}</div>
+          <p className="muted small order-panel-note">
+            {last
+              ? last.ok
+                ? <>Last sent {day(last.at)}, {time(last.at)} to {last.to}.</>
+                : <>The last try, {day(last.at)} {time(last.at)}, did not go: {last.detail}.</>
+              : <>Not emailed yet.</>}
+            {' '}The same email the customer gets when the order is placed: the items, the total and the delivery day.
+            {mailTo.trim() && o.customer_email && mailTo.trim() !== o.customer_email && <> Their address on file stays {o.customer_email}.</>}
+          </p>
         </>
       );
     } else if (open.kind === 'undo') {

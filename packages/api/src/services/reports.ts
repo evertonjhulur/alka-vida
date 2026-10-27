@@ -9,6 +9,7 @@
 import type { Db } from '../db/index.ts';
 import type { Cents } from '@alka/shared';
 import { num } from './core.ts';
+import { pendingDeliveries } from './cycles.ts';
 
 export interface DiscountTotals {
   from: string | null;
@@ -296,7 +297,7 @@ export async function bottlesNotRecorded(db: Db) {
  * reduced anything, so it is not taken off.
  */
 const SALES_WHERE = `
-  NOT i.is_credit_note AND i.lifecycle <> 'Cancelled'
+  NOT i.is_credit_note AND i.lifecycle <> 'Cancelled' AND NOT i.is_opening_balance
   AND ($1::date IS NULL OR i.invoice_date >= $1::date)
   AND ($2::date IS NULL OR i.invoice_date <= $2::date)`;
 const NET = `(i.subtotal_cents - CASE WHEN i.discount_status = 'Approved' THEN i.discount_amount_cents ELSE 0 END)`;
@@ -374,9 +375,12 @@ export async function salesReport(db: Db, from?: string | null, to?: string | nu
        AND ($2::date IS NULL OR d.delivery_date <= $2::date)`, p,
   );
 
+  const waiting = await notYetInvoiced(db, from, to);
+
   return {
     from: from ?? null,
     to: to ?? null,
+    notInvoiced: waiting,
     totals: {
       netCents: num(totals.net), grossCents: num(totals.gross), invoices: num(totals.invoices),
       customers: num(totals.customers), newCustomers: from ? num(totals.new_customers) : null,
@@ -388,6 +392,11 @@ export async function salesReport(db: Db, from?: string | null, to?: string | nu
       grossAfterCreditsCents: num(totals.gross) - num(credits.cents),
       gctCents: num(totals.gross) - num(totals.net),
       gctAfterCreditsCents: (num(totals.gross) - num(totals.net)) - num(credits.gct),
+      // Everything sold in the period (Everton, 27 Oct 2026): the invoiced
+      // figure above plus deliveries still waiting for their weekly or
+      // monthly invoice. The invoiced figure stays the one to post.
+      totalSalesNetCents: num(totals.net) - num(credits.net) + waiting.netCents,
+      totalSalesGrossCents: num(totals.gross) - num(credits.cents) + waiting.grossCents,
     },
     byProduct: byProduct.map((r) => ({
       productId: r.product_id, name: r.name, bottlesPerCase: num(r.bottles_per_case),
@@ -398,6 +407,41 @@ export async function salesReport(db: Db, from?: string | null, to?: string | nu
       customerId: r.customer_id, name: r.name, invoices: num(r.invoices), cents: num(r.cents),
     })),
     bottles: { out: num(bottles.out), back: num(bottles.back), lost: num(bottles.lost) },
+  };
+}
+
+/**
+ * Delivered or collected in the period but not yet on an invoice (Everton,
+ * 27 Oct 2026): the customers invoiced weekly or monthly, whose deliveries
+ * raise no invoice until the week or month closes - and whose invoice is
+ * dated the day it is raised. Counted on the day the goods went out, after
+ * the order's discount, GCT worked out as the invoice will.
+ */
+export async function notYetInvoiced(db: Db, from?: string | null, to?: string | null) {
+  const all = await pendingDeliveries(db);
+  const items = all.filter((d) => (!from || d.date >= from) && (!to || d.date <= to));
+  const byCustomer = new Map<string, { customerId: string; name: string; cycle: string; deliveries: number; netCents: number; grossCents: number }>();
+  let net = 0; let gross = 0;
+  for (const d of items) {
+    const off = d.discountFixedCents > 0
+      ? Math.min(d.discountFixedCents, d.subtotalCents)
+      : Math.round(d.subtotalCents * (d.discountPercent / 100));
+    const n = d.subtotalCents - off;
+    const g = n + (d.gctExempt ? 0 : Math.round(n * 0.15));
+    net += n; gross += g;
+    const c = byCustomer.get(d.customerId)
+      ?? { customerId: d.customerId, name: d.customerName, cycle: d.cycle, deliveries: 0, netCents: 0, grossCents: 0 };
+    c.deliveries += 1; c.netCents += n; c.grossCents += g;
+    byCustomer.set(d.customerId, c);
+  }
+  return {
+    deliveries: items.length, netCents: net, grossCents: gross, gctCents: gross - net,
+    customers: [...byCustomer.values()].sort((a, b) => b.netCents - a.netCents),
+    items: items.map((d) => ({
+      date: d.date, customerId: d.customerId, customer: d.customerName, cycle: d.cycle,
+      orderNumber: d.orderNumber, kind: d.kind,
+      lines: d.lines.map((l) => ({ name: l.productName, cases: l.cases, bottles: l.looseBottles, bottlesPerCase: l.bottlesPerCase, cents: l.lineTotal })),
+    })),
   };
 }
 
@@ -579,7 +623,7 @@ export async function salesTransactions(db: Db, from?: string | null, to?: strin
      LEFT JOIN LATERAL (
        SELECT d.zone, d.delivery_date FROM delivery_stops st JOIN delivery_sheets d ON d.id = st.delivery_sheet_id
         WHERE st.invoice_id = i.id LIMIT 1) ds ON true
-     WHERE i.lifecycle <> 'Cancelled'
+     WHERE i.lifecycle <> 'Cancelled' AND NOT i.is_opening_balance
        AND (NOT i.is_credit_note OR i.credit_status = 'Approved')
        AND ($1::date IS NULL OR i.invoice_date >= $1::date)
        AND ($2::date IS NULL OR i.invoice_date <= $2::date)

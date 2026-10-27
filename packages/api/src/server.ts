@@ -21,6 +21,7 @@ import { BUSINESS_TIMEZONE, assertMethodAllowed, type Actor } from './services/c
 import * as orders from './services/orders.ts';
 import * as delivery from './services/delivery.ts';
 import * as roundsheet from './services/roundsheet.ts';
+import * as endofday from './services/endofday.ts';
 import * as undoDelivery from './services/undodelivery.ts';
 import * as routing from './services/routing.ts';
 import * as settlement from './services/settlement.ts';
@@ -451,6 +452,11 @@ export async function buildServer(db: Db) {
       void messaging.sendOrderCancelledEmail(db, (req.params as { id: string }).id, body.reason ?? null).catch(() => {});
       return { ok: true };
     });
+
+  // Email an order's confirmation by hand (27 Oct 2026).
+  app.post('/api/orders/:id/email-confirmation', { preHandler: allow('admin', 'user') },
+    async (req) => messaging.emailOrderConfirmation(db, actorOf(req), (req.params as { id: string }).id,
+      (req.body ?? {}) as { to?: string }));
 
   app.get('/api/portal/recurring', { preHandler: allow('customer') },
     async (req) => recurring.listSchedulesForCustomer(db, portalCustomer(req)));
@@ -1091,6 +1097,10 @@ export async function buildServer(db: Db) {
   app.get('/api/delivery-sheets/:id/candidates', { preHandler: allow('admin', 'user') },
     async (req) => routing.deliveryCandidates(db, (req.params as { id: string }).id));
 
+  // Delete a round that has not started and has nothing recorded (27 Oct 2026).
+  app.delete('/api/delivery-sheets/:id', { preHandler: allow('admin', 'user') },
+    async (req) => routing.deleteRound(db, actorOf(req), (req.params as { id: string }).id));
+
   app.delete('/api/stops/:id', { preHandler: allow('admin', 'user') },
     async (req) => routing.removeStop(db, actorOf(req), (req.params as { id: string }).id));
 
@@ -1661,6 +1671,18 @@ export async function buildServer(db: Db) {
     async (req) => {
       const q = req.query as { from?: string; to?: string };
       return reports.salesReport(db, q.from || null, q.to || null);
+    });
+
+  // End of day (27 Oct 2026): any day, on screen and as a PDF in a new tab.
+  app.get('/api/reports/end-of-day', { preHandler: allow('admin', 'user') },
+    async (req) => endofday.endOfDay(db, String((req.query as { day?: string }).day ?? '')));
+  app.get('/api/reports/end-of-day.pdf', { preHandler: allow('admin', 'user') },
+    async (req, reply) => {
+      const doc = await endofday.renderEndOfDayPdf(db, String((req.query as { day?: string }).day ?? ''));
+      return reply
+        .header('content-type', 'application/pdf')
+        .header('content-disposition', `inline; filename="${doc.filename}"`)
+        .send(doc.pdf);
     });
 
   app.get('/api/reports/rounds', { preHandler: allow('admin', 'user') },
