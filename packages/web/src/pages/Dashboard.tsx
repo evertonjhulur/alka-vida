@@ -247,19 +247,20 @@ export default function Dashboard({ session }: { session: Session }) {
           <p className="muted">Nothing outstanding. Every invoice is settled.</p>
         ) : (
           <>
+            {/* Each figure opens its schedule (27 Oct 2026). */}
             <div className="aging">
-              <div className="age">
+              <Link className="age" to="/reports?tab=owed&age=current" title="See the invoices not yet due">
                 <b>Not yet due</b><span>{money(d.aging.currentCents)}</span>
-              </div>
-              <div className="age">
+              </Link>
+              <Link className="age" to="/reports?tab=owed&age=d30" title="See the invoices 1–30 days late">
                 <b>1–30 days</b><span>{money(d.aging.d30Cents)}</span>
-              </div>
-              <div className="age">
+              </Link>
+              <Link className="age" to="/reports?tab=owed&age=d60" title="See the invoices 31–60 days late">
                 <b>31–60 days</b><span>{money(d.aging.d60Cents)}</span>
-              </div>
-              <div className={`age${d.aging.d90Cents > 0 ? ' over' : ''}`}>
+              </Link>
+              <Link className={`age${d.aging.d90Cents > 0 ? ' over' : ''}`} to="/reports?tab=owed&age=d90" title="See the invoices over 60 days late">
                 <b>Over 60 days</b><span>{money(d.aging.d90Cents)}</span>
-              </div>
+              </Link>
             </div>
 
             <table style={{ marginTop: 14 }}>

@@ -662,7 +662,7 @@ export async function renderStatementPdf(
          WHERE business_today() - due_date > 90), 0)::text AS d91,
        COALESCE(SUM(balance_cents), 0)::text AS total
      FROM invoice_ledger
-     WHERE customer_id = $1 AND balance_cents > 0
+     WHERE customer_id = $1 AND balance_cents > 0 AND status <> 'Cancelled' AND NOT is_credit_note
        AND ($2::uuid[] IS NULL OR invoice_id = ANY($2::uuid[]))`,
     [customerId, onlyIds],
   );

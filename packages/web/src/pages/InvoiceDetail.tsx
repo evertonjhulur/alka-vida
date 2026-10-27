@@ -108,7 +108,9 @@ export default function InvoiceDetail({ session }: { session: Session }) {
   const [edit, setEdit] = useState<{
     discount: string; as: '%' | '$'; gct: boolean; reason: string; rows: EditRow[];
     invoiceDate: string; dueDate: string; add: string;
-  }>({ discount: '', as: '%', gct: true, reason: '', rows: [], invoiceDate: '', dueDate: '', add: '' });
+    /** A QuickBooks balance (27 Oct 2026): what is owed on it, and its QuickBooks number. */
+    amount: string; qbRef: string;
+  }>({ discount: '', as: '%', gct: true, reason: '', rows: [], invoiceDate: '', dueDate: '', add: '', amount: '', qbRef: '' });
   const [prices, setPrices] = useState<Priced[]>([]);
   const [voidWhy, setVoidWhy] = useState('');
   const [reversing, setReversing] = useState<{ id: string; reason: string } | null>(null);
@@ -129,7 +131,7 @@ export default function InvoiceDetail({ session }: { session: Session }) {
   if (error && !inv) return <div className="notice error">{error}</div>;
   if (!inv) return <p className="muted">Loading…</p>;
   const i = inv;
-  /** A QuickBooks balance with no lines: only its dates can change. */
+  /** A QuickBooks balance with no lines: its amount, reference and dates can change. */
   const openingOnly = !!i.is_opening_balance && (i.lines ?? []).length === 0;
 
   async function act(what: () => Promise<string>, fallback: string) {
@@ -157,6 +159,7 @@ export default function InvoiceDetail({ session }: { session: Session }) {
         discount: fixed > 0 ? (fixed / 100).toFixed(2) : String(Number(i.discount_percent) || 0),
         as: fixed > 0 ? '$' : '%', gct: !i.gct_exempt, reason: '', add: '',
         invoiceDate: date(i.invoice_date), dueDate: i.due_date ? date(i.due_date) : '',
+        amount: (Number(i.grandTotalCents) / 100).toFixed(2), qbRef: i.opening_reference ?? '',
         rows: i.lines.map((l) => {
           const cased = Number(l.bottles_per_case) > 0;
           return {
@@ -252,7 +255,10 @@ export default function InvoiceDetail({ session }: { session: Session }) {
     const body: Record<string, unknown> = { reason: edit.reason.trim() };
     if (edit.invoiceDate !== date(i.invoice_date)) body.invoiceDate = edit.invoiceDate;
     if (edit.dueDate !== (i.due_date ? date(i.due_date) : '')) body.dueDate = edit.dueDate || null;
-    if (!openingOnly) {
+    if (openingOnly) {
+      if (toCents(edit.amount) !== Number(i.grandTotalCents)) body.openingAmountCents = toCents(edit.amount);
+      if (edit.qbRef.trim() !== (i.opening_reference ?? '')) body.openingReference = edit.qbRef.trim() || null;
+    } else {
       const fixed = Number(i.discount_fixed_cents) || 0;
       const wasDiscount = fixed > 0 ? (fixed / 100).toFixed(2) : String(Number(i.discount_percent) || 0);
       const wasAs = fixed > 0 ? '$' : '%';
@@ -499,10 +505,10 @@ export default function InvoiceDetail({ session }: { session: Session }) {
       const toAdd = prices.filter((p) => !edit.rows.some((r) => r.productId === p.product_id));
       return (
         <>
-          <h2>{openingOnly ? 'Change the dates' : 'Change this invoice'}</h2>
+          <h2>{openingOnly ? 'Change this QuickBooks balance' : 'Change this invoice'}</h2>
           <p className="muted small" style={{ marginTop: 0 }}>
             {openingOnly
-              ? 'This is a balance brought across from QuickBooks, so only its dates can change. If the amount is wrong, void it and raise a new one.'
+              ? 'Brought across from QuickBooks as one amount. Change what is owed on it, its QuickBooks number or its dates; the change and your reason are kept in its history. If it is now below what has been paid, a credit note is raised for the difference.'
               : 'Recorded against your name, with the reason. This changes the bill only: stock and bottles stay as delivered. If the total drops below what is already paid, a credit note is raised for the difference.'}
           </p>
           <div className="row">
@@ -512,6 +518,17 @@ export default function InvoiceDetail({ session }: { session: Session }) {
             <div className="field"><label htmlFor="e-due">Due date</label>
               <input id="e-due" type="date" value={edit.dueDate} min={edit.invoiceDate || undefined}
                      onChange={(e) => setEdit({ ...edit, dueDate: e.target.value })} /></div>
+            {openingOnly && (
+              <>
+                <div className="field"><label htmlFor="e-amt">Amount owed on it</label>
+                  <input id="e-amt" inputMode="decimal" style={{ width: 140 }} value={edit.amount}
+                         onChange={(e) => setEdit({ ...edit, amount: e.target.value })} />
+                  {toCents(edit.amount) !== Number(i.grandTotalCents) && <div className="muted small">was {money(Number(i.grandTotalCents))}</div>}</div>
+                <div className="field"><label htmlFor="e-qb">QuickBooks invoice no.</label>
+                  <input id="e-qb" style={{ width: 140 }} value={edit.qbRef}
+                         onChange={(e) => setEdit({ ...edit, qbRef: e.target.value })} /></div>
+              </>
+            )}
           </div>
           {!openingOnly && (
             <>
@@ -577,7 +594,7 @@ export default function InvoiceDetail({ session }: { session: Session }) {
               <input id="e-why" style={{ width: '100%' }} value={edit.reason}
                      onChange={(e) => setEdit({ ...edit, reason: e.target.value })} /></div>
             <div className="field"><button disabled={busy || !edit.reason.trim() || !edit.invoiceDate
-              || (!!edit.dueDate && edit.dueDate < edit.invoiceDate)} onClick={saveEdit}>Save changes</button></div>
+              || (!!edit.dueDate && edit.dueDate < edit.invoiceDate) || (openingOnly && toCents(edit.amount) <= 0)} onClick={saveEdit}>Save changes</button></div>
           </div>
         </>
       );
@@ -645,7 +662,7 @@ export default function InvoiceDetail({ session }: { session: Session }) {
               {moreOpen && (
                 <div className="deskbar-pop deskbar-pop-right" role="menu">
                   {!closed && isAdmin && <button role="menuitem" className="pop-item pop-button" onClick={() => open('edit')}>
-                    {openingOnly ? 'Change the dates' : 'Change dates, products or prices'}</button>}
+                    {openingOnly ? 'Change the amount or dates' : 'Change dates, products or prices'}</button>}
                   {!closed && !openingOnly && <button role="menuitem" className="pop-item pop-button" onClick={() => open('discount')}>Give a discount</button>}
                   {!closed && <><div className="pop-rule" />
                     <button role="menuitem" className="pop-item pop-button pop-danger" onClick={() => open('credit')}>Credit note</button></>}
@@ -806,7 +823,7 @@ export default function InvoiceDetail({ session }: { session: Session }) {
                   : 'Changes by office staff go to Needs a decision; the balance stays as it is until they are approved.'}
               </p>
               <div className="row" style={{ gap: 6 }}>
-                {isAdmin && <button className="secondary" onClick={() => open('edit')}>{openingOnly ? 'Change the dates' : 'Change the invoice'}</button>}
+                {isAdmin && <button className="secondary" onClick={() => open('edit')}>{openingOnly ? 'Change the amount or dates' : 'Change the invoice'}</button>}
                 {!openingOnly && <button className="secondary" onClick={() => open('discount')}>Give a discount</button>}
                 <button className="danger-soft" onClick={() => open('credit')}>Credit note</button>
                 {canVoid && <button className="danger-soft" onClick={() => open('void')}>Void…</button>}

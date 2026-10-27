@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { Fragment, useEffect, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { api, openPdf } from '../lib/api';
 import { downloadCsv } from '../lib/csv';
@@ -83,7 +83,19 @@ interface Margin {
   returnable: boolean; bomLines: number; costedLines: number; materialPerBottleCents: number | null;
   materialCents: number | null; marginCents: number | null; marginPercent: number | null;
 }
-interface Owed { customer_id: string; name: string; invoiced_cents: number | string; paid_cents: number | string; balance_cents: number | string }
+/** The aged schedule (27 Oct 2026); see reports.agingSchedule. */
+type Age = 'current' | 'd30' | 'd60' | 'd90';
+interface Aging {
+  asOf: string;
+  totals: { currentCents: number; d30Cents: number; d60Cents: number; d90Cents: number; openCents: number; creditCents: number; netCents: number };
+  customers: Array<{ customerId: string; name: string; active: boolean; phone: string | null; currentCents: number; d30Cents: number;
+    d60Cents: number; d90Cents: number; openCents: number; creditCents: number; netCents: number; invoices: number; oldestDaysLate: number }>;
+  invoices: Array<{ invoiceId: string; number: string; customerId: string; customer: string; invoiceDate: string; dueDate: string | null;
+    daysLate: number; bucket: Age; totalCents: number; paidCents: number; balanceCents: number; openingBalance: boolean }>;
+}
+const AGES: Array<[Age | 'all', string]> = [['current', 'Not yet due'], ['d30', '1–30 days'], ['d60', '31–60 days'], ['d90', 'Over 60 days'], ['all', 'All owed']];
+const ageCents = (t: { currentCents: number; d30Cents: number; d60Cents: number; d90Cents: number; openCents: number }, a: Age | 'all') =>
+  a === 'all' ? t.openCents : a === 'current' ? t.currentCents : a === 'd30' ? t.d30Cents : a === 'd60' ? t.d60Cents : t.d90Cents;
 interface Pool { label: string; clean_ready: number; filled_with_customer: number; returned_dirty: number; lost_damaged: number; in_circulation: number }
 interface DiscountTotals { totalDiscountCents: number; discountedDocumentCount: number; averageDiscountPercent: number }
 interface PerClient { customerId: string; customerName: string; totalDiscountCents: number; discountedDocumentCount: number; averageDiscountPercent: number }
@@ -150,6 +162,7 @@ const dollars = (c: number | null) => (c === null ? '' : (c / 100).toFixed(2));
 export default function Reports() {
   const [params, setParams] = useSearchParams();
   const tab = (TABS.some(([k]) => k === params.get('tab')) ? params.get('tab') : 'sales') as Tab;
+  const age = (AGES.some(([k]) => k === params.get('age')) ? params.get('age') : 'all') as Age | 'all';
   const [period, setPeriodState] = useState<Period>(() => {
     try {
       const saved = localStorage.getItem('reports.period') as Period | null;
@@ -168,7 +181,7 @@ export default function Reports() {
   const [sales, setSales] = useState<Sales | null>(null);
   const [margin, setMargin] = useState<Margin[] | null>(null);
   const [rounds, setRounds] = useState<Rounds | null>(null);
-  const [owed, setOwed] = useState<Owed[] | null>(null);
+  const [owed, setOwed] = useState<Aging | null>(null);
   const [pool, setPool] = useState<Pool[] | null>(null);
   const [disc, setDisc] = useState<{ totals: DiscountTotals; byClient: PerClient[] } | null>(null);
   const [materials, setMaterials] = useState<MaterialCost[] | null>(null);
@@ -193,7 +206,7 @@ export default function Reports() {
     if (tab === 'discounts') api.get<{ totals: DiscountTotals; byClient: PerClient[] }>(`/api/reports/discounts?${qs}`).then(setDisc).catch(fail);
   }, [tab, qs, eodDay]);
   useEffect(() => {
-    if (tab === 'owed' && !owed) api.get<Owed[]>('/api/reports/receivables').then(setOwed).catch((e) => setError(e.message));
+    if (tab === 'owed' && !owed) api.get<Aging>('/api/reports/aging').then(setOwed).catch((e) => setError(e.message));
     if (tab === 'bottles' && !pool) api.get<Pool[]>('/api/reports/bottle-pool').then(setPool).catch(() => setPool([]));
     if (tab === 'materials' && !materials) api.get<MaterialCost[]>('/api/reports/material-costs').then(setMaterials).catch((e) => setError(e.message));
   }, [tab]);
@@ -293,10 +306,24 @@ export default function Reports() {
           })))),
       ]);
     } else if (tab === 'owed' && owed) {
-      downloadCsv('alka-vida-money-owed.csv', [
-        ['Customer', 'Invoiced', 'Paid', 'Owes'],
-        ...owed.map((o) => [o.name, dollars(Number(o.invoiced_cents)), dollars(Number(o.paid_cents)), dollars(Number(o.balance_cents))]),
-      ]);
+      if (age === 'all') {
+        downloadCsv(`alka-vida-aged-receivables-${owed.asOf}.csv`, [
+          ['Aged receivables', `as of ${owed.asOf}`], [],
+          ['Customer', 'Not yet due', '1-30 days', '31-60 days', 'Over 60 days', 'Open invoices', 'Credit not applied', 'Net owed'],
+          ...owed.customers.map((c) => [c.name + (c.active ? '' : ' (inactive)'), dollars(c.currentCents), dollars(c.d30Cents), dollars(c.d60Cents),
+            dollars(c.d90Cents), dollars(c.openCents), dollars(c.creditCents), dollars(c.netCents)]),
+          ['Total', dollars(owed.totals.currentCents), dollars(owed.totals.d30Cents), dollars(owed.totals.d60Cents), dollars(owed.totals.d90Cents),
+            dollars(owed.totals.openCents), dollars(owed.totals.creditCents), dollars(owed.totals.netCents)],
+        ]);
+      } else {
+        const list = owed.invoices.filter((i) => i.bucket === age);
+        downloadCsv(`alka-vida-owed-${age}-${owed.asOf}.csv`, [
+          [`Money owed: ${AGES.find(([k]) => k === age)![1]}`, `as of ${owed.asOf}`], [],
+          ['Customer', 'Invoice', 'Invoice date', 'Due', 'Days late', 'Total', 'Paid', 'Owed'],
+          ...list.map((i) => [i.customer, i.number, i.invoiceDate, i.dueDate ?? '', i.daysLate, dollars(i.totalCents), dollars(i.paidCents), dollars(i.balanceCents)]),
+          ['Total', '', '', '', '', '', '', dollars(list.reduce((a, i) => a + i.balanceCents, 0))],
+        ]);
+      }
     } else if (tab === 'bottles' && sales) {
       downloadCsv(file('bottles'), [
         ['Returnable bottles', range.label], ['Out full', sales.bottles.out], ['Back empty', sales.bottles.back], ['Lost or damaged', sales.bottles.lost],
@@ -748,38 +775,112 @@ export default function Reports() {
     );
   };
 
+  /*
+   * Money owed as an aged schedule (Everton, 27 Oct 2026: the dashboard's
+   * figures open their schedule). Pick an age to see its invoices by
+   * customer, or All owed for every customer across the ages.
+   */
   const owedTab = () => {
     if (!owed) return <p className="muted">Loading…</p>;
-    const owing = owed.filter((o) => Number(o.balance_cents) > 0);
-    const credit = owed.filter((o) => Number(o.balance_cents) < 0);
-    const total = owing.reduce((s, o) => s + Number(o.balance_cents), 0);
+    const t = owed.totals;
+    const pickAge = (a: Age | 'all') => setParams({ tab: 'owed', age: a }, { replace: true });
+    const tiles = (
+      <div className="age-tiles" role="group" aria-label="How late">
+        {AGES.map(([k, label]) => (
+          <button key={k} type="button" aria-pressed={age === k} onClick={() => pickAge(k)}
+                  className={`age-tile${age === k ? ' on' : ''}${k === 'd90' && t.d90Cents > 0 ? ' over' : ''}`}>
+            <b>{label}</b><span>{money(ageCents(t, k))}</span>
+          </button>
+        ))}
+        <div className="age-tile" style={{ cursor: 'default' }}>
+          <b>Net, after credits</b><span>{money(t.netCents)}</span>
+        </div>
+      </div>
+    );
+    if (age === 'all') {
+      return (
+        <>
+          {tiles}
+          <div className="panel" style={{ padding: 0 }}>
+            <div className="table-scroll">
+              <table className="report-table">
+                <thead><tr><th>Customer</th><th className="num">Not yet due</th><th className="num">1–30</th><th className="num">31–60</th>
+                  <th className="num">Over 60</th><th className="num">Credit</th><th className="num">Net owed</th></tr></thead>
+                <tbody>
+                  {owed.customers.map((c) => (
+                    <tr key={c.customerId}>
+                      <td><Link to={`/customers/${c.customerId}?tab=transactions`}>{c.name}</Link>
+                        {!c.active && <span className="muted small"> · inactive</span>}
+                        <div className="muted small">{c.invoices} open invoice{c.invoices === 1 ? '' : 's'}{c.oldestDaysLate > 0 ? `, oldest ${c.oldestDaysLate} days late` : ''}</div></td>
+                      <td className="num">{c.currentCents ? money(c.currentCents) : '—'}</td>
+                      <td className="num">{c.d30Cents ? money(c.d30Cents) : '—'}</td>
+                      <td className="num">{c.d60Cents ? money(c.d60Cents) : '—'}</td>
+                      <td className={`num${c.d90Cents ? ' bad-text' : ''}`}>{c.d90Cents ? money(c.d90Cents) : '—'}</td>
+                      <td className="num">{c.creditCents ? money(c.creditCents) : '—'}</td>
+                      <td className="num"><strong>{c.netCents < 0 ? `${money(-c.netCents)} in credit` : money(c.netCents)}</strong></td>
+                    </tr>
+                  ))}
+                  <tr className="group-row">
+                    <td><strong>{owed.customers.length} customers</strong></td>
+                    <td className="num"><strong>{money(t.currentCents)}</strong></td><td className="num"><strong>{money(t.d30Cents)}</strong></td>
+                    <td className="num"><strong>{money(t.d60Cents)}</strong></td><td className="num"><strong>{money(t.d90Cents)}</strong></td>
+                    <td className="num"><strong>{money(t.creditCents)}</strong></td><td className="num"><strong>{money(t.netCents)}</strong></td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+          <p className="muted small">Each invoice is aged against its own due date. Credit is money on account and credit notes not yet put against an invoice; net owed matches each customer's account balance.</p>
+        </>
+      );
+    }
+    const list = owed.invoices.filter((i) => i.bucket === age);
+    const groups: Array<{ customerId: string; customer: string; rows: typeof list }> = [];
+    for (const i of list) {
+      const g = groups.find((x) => x.customerId === i.customerId);
+      if (g) g.rows.push(i); else groups.push({ customerId: i.customerId, customer: i.customer, rows: [i] });
+    }
+    const sumOf = (rows: typeof list) => rows.reduce((a, i) => a + i.balanceCents, 0);
+    groups.sort((a, b) => sumOf(b.rows) - sumOf(a.rows));
+    const label = AGES.find(([k]) => k === age)![1];
     return (
       <>
-        <div className="stat-row">
-          <div className="stat"><div className="stat-label">Owed to you</div><div className="stat-value">{money(total)}</div>
-            <div className="stat-note">{owing.length} {owing.length === 1 ? 'customer' : 'customers'}, as of today</div></div>
-          {credit.length > 0 && (
-            <div className="stat"><div className="stat-label">In credit</div>
-              <div className="stat-value">{money(-credit.reduce((s, o) => s + Number(o.balance_cents), 0))}</div>
-              <div className="stat-note">{credit.length} paid ahead</div></div>
-          )}
-        </div>
-        <div className="panel" style={{ padding: 0 }}>
-          <table className="report-table">
-            <thead><tr><th>Customer</th><th className="num">Invoiced</th><th className="num">Paid</th><th className="num">Owes</th></tr></thead>
-            <tbody>
-              {owed.map((o) => (
-                <tr key={o.customer_id}>
-                  <td><Link to={`/customers/${o.customer_id}?tab=transactions`}>{o.name}</Link></td>
-                  <td className="num">{money(Number(o.invoiced_cents))}</td>
-                  <td className="num">{money(Number(o.paid_cents))}</td>
-                  <td className="num"><strong>{Number(o.balance_cents) < 0 ? `${money(-Number(o.balance_cents))} in credit` : money(Number(o.balance_cents))}</strong></td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-          {owed.length === 0 && <p className="muted" style={{ padding: 16, margin: 0 }}>Nobody owes anything.</p>}
-        </div>
+        {tiles}
+        {list.length === 0 ? <div className="panel"><p className="muted" style={{ margin: 0 }}>Nothing {age === 'current' ? 'not yet due' : label.toLowerCase() + ' late'}.</p></div> : (
+          <div className="panel" style={{ padding: 0 }}>
+            <div className="panel-pad">
+              <h2 className="side-h" style={{ margin: 0 }}>{label}{age === 'current' ? '' : ' late'}: {money(sumOf(list))}</h2>
+              <div className="muted small">{list.length} invoice{list.length === 1 ? '' : 's'}, {groups.length} customer{groups.length === 1 ? '' : 's'}, biggest first. As of {day(owed.asOf)}.</div>
+            </div>
+            <div className="table-scroll">
+              <table className="report-table">
+                <thead><tr><th>Invoice</th><th>Date</th><th>Due</th><th className="num">Days late</th><th className="num">Total</th><th className="num">Paid</th><th className="num">Owed</th></tr></thead>
+                <tbody>
+                  {groups.map((g) => (
+                    <Fragment key={g.customerId}>
+                      <tr className="group-row">
+                        <td colSpan={6}><Link to={`/customers/${g.customerId}?tab=transactions`}><strong>{g.customer}</strong></Link>
+                          <span className="muted small"> · {g.rows.length} invoice{g.rows.length === 1 ? '' : 's'}</span></td>
+                        <td className="num"><strong>{money(sumOf(g.rows))}</strong></td>
+                      </tr>
+                      {g.rows.map((i) => (
+                        <tr key={i.invoiceId}>
+                          <td><Link to={`/invoices/${i.invoiceId}`}>{i.number}</Link>{i.openingBalance && <span className="muted small"> · from QuickBooks</span>}</td>
+                          <td className="small">{day(i.invoiceDate)} {i.invoiceDate.slice(0, 4)}</td>
+                          <td className="small">{i.dueDate ? `${day(i.dueDate)} ${i.dueDate.slice(0, 4)}` : '—'}</td>
+                          <td className="num">{i.daysLate > 0 ? i.daysLate : '—'}</td>
+                          <td className="num">{money(i.totalCents)}</td>
+                          <td className="num">{i.paidCents ? money(i.paidCents) : '—'}</td>
+                          <td className="num">{money(i.balanceCents)}</td>
+                        </tr>
+                      ))}
+                    </Fragment>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
       </>
     );
   };

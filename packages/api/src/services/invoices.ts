@@ -14,7 +14,7 @@
 
 import type { Db, Queryable } from '../db/index.ts';
 import type { Actor } from './core.ts';
-import { audit, nextNumber, requireRole, num, termsDays } from './core.ts';
+import { audit, businessToday, nextNumber, requireRole, num, termsDays } from './core.ts';
 import type { Cents, InvoiceStatus } from '@alka/shared';
 import { computeTotals, computeLineTotal, RuleViolation, GCT_RATE } from '@alka/shared';
 
@@ -236,6 +236,13 @@ export async function editInvoice(
     discountFixedCents?: Cents; gctExempt?: boolean; reason?: string;
     /** Admins can move the dates too (Everton, 26 Oct 2026). yyyy-mm-dd. */
     invoiceDate?: string | null; dueDate?: string | null;
+    /**
+     * A balance brought across from QuickBooks (no lines of its own): the
+     * amount still owed on it, and its QuickBooks reference (Everton,
+     * 27 Oct 2026: "some edits to invoices imported from QuickBooks are
+     * necessary").
+     */
+    openingAmountCents?: Cents; openingReference?: string | null;
   },
 ): Promise<{ invoice: InvoiceLedgerRow; creditNoteId: string | null }> {
   requireRole(actor, 'admin');
@@ -248,9 +255,9 @@ export async function editInvoice(
 
     const existing = await t.one<{
       discount_percent: number; customer_id: string; discount_fixed_cents: number; gct_exempt: boolean;
-      is_opening_balance: boolean; line_count: number;
+      is_opening_balance: boolean; line_count: number; opening_reference: string | null;
     }>(
-      `SELECT discount_percent, customer_id, discount_fixed_cents, gct_exempt, is_opening_balance,
+      `SELECT discount_percent, customer_id, discount_fixed_cents, gct_exempt, is_opening_balance, opening_reference,
               (SELECT COUNT(*)::int FROM invoice_line_items WHERE invoice_id = invoices.id) AS line_count
        FROM invoices WHERE id = $1`, [invoiceId],
     );
@@ -275,7 +282,18 @@ export async function editInvoice(
       || changes.discountFixedCents !== undefined || changes.gctExempt !== undefined;
     const openingOnly = existing.is_opening_balance && num(existing.line_count) === 0;
     if (openingOnly && moneyChange) {
-      throw new RuleViolation('this is a balance brought across from QuickBooks: only its dates can be changed. Void it and raise a new invoice if the amount is wrong');
+      throw new RuleViolation('this is a balance brought across from QuickBooks: change its amount instead of products, discount or GCT');
+    }
+    const openingEdit = changes.openingAmountCents !== undefined || changes.openingReference !== undefined;
+    if (openingEdit && !openingOnly) {
+      throw new RuleViolation('only a balance brought across from QuickBooks has an amount of its own; change the products on this one');
+    }
+    let openingAmount: number | null = null;
+    if (changes.openingAmountCents !== undefined) {
+      openingAmount = Math.round(Number(changes.openingAmountCents));
+      if (!Number.isFinite(openingAmount) || openingAmount <= 0) {
+        throw new RuleViolation('the amount must be more than nothing; void it if nothing is owed');
+      }
     }
     if (changes.lines) {
       if (changes.lines.length === 0) throw new RuleViolation('an invoice needs at least one product; void it instead');
@@ -333,7 +351,27 @@ export async function editInvoice(
       await t.query(`UPDATE invoices SET invoice_date = $2::date, due_date = $3::date, updated_at = now() WHERE id = $1`,
         [invoiceId, newInvoiceDate, newDueDate]);
     }
-    const grandTotal = moneyChange ? totals.grandTotal : before.grandTotalCents;
+    // A QuickBooks balance: its amount and reference. The reason is kept in
+    // the invoice's history (audit), not printed on what the customer sees.
+    if (openingEdit) {
+      if (openingAmount !== null && openingAmount !== before.grandTotalCents) {
+        await t.query(
+          `UPDATE invoices SET subtotal_cents = $2, grand_total_cents = $2, gct_cents = 0,
+                  discount_amount_cents = 0, discount_percent = 0, discount_fixed_cents = 0, updated_at = now()
+           WHERE id = $1`, [invoiceId, openingAmount]);
+      }
+      if (changes.openingReference !== undefined) {
+        const ref = String(changes.openingReference ?? '').trim() || null;
+        const old = existing.opening_reference ?? null;
+        await t.query(
+          `UPDATE invoices SET opening_reference = $2, updated_at = now(),
+                  notes = CASE WHEN $3::text IS NOT NULL AND $2::text IS NOT NULL
+                               THEN replace(notes, 'QuickBooks invoice ' || $3::text, 'QuickBooks invoice ' || $2::text)
+                               ELSE notes END
+           WHERE id = $1`, [invoiceId, ref, old]);
+      }
+    }
+    const grandTotal = moneyChange ? totals.grandTotal : openingAmount ?? before.grandTotalCents;
 
     let creditNoteId: string | null = null;
     const paid = before.amountPaidCents;
@@ -376,12 +414,14 @@ export async function editInvoice(
         status: before.status,
         amountPaidCents: before.amountPaidCents,
         invoiceDate: before.invoiceDate, dueDate: before.dueDate,
+        ...(openingEdit ? { openingReference: existing.opening_reference } : {}),
       },
       after: {
         grandTotalCents: after!.grandTotalCents,
         status: after!.status,
         amountPaidCents: after!.amountPaidCents,
         invoiceDate: after!.invoiceDate, dueDate: after!.dueDate,
+        ...(openingEdit ? { openingReference: changes.openingReference ?? existing.opening_reference } : {}),
       },
       creditNoteId,
     });

@@ -1704,6 +1704,10 @@ export async function buildServer(db: Db) {
   app.get('/api/dashboard', { preHandler: allow('admin', 'user') },
     async () => reports.dashboard(db));
 
+  // The aged schedule behind the dashboard's Money owed figures (27 Oct 2026).
+  app.get('/api/reports/aging', { preHandler: allow('admin', 'user') },
+    async () => reports.agingSchedule(db));
+
   app.get('/api/reports/receivables', { preHandler: allow('admin', 'user') },
     async () => reports.receivablesSummary(db));
 

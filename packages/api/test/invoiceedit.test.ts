@@ -82,11 +82,34 @@ describe('Admin invoice editing', () => {
       `INSERT INTO invoices (invoice_number, customer_id, invoice_date, due_date, subtotal_cents, gct_cents,
                              grand_total_cents, is_opening_balance, notes)
        VALUES ('OB-TEST-1', $1, '2026-09-01', '2026-10-01', 50000, 0, 50000, true, 'From QuickBooks') RETURNING id`,
-      [f.otherCustomerId]);
+      [f.customerId]);
     const r = await editInvoice(f.db, f.admin, ob.id, { invoiceDate: '2026-09-05', dueDate: '2026-10-05', reason: 'QB date' });
     assert.equal(r.invoice.grandTotalCents, 50000);
     assert.equal(r.invoice.invoiceDate, '2026-09-05');
     await assert.rejects(editInvoice(f.db, f.admin, ob.id, { discountPercent: 10, gctExempt: false }), /brought across from QuickBooks/);
+
+    // Its amount and QuickBooks reference can be changed (27 Oct 2026).
+    const r2 = await editInvoice(f.db, f.admin, ob.id, { openingAmountCents: 42_500, openingReference: 'QB-16001', reason: 'agreed with the customer' });
+    assert.equal(r2.invoice.grandTotalCents, 42_500);
+    const row = await f.db.one<{ subtotal_cents: number; gct_cents: number; opening_reference: string; notes: string }>(
+      `SELECT subtotal_cents, gct_cents, opening_reference, notes FROM invoices WHERE id = $1`, [ob.id]);
+    assert.equal(Number(row.subtotal_cents), 42_500);
+    assert.equal(Number(row.gct_cents), 0);
+    assert.equal(row.opening_reference, 'QB-16001');
+    assert.doesNotMatch(row.notes, /agreed with the customer/, 'the reason stays in the history, off the customer\'s copy');
+    const hist = await f.db.one<{ details: { reason: string; before: { grandTotalCents: number } } }>(
+      `SELECT details FROM audit_log WHERE entity_id = $1 AND action = 'update' ORDER BY ts DESC LIMIT 1`, [ob.id]);
+    assert.equal(hist.details.reason, 'agreed with the customer');
+    assert.equal(hist.details.before.grandTotalCents, 50_000);
+    await assert.rejects(editInvoice(f.db, f.admin, ob.id, { openingAmountCents: 0 }), /more than nothing/);
+    // Paid more than the new amount: the difference becomes a credit note.
+    const { recordPayment } = await import('../src/services/payments.ts');
+    await recordPayment(f.db, f.office, { customerId: f.customerId, invoiceId: ob.id, amountCents: 40_000, method: 'Cash' } as never);
+    const r3 = await editInvoice(f.db, f.admin, ob.id, { openingAmountCents: 30_000, reason: 'over-stated in QuickBooks' });
+    assert.ok(r3.creditNoteId, 'credit note for what was paid above the new amount');
+    // Not for an ordinary invoice.
+    const plain = await sale(f.customerId);
+    await assert.rejects(editInvoice(f.db, f.admin, plain, { openingAmountCents: 100 }), /only a balance brought across/);
     await voidInvoice(f.db, f.admin, ob.id, { reason: 'paid in QuickBooks already' });
   });
 

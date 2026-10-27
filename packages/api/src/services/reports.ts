@@ -149,7 +149,7 @@ export async function dashboard(db: Db) {
        COALESCE(SUM(balance_cents) FILTER (
          WHERE business_today() - due_date > 60), 0)::text AS d90,
        COALESCE(SUM(balance_cents), 0)::text AS total
-     FROM invoice_ledger WHERE balance_cents > 0`,
+     FROM invoice_ledger WHERE balance_cents > 0 AND status <> 'Cancelled' AND NOT is_credit_note`,
   );
 
   /*
@@ -164,7 +164,7 @@ export async function dashboard(db: Db) {
             MAX(business_today() - l.due_date) AS days_overdue
      FROM invoice_ledger l
      JOIN customers c ON c.id = l.customer_id
-     WHERE l.balance_cents > 0 AND c.active
+     WHERE l.balance_cents > 0 AND c.active AND l.status <> 'Cancelled' AND NOT l.is_credit_note
      GROUP BY c.id, c.name
      ORDER BY MAX(business_today() - l.due_date) DESC NULLS LAST,
               SUM(l.balance_cents) DESC
@@ -647,4 +647,80 @@ export async function salesTransactions(db: Db, from?: string | null, to?: strin
       zone: r.zone, deliveredOn: r.delivered_on, notes: r.notes,
     };
   });
+}
+
+/* ------------------------------------------------------------------ */
+/* Aged receivables schedule (Everton, 27 Oct 2026)                     */
+/* ------------------------------------------------------------------ */
+
+export type AgeBucket = 'current' | 'd30' | 'd60' | 'd90';
+
+/**
+ * The schedule behind the dashboard's Money owed figures: every open invoice
+ * (not voided, not a credit note), with its age judged against its OWN due
+ * date - the same buckets the dashboard shows - and per customer the bucket
+ * totals, any credit not yet applied (money on account, credit notes), and
+ * the net they owe, which matches their account balance.
+ */
+export async function agingSchedule(db: Db) {
+  const rows = await db.query<Record<string, unknown>>(
+    `SELECT l.invoice_id, l.invoice_number, l.customer_id, c.name AS customer, c.active, c.phone,
+            l.invoice_date::text AS invoice_date, l.due_date::text AS due_date,
+            l.grand_total_cents, l.amount_paid_cents, l.balance_cents, i.is_opening_balance,
+            GREATEST(business_today() - l.due_date, 0) AS days_late,
+            CASE WHEN l.due_date IS NULL OR business_today() - l.due_date <= 0 THEN 'current'
+                 WHEN business_today() - l.due_date <= 30 THEN 'd30'
+                 WHEN business_today() - l.due_date <= 60 THEN 'd60'
+                 ELSE 'd90' END AS bucket
+     FROM invoice_ledger l
+     JOIN invoices i ON i.id = l.invoice_id
+     JOIN customers c ON c.id = l.customer_id
+     WHERE l.balance_cents > 0 AND l.status <> 'Cancelled' AND NOT l.is_credit_note
+     ORDER BY c.name, l.due_date NULLS LAST, l.invoice_number`);
+  const invoices = rows.map((r) => ({
+    invoiceId: r.invoice_id as string, number: r.invoice_number as string,
+    customerId: r.customer_id as string, customer: r.customer as string,
+    invoiceDate: r.invoice_date as string, dueDate: (r.due_date as string) ?? null,
+    daysLate: r.due_date ? num(r.days_late) : 0, bucket: r.bucket as AgeBucket,
+    totalCents: num(r.grand_total_cents), paidCents: num(r.amount_paid_cents), balanceCents: num(r.balance_cents),
+    openingBalance: !!r.is_opening_balance,
+  }));
+
+  // Net per customer (their account balance) for everyone with something open or a credit.
+  const nets = await db.query<{ customer_id: string; name: string; active: boolean; phone: string | null; balance_cents: string }>(
+    `SELECT b.customer_id, c.name, c.active, c.phone, b.balance_cents::text AS balance_cents
+     FROM customer_balances b JOIN customers c ON c.id = b.customer_id
+     WHERE b.balance_cents <> 0
+        OR EXISTS (SELECT 1 FROM invoice_ledger l WHERE l.customer_id = b.customer_id
+                     AND l.balance_cents > 0 AND l.status <> 'Cancelled' AND NOT l.is_credit_note)`);
+  const zero = () => ({ current: 0, d30: 0, d60: 0, d90: 0 });
+  const customers = nets.map((n) => {
+    const mine = invoices.filter((i) => i.customerId === n.customer_id);
+    const b = zero();
+    for (const i of mine) b[i.bucket] += i.balanceCents;
+    const open = b.current + b.d30 + b.d60 + b.d90;
+    const net = num(n.balance_cents);
+    return {
+      customerId: n.customer_id, name: n.name, active: !!n.active, phone: n.phone,
+      currentCents: b.current, d30Cents: b.d30, d60Cents: b.d60, d90Cents: b.d90,
+      openCents: open,
+      /** Credit not yet put against an invoice (money on account, credit notes): negative. */
+      creditCents: net - open,
+      netCents: net,
+      invoices: mine.length,
+      oldestDaysLate: mine.reduce((m, i) => Math.max(m, i.daysLate), 0),
+    };
+  }).sort((a, z) => z.oldestDaysLate - a.oldestDaysLate || z.openCents - a.openCents || a.name.localeCompare(z.name));
+
+  const sum = (f: (c: typeof customers[number]) => number) => customers.reduce((a, c) => a + f(c), 0);
+  return {
+    asOf: (await db.one<{ d: string }>(`SELECT business_today()::text AS d`)).d,
+    totals: {
+      currentCents: sum((c) => c.currentCents), d30Cents: sum((c) => c.d30Cents),
+      d60Cents: sum((c) => c.d60Cents), d90Cents: sum((c) => c.d90Cents),
+      openCents: sum((c) => c.openCents), creditCents: sum((c) => c.creditCents), netCents: sum((c) => c.netCents),
+    },
+    customers,
+    invoices,
+  };
 }

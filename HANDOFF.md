@@ -2271,3 +2271,43 @@ round for the day with the order "to deliver".
 - Tests: new `api/test/rounds.test.ts` (4). 558 API tests pass.
 - Live data left to tidy by hand: take SO-001018 off the second
   Portmore/Downtown round of 26 Oct, then delete that round.
+
+## Money owed figures open their schedule (27 Oct 2026)
+
+Everton: on the dashboard's Money owed, "make the balances clickable so the
+schedule can be shown for each".
+
+- `reports.agingSchedule(db)`, `GET /api/reports/aging` (admin, office):
+  every open invoice (not voided, not a credit note) aged against its own
+  due date - Not yet due / 1-30 / 31-60 / Over 60, the dashboard's buckets -
+  and per customer the bucket totals, credit not yet applied (money on
+  account, credit notes; = account balance - open invoices) and net owed
+  (= customer_balances).
+- Dashboard: each of the four figures links to Reports -> Money owed with
+  that age (`/reports?tab=owed&age=current|d30|d60|d90`).
+- Reports -> Money owed rebuilt as the aged schedule: tiles for each age, All
+  owed and Net after credits; an age lists its invoices by customer (biggest
+  first, with subtotals); All owed is the customer-by-age table. Export to
+  Excel exports what is shown.
+- Fix: voided invoices (lifecycle Cancelled, e.g. after Undo or Void) were
+  still counted in the dashboard's ages, its "who to ring" list and the
+  statement PDF's aging; they are now left out (credit notes too).
+- Tests: new `api/test/aging.test.ts`. 559 API tests pass.
+
+## Edit QuickBooks balances (27 Oct 2026)
+
+Everton: after speaking to customers, some invoices imported from QuickBooks
+(the opening balances, OB-...) need changes, and they could not be edited.
+
+- `invoices.editInvoice` takes `openingAmountCents` and `openingReference`
+  for a QuickBooks balance (is_opening_balance, no lines): the amount owed on
+  it (subtotal = total, no GCT, no discount) and its QuickBooks invoice
+  number (the "QuickBooks invoice N" wording in its description follows).
+  Refused for an ordinary invoice; amount must be > 0 (void it if nothing is
+  owed). Products/discount/GCT stay refused on a QuickBooks balance. The
+  usual rules apply: admin only, reason, dates editable, a credit note when
+  the new amount is below what was paid, audit with before/after. The reason
+  lives in the history, not on the customer's copy.
+- Invoice page: "Change the amount or dates" on a QuickBooks balance - dates,
+  Amount owed on it (shows what it was), QuickBooks invoice no., Why.
+- Test added to `api/test/invoiceedit.test.ts`. 559 API tests pass.
