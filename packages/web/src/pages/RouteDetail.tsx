@@ -48,6 +48,10 @@ interface Sheet {
   stops: Stop[];
   collections: Collection[];
   truck: Truck | null;
+  /** The settlement, once done (27 Oct 2026: the notes were hard to find). */
+  expected_cash_cents?: number | string | null; actual_cash_cents?: number | string | null; cash_variance_cents?: number | string | null;
+  settlement_notes?: string | null; bottle_actual_returned?: number | null; bottle_variance?: number | null;
+  bottle_settle_notes?: string | null; reconciled_date?: string | null; reconciled_by_name?: string | null;
 }
 
 interface Driver { id: string; name: string }
@@ -148,7 +152,8 @@ export default function RouteDetail({ session }: { session: Session }) {
     if (!sheet) return;
     const n = sheet.stops.filter((s) => s.order_ref).length;
     const ok = await ask(`Delete the ${sheet.zone} round for ${day(sheet.delivery_date)}?`
-      + (n ? (n === 1 ? ' Its order comes off it and waits for delivery again.' : ` Its ${n} orders come off it and wait for delivery again.`) : ' It has no orders on it.')
+      + (n ? (n === 1 ? ' Its order comes off it and waits for delivery again; the order is NOT cancelled (use Cancel order on Orders for that).'
+        : ` Its ${n} orders come off it and wait for delivery again; they are NOT cancelled (use Cancel order on Orders for that).`) : ' It has no orders on it.')
       + (sheet.truck ? ' The loading logged for it goes back on the warehouse shelf.' : ''),
     { confirmLabel: 'Delete the round', danger: true });
     if (!ok) return;
@@ -291,7 +296,10 @@ export default function RouteDetail({ session }: { session: Session }) {
           <strong>4 · Settle</strong>
           {open && settleIsNext ? (
             <Link to={`/delivery/${sheet.id}/settlement`} className="button-link">Settle now</Link>
-          ) : <div className="small">{open ? 'when the driver is back' : 'done'}</div>}
+          ) : open ? <div className="small">when the driver is back</div> : (
+            <div className="small">{sheet.reconciled_date ? `${day(sheet.reconciled_date)}, ${time(sheet.reconciled_date)}` : 'done'}
+              {sheet.reconciled_by_name ? ` · ${sheet.reconciled_by_name}` : ''}</div>
+          )}
         </li>
       </ol>
 
@@ -464,11 +472,36 @@ export default function RouteDetail({ session }: { session: Session }) {
             </section>
           )}
           <section className="panel">
-            <h2 className="side-h">Cash and bottles so far</h2>
+            <h2 className="side-h">{open ? 'Cash and bottles so far' : 'Cash and bottles'}</h2>
             <div className="total-line"><span>On the truck</span><span>{money(onTruck)}</span></div>
             <div className="total-line"><span>Cash collected</span><span>{money(cash)}</span></div>
             <div className="total-line"><span>Full bottles out</span><span>{fullOut}</span></div>
             <div className="total-line"><span>Empties back</span><span>{emptiesBack}</span></div>
+            {!open && (() => {
+              const handed = sheet.actual_cash_cents == null ? null : Number(sheet.actual_cash_cents);
+              const diff = sheet.cash_variance_cents == null ? 0 : Number(sheet.cash_variance_cents);
+              return (
+                <>
+                  <h3 className="small" style={{ margin: '12px 0 4px' }}>Settled
+                    {sheet.reconciled_date ? ` ${day(sheet.reconciled_date)}, ${time(sheet.reconciled_date)}` : ''}
+                    {sheet.reconciled_by_name ? ` by ${sheet.reconciled_by_name}` : ''}</h3>
+                  {handed !== null && <div className="total-line"><span>Cash handed in</span><span>{money(handed)}</span></div>}
+                  {diff !== 0 && <div className="total-line"><span>{diff < 0 ? 'Short' : 'Over'}</span><span className={diff < 0 ? 'bad-text' : ''}>{money(Math.abs(diff))}</span></div>}
+                  {sheet.bottle_actual_returned != null && (
+                    <div className="total-line"><span>Empties counted</span><span>{sheet.bottle_actual_returned}
+                      {sheet.bottle_variance ? ` (${sheet.bottle_variance > 0 ? '+' : ''}${sheet.bottle_variance})` : ''}</span></div>
+                  )}
+                  {(sheet.settlement_notes || sheet.bottle_settle_notes) ? (
+                    <div className="notice info small" style={{ whiteSpace: 'pre-line', marginTop: 8 }}>
+                      <strong>Settlement notes</strong>
+                      {sheet.settlement_notes ? `\n${sheet.settlement_notes}` : ''}
+                      {sheet.bottle_settle_notes ? `\nBottles: ${sheet.bottle_settle_notes}` : ''}
+                    </div>
+                  ) : <p className="muted small" style={{ marginBottom: 4 }}>No settlement notes.</p>}
+                  <Link to={`/delivery/${sheet.id}/settlement`} className="small">Open the settlement</Link>
+                </>
+              );
+            })()}
             {open && (
               <>
                 <p className="muted small">

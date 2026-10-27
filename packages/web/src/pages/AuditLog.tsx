@@ -19,6 +19,8 @@ interface Entry {
   id: string; ts: string; user_id: string | null; user_name: string;
   action: string; entity_type: string; entity_id: string | null; entity_label: string | null;
   details: Record<string, unknown> | null;
+  /** In plain words, and a readable name for the record (27 Oct 2026). */
+  summary?: string; record?: string | null;
 }
 interface Filters { types: string[]; people: Array<{ id: string; name: string }>; actions: string[] }
 
@@ -40,7 +42,8 @@ export const typeWords = (t: string) => TYPE_WORDS[t]
 
 /** Where the record lives in the app, when it has a page. */
 function linkFor(e: Entry): string | null {
-  if (!e.entity_id) return null;
+  // A deleted record has no page any more (27 Oct 2026: the deleted round's link went nowhere).
+  if (!e.entity_id || e.action === 'delete') return null;
   switch (e.entity_type) {
     case 'Customer': return `/customers/${e.entity_id}`;
     case 'Invoice': return `/invoices/${e.entity_id}`;
@@ -130,16 +133,18 @@ export default function AuditLog({ session }: { session: Session }) {
   }
 
   const exportCsv = () => downloadCsv(`audit-log${from ? `-${from}` : ''}${to ? `-to-${to}` : ''}`, [
-    ['Date', 'Time', 'Who', 'Action', 'Record', 'Which', 'Details'],
+    ['Date', 'Time (Jamaica)', 'Who', 'Action', 'Record', 'Which', 'What happened', 'Details'],
     ...rows.map((e) => [dayOf(e.ts), clock(e.ts), e.user_name, ACTION_WORDS[e.action] ?? e.action,
-      typeWords(e.entity_type), e.entity_label ?? '', detailPairs(e.details).map(([k, v]) => `${k}: ${v}`).join('; ')]),
+      typeWords(e.entity_type), e.record ?? e.entity_label ?? '', e.summary ?? '',
+      detailPairs(e.details).map(([k, v]) => `${k}: ${v}`).join('; ')]),
   ]);
 
   return (
     <>
       <h1>Audit log</h1>
       <p className="subtitle">
-        Everything anyone has done in Alka Vida: who, when, what and to which record. Newest first.
+        Everything anyone has done in Alka Vida: who, when, what and to which record. Newest first. Times are Jamaica time,
+        when it was entered; a payment or sale entered for an earlier day says "Dated …".
       </p>
       {error && <div className="notice error">{error}</div>}
 
@@ -178,7 +183,7 @@ export default function AuditLog({ session }: { session: Session }) {
 
         <table className="phone-cards audit-table">
           <thead>
-            <tr><th>When</th><th>Who</th><th>Action</th><th>Record</th><th>Details</th></tr>
+            <tr><th>When</th><th>Who</th><th>Action</th><th>Record</th><th>What happened</th></tr>
           </thead>
           <tbody>
             {rows.map((e) => {
@@ -194,10 +199,18 @@ export default function AuditLog({ session }: { session: Session }) {
                   <td data-label="Action"><span className={`chip ${ACTION_TONE[e.action] ?? 'neutral'}`}>{ACTION_WORDS[e.action] ?? e.action}</span></td>
                   <td data-label="Record">
                     <div className="muted small">{typeWords(e.entity_type)}</div>
-                    {link ? <Link to={link}>{e.entity_label ?? 'open'}</Link> : <span>{e.entity_label ?? '—'}</span>}
+                    {link ? <Link to={link}>{e.record ?? e.entity_label ?? 'open'}</Link> : <span>{e.record ?? e.entity_label ?? '—'}</span>}
                   </td>
-                  <td data-label="Details" className="small audit-details">
-                    {pairs.length === 0 ? <span className="muted">—</span> : (
+                  <td data-label="What happened" className="small audit-details">
+                    {e.summary ? <div>{e.summary}</div> : null}
+                    {pairs.length === 0 ? (!e.summary && <span className="muted">—</span>) : e.summary ? (
+                      <>
+                        <button type="button" className="as-link small" onClick={() => setOpen(isOpen ? null : e.id)}>
+                          {isOpen ? 'Hide the details' : 'Details'}
+                        </button>
+                        {isOpen && pairs.map(([k, v]) => <div key={k} className="muted"><span>{k}:</span> {v}</div>)}
+                      </>
+                    ) : (
                       <>
                         {(isOpen ? pairs : pairs.slice(0, 3)).map(([k, v]) => (
                           <div key={k}><span className="muted">{k}:</span> {v}</div>

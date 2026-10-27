@@ -160,6 +160,8 @@ export default function Orders() {
   const [undoPlan, setUndoPlan] = useState<UndoPlan | null>(null);
   const [undoWhy, setUndoWhy] = useState('');
   const [mailTo, setMailTo] = useState('');
+  /** Cancelling: email the customer (27 Oct 2026: not for an order entered in error). */
+  const [tellCustomer, setTellCustomer] = useState(true);
   const [paidNow, setPaidNow] = useState('');
   const [paidHow, setPaidHow] = useState('Cash');
   const [repeatEvery, setRepeatEvery] = useState('Weekly');
@@ -331,8 +333,8 @@ export default function Orders() {
 
   async function cancel(o: Order) {
     await act(async () => {
-      await api.post(`/api/orders/${o.id}/cancel`, { reason: 'cancelled by office' });
-      return `${o.order_number} cancelled.`;
+      await api.post(`/api/orders/${o.id}/cancel`, { reason: 'cancelled by office', notify: tellCustomer });
+      return `${o.order_number} cancelled.${tellCustomer ? '' : ' The customer was not emailed.'}`;
     }, 'Could not cancel');
   }
 
@@ -382,6 +384,7 @@ export default function Orders() {
     if (kind === 'collect') { setPaidNow(''); setPaidHow('Cash'); setEmpties(''); }
     if (kind === 'repeat') setRepeatEvery('Weekly');
     if (kind === 'email') setMailTo(o.customer_email ?? '');
+    if (kind === 'cancel') setTellCustomer(true);
     setOpen(open?.id === o.id && open.kind === kind ? null : { id: o.id, kind });
   };
 
@@ -641,6 +644,11 @@ export default function Orders() {
             Cancel {o.order_number} for {o.customer_name}
             {o.stop_id && o.sheet_status === 'Open' ? `? It comes off the ${o.sheet_zone} round too.` : '?'}
           </p>
+          <label className="check field">
+            <input type="checkbox" checked={tellCustomer} onChange={(e) => setTellCustomer(e.target.checked)} />
+            Email {o.customer_name} that it is cancelled
+            <span className="muted small"> (untick for an order entered in error)</span>
+          </label>
           <div className="field">
             <button className="danger-soft" disabled={busy} onClick={() => cancel(o)}>
               Cancel the order

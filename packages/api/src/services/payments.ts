@@ -9,7 +9,7 @@
 
 import type { Db, Queryable } from '../db/index.ts';
 import type { Actor } from './core.ts';
-import { assertMethodAllowed, audit, nextNumber, requireRole, withIdempotency, num } from './core.ts';
+import { assertMethodAllowed, audit, businessToday, nextNumber, requireRole, withIdempotency, num } from './core.ts';
 import type { Cents, PaymentMethod } from '@alka/shared';
 import { RuleViolation, planPayments, validateAllocation } from '@alka/shared';
 
@@ -45,7 +45,11 @@ export interface RecordPaymentInput {
  */
 export function paymentInstant(d: string | null | undefined): string | null {
   if (!d) return null;
-  return /^\d{4}-\d{2}-\d{2}$/.test(d) ? `${d}T12:00:00-05:00` : d;
+  // Today's date means now, to the minute (27 Oct 2026: money taken at 11:21
+  // showed as 12:00 pm, not matching the audit log). An earlier day has no
+  // time of its own, so it is that day at noon.
+  if (/^\d{4}-\d{2}-\d{2}$/.test(d)) return d === businessToday() ? null : `${d}T12:00:00-05:00`;
+  return d;
 }
 
 /**
@@ -752,7 +756,7 @@ export async function applyPaymentChange(
            payment_date = COALESCE($4::timestamptz, payment_date),
            method = $5, reference = $6
        WHERE id = $1`,
-      [paymentId, customerId, invoiceId, paymentInstant(c.paymentDate), c.method ?? p.method,
+      [paymentId, customerId, invoiceId, (c.paymentDate && /^\d{4}-\d{2}-\d{2}$/.test(c.paymentDate) ? `${c.paymentDate}T12:00:00-05:00` : paymentInstant(c.paymentDate)), c.method ?? p.method,
        c.reference !== undefined ? c.reference : p.reference],
     );
   }

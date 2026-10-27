@@ -275,9 +275,11 @@ export default function NewOrder() {
     setRequestedDate(days.length ? nextRunDate(start, days) : start);
     // Their terms suggest when payment is collected; the office can change it.
     const terms = customer.payment_terms ?? '';
+    // A delivery is paid at the door unless the office has the money in hand
+    // (27 Oct 2026: "Now" was the default, so cash the driver later collected
+    // was recorded twice - once at order entry, once at settlement).
     setPayWhen(customer.invoice_cycle === 'Weekly' || customer.invoice_cycle === 'Monthly'
-      || /net|account|credit|\bdays?\b/i.test(terms) ? 'On account'
-      : /deliver|c\.?o\.?d/i.test(terms) ? 'On delivery' : 'Now');
+      || /net|account|credit|\bdays?\b/i.test(terms) ? 'On account' : 'On delivery');
     setAmount(null);
   }, [customer?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -387,12 +389,13 @@ export default function NewOrder() {
   const termsWords = onCycle ? `their ${customer!.invoice_cycle!.toLowerCase()} invoice`
     : customer?.payment_terms ? `their ${customer.payment_terms} terms` : 'their terms';
   const whens: Array<[PayWhen, string]> = past ? [['Now', 'Paid at the time'], ['On account', 'On account']] : [
-    ['Now', 'Now'],
+    ['Now', outMode === 'Delivery' ? 'Paid now, in the office' : 'Now'],
     ...(outMode === 'Delivery' ? [['On delivery', 'On delivery'] as [PayWhen, string]] : []),
     ['On account', 'On account'],
   ];
   const when: PayWhen = isWalkIn ? 'Now'
-    : payWhen === 'On delivery' && outMode !== 'Delivery' ? 'On account' : payWhen;
+    : payWhen === 'On delivery' && past ? 'Now'
+      : payWhen === 'On delivery' && outMode !== 'Delivery' ? 'On account' : payWhen;
   const takingNow = isWalkIn || (isAccount && when === 'Now');
   const amountTyped = amount ?? ((isWalkIn ? totals.grandTotal : due) / 100).toFixed(2);
   const amountCents = centsOf(amountTyped);
@@ -1042,6 +1045,11 @@ export default function NewOrder() {
           )}
           {isAccount && when === 'On delivery' && (
             <div className="small">The driver collects {money(due)} at the door; it is settled with the round.</div>
+          )}
+          {isAccount && when === 'Now' && outMode === 'Delivery' && !past && (
+            <div className="small" style={{ color: 'var(--warn-ink, #8a5a00)' }}>
+              Only if the money is in the office now. The driver then has nothing to collect for this order; if the driver collects it too, it is counted twice.
+            </div>
           )}
           {isAccount && when === 'On account' && (
             <div className="small">Nothing taken now. It goes on {termsWords}.</div>

@@ -531,7 +531,7 @@ export async function roundsReport(db: Db, from?: string | null, to?: string | n
     started: boolean; stops: number; delivered: number; missed: number; pending: number;
     invoiced_cents: number; recorded_cents: number; actual_cash_cents: number | null;
     cash_variance_cents: number | null; empties_recorded: number; bottle_actual_returned: number | null;
-    bottle_variance: number | null; full_out: number;
+    bottle_variance: number | null; full_out: number; settlement_notes: string | null; bottle_settle_notes: string | null;
   }>(
     `SELECT d.id, d.delivery_date::text AS delivery_date, d.zone, d.status,
             COALESCE(u.name, d.driver_name) AS driver, (d.started_at IS NOT NULL) AS started,
@@ -546,7 +546,7 @@ export async function roundsReport(db: Db, from?: string | null, to?: string | n
               + (SELECT COALESCE(SUM(rc.empties_count), 0) FROM round_collections rc
                  WHERE rc.delivery_sheet_id = d.id AND rc.kind = 'Empties' AND rc.status = 'Collected'))::int AS empties_recorded,
             COALESCE(SUM(s.bottles_delivered_full), 0)::int AS full_out,
-            d.bottle_actual_returned, d.bottle_variance
+            d.bottle_actual_returned, d.bottle_variance, d.settlement_notes, d.bottle_settle_notes
      FROM delivery_sheets d
      LEFT JOIN users u ON u.id = d.assigned_driver_id
      LEFT JOIN delivery_stops s ON s.delivery_sheet_id = d.id
@@ -567,6 +567,8 @@ export async function roundsReport(db: Db, from?: string | null, to?: string | n
     fullOut: num(r.full_out), emptiesRecorded: num(r.empties_recorded),
     emptiesCounted: r.bottle_actual_returned === null ? null : num(r.bottle_actual_returned),
     bottleVariance: r.bottle_variance === null ? null : num(r.bottle_variance),
+    // What the office wrote at settlement (27 Oct 2026: notes were hard to find).
+    notes: [r.settlement_notes, r.bottle_settle_notes].filter((x) => x && String(x).trim()).join('\n') || null,
   }));
 
   const settled = rounds.filter((r) => r.status === 'Completed');

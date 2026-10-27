@@ -11,6 +11,7 @@
 import type { Db } from '../db/index.ts';
 import type { Actor } from './core.ts';
 import { requireRole } from './core.ts';
+import { describeAuditRows } from './auditwords.ts';
 
 export interface AuditQuery {
   from?: string | null;
@@ -36,7 +37,9 @@ export async function listAuditLog(db: Db, actor: Actor, q: AuditQuery = {}) {
   const actions = (q.actions ?? []).filter((a) => ACTIONS.includes(a));
   const needle = (q.q ?? '').trim();
   const rows = await db.query<Record<string, unknown>>(
-    `SELECT a.id, a.ts::text AS ts, a.user_id, COALESCE(a.user_name, u.name, u.email, 'System') AS user_name,
+    // The moment as ISO with its zone ("...Z"), so every browser reads it the
+    // same; the screen shows it in Jamaica time.
+    `SELECT a.id, to_char(a.ts AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS ts, a.user_id, COALESCE(a.user_name, u.name, u.email, 'System') AS user_name,
             a.action, a.entity_type, a.entity_id, a.entity_label, a.details
      FROM audit_log a LEFT JOIN users u ON u.id = a.user_id
      WHERE ($1::date IS NULL OR business_date(a.ts) >= $1::date)
@@ -52,7 +55,8 @@ export async function listAuditLog(db: Db, actor: Actor, q: AuditQuery = {}) {
     [q.from || null, q.to || null, q.userId || null, types, actions, needle, q.before || null, limit + 1],
   );
   const more = rows.length > limit;
-  return { rows: rows.slice(0, limit), more };
+  // In plain words (27 Oct 2026).
+  return { rows: await describeAuditRows(db, rows.slice(0, limit) as never), more };
 }
 
 /** What can be filtered on: the people and kinds of thing that appear in the log. */

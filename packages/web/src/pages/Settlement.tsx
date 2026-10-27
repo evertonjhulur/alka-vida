@@ -32,6 +32,8 @@ interface StopRow {
   bottlesEmptiesPickedUp: number;
   bottlesLostDamaged: number;
   collectedCents: number;
+  /** Already paid at the office for this order before it went out (27 Oct 2026). */
+  paidBeforeCents?: number; paidBeforeReceipts?: string[];
   expectedCents: number;
   varianceCents: number;
   allocations: Allocation[];
@@ -395,6 +397,16 @@ export default function Settlement({ session }: { session: Session }) {
       {error && <div className="notice error">{error}</div>}
       {msg && <div className="notice ok">{msg}</div>}
       {done && <div className="notice ok">{done}</div>}
+      {(() => {
+        const twice = review.stops.filter((x) => !x.settled && x.collectedCents > 0 && Number(x.paidBeforeCents) > 0);
+        return twice.length > 0 ? (
+          <div className="notice warn">
+            <strong>Check before settling:</strong> {twice.map((x) => x.customerName).join(', ')}
+            {twice.length === 1 ? ' was' : ' were'} already recorded as paid at the office when the order was taken, and the driver
+            also recorded collecting. If the customer paid once, change the driver's amount on the stop (Open), or reverse the office payment.
+          </div>
+        ) : null;
+      })()}
       {locked && (
         <div className="notice info">
           This route is closed and locked. Any further correction must go through a
@@ -432,7 +444,16 @@ export default function Settlement({ session }: { session: Session }) {
                 <td className="small muted">{s.deliveredSummary || '—'}</td>
                 <td className="small">{bottleWords(s)}</td>
                 <td className="num">{money(s.expectedCents)}</td>
-                <td className="num">{money(s.collectedCents)}</td>
+                <td className="num">{money(s.collectedCents)}
+                  {Number(s.paidBeforeCents) > 0 && (
+                    <div className={`small ${s.collectedCents > 0 ? 'bad-text' : 'muted'}`}
+                         title="Recorded at the office when the order was taken">
+                      {s.collectedCents > 0 ? 'Also ' : ''}paid at the office: {money(Number(s.paidBeforeCents))}
+                      {(s.paidBeforeReceipts ?? []).length ? ` (${(s.paidBeforeReceipts ?? []).join(', ')})` : ''}
+                      {s.collectedCents > 0 ? ' - counted twice?' : ''}
+                    </div>
+                  )}
+                </td>
                 <td className="num">
                   {s.varianceCents === 0
                     ? <span className="muted">—</span>
@@ -564,7 +585,11 @@ export default function Settlement({ session }: { session: Session }) {
           {review.bottles.lostDamaged > 0 && (
             <div className="total-line"><span>Lost or damaged</span><span>{review.bottles.lostDamaged}</span></div>
           )}
-          {review.settledCash?.notes && <p className="small" style={{ marginBottom: 0 }}><strong>Notes:</strong> {review.settledCash.notes}</p>}
+          {review.settledCash?.notes && (
+            <div className="notice info" style={{ whiteSpace: 'pre-line', marginTop: 10, marginBottom: 0 }}>
+              <strong>Settlement notes</strong>{'\n'}{review.settledCash.notes}
+            </div>
+          )}
         </div>
       )}
 

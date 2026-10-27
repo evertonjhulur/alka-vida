@@ -988,11 +988,13 @@ export async function buildServer(db: Db) {
 
   app.post('/api/orders/:id/cancel', { preHandler: allow('admin', 'user') },
     async (req) => {
-      await orders.cancelOrder(db, actorOf(req), (req.params as { id: string }).id,
-        (req.body as { reason?: string })?.reason);
-      // "Order cancelled" email (7 Oct 2026, point 4), if they want it.
-      void messaging.sendOrderCancelledEmail(db, (req.params as { id: string }).id,
-        (req.body as { reason?: string })?.reason ?? null).catch(() => {});
+      const body = (req.body ?? {}) as { reason?: string; notify?: boolean };
+      await orders.cancelOrder(db, actorOf(req), (req.params as { id: string }).id, body.reason);
+      // "Order cancelled" email (7 Oct 2026, point 4), if they want it - and
+      // unless the office says not to, e.g. an order entered in error (27 Oct 2026).
+      if (body.notify !== false) {
+        void messaging.sendOrderCancelledEmail(db, (req.params as { id: string }).id, body.reason ?? null).catch(() => {});
+      }
       return { ok: true };
     });
 

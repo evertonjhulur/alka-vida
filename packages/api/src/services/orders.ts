@@ -838,6 +838,9 @@ export async function editOrder(
     const newDate = changes.requestedDeliveryDate ?? null;
     const dateMoved = !!newDate && newDate !== order.requested_delivery_date;
     const addressMoved = changes.addressId !== undefined && addressId !== order.address_id;
+    // For the audit log (27 Oct 2026): a moved order says from where to where.
+    let movedFrom: string | null = null;
+    let movedTo: string | null = null;
     if ((dateMoved || addressMoved) && order.delivery_mode === 'Delivery' && !order.needs_review) {
       const current = await t.maybeOne<{ id: string; started: boolean; zone: string; day: string }>(
         `SELECT st.id, (ds.started_at IS NOT NULL) AS started, ds.zone, ds.delivery_date::text AS day
@@ -852,10 +855,18 @@ export async function editOrder(
           + 'was left on it. Take it off that round first if it is not going today.',
         );
       } else {
-        if (current) await t.query(`DELETE FROM delivery_stops WHERE id = $1`, [current.id]);
+        if (current) {
+          await t.query(`DELETE FROM delivery_stops WHERE id = $1`, [current.id]);
+          movedFrom = `${current.zone} round, ${current.day}`;
+        }
         const placed = await placeOnDeliverySheet(t, orderId, order.customer_id,
           newDate ?? order.requested_delivery_date, addressId);
         warnings.push(...placed.warnings);
+        if (placed.sheetId) {
+          const to = await t.one<{ zone: string; day: string }>(
+            `SELECT zone, delivery_date::text AS day FROM delivery_sheets WHERE id = $1`, [placed.sheetId]);
+          movedTo = `${to.zone} round, ${to.day}`;
+        }
       }
     }
 
@@ -863,6 +874,8 @@ export async function editOrder(
       linesReplaced: !!changes.lines,
       discountPercent,
       grandTotalCents: totals.grandTotal,
+      ...(dateMoved ? { deliveryDateFrom: String(order.requested_delivery_date ?? '').slice(0, 10) || null, deliveryDateTo: newDate } : {}),
+      ...(movedFrom || movedTo ? { roundFrom: movedFrom, roundTo: movedTo } : {}),
     });
 
     return {

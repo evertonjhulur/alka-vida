@@ -981,7 +981,9 @@ export async function resequenceStops(
 }
 
 export async function getSheet(db: Db, sheetId: string) {
-  const sheet = await db.maybeOne(`SELECT * FROM delivery_sheets WHERE id = $1`, [sheetId]);
+  const sheet = await db.maybeOne(
+    `SELECT ds.*, u.name AS reconciled_by_name FROM delivery_sheets ds
+     LEFT JOIN users u ON u.id = ds.reconciled_by WHERE ds.id = $1`, [sheetId]);
   if (!sheet) return null;
   const stops = await db.query(
     `SELECT s.*, c.name AS customer_name,

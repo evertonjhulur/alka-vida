@@ -48,6 +48,13 @@ export interface SettlementStopRow {
   bottlesLostDamaged: number;
   /** What the driver recorded collecting. */
   collectedCents: Cents;
+  /**
+   * Money already recorded at the office for this stop's order before it went
+   * out (27 Oct 2026): if the driver ALSO recorded collecting, it is very
+   * likely counted twice.
+   */
+  paidBeforeCents?: Cents;
+  paidBeforeReceipts?: string[];
   /** Tax-inclusive amount that was owed for this stop. */
   expectedCents: Cents;
   /** expected - collected, per stop, so a discrepancy traces to one stop. */
@@ -140,13 +147,13 @@ export async function getSettlementReview(
   );
 
   const stops = await db.query<{
-    id: string; customer_id: string; customer_name: string; stop_outcome: string;
+    id: string; customer_id: string; order_id: string | null; customer_name: string; stop_outcome: string;
     order_ref: string | null; payment_method: string | null;
     payment_amount_cents: number; settled_at: string | null;
     bottles_delivered_full: number; bottles_empties_picked_up: number;
     bottles_lost_damaged: number; after_stop_id: string | null; line_items_summary: string | null;
   }>(
-    `SELECT s.id, s.customer_id, c.name AS customer_name, s.stop_outcome, s.order_ref, s.after_stop_id,
+    `SELECT s.id, s.customer_id, s.order_id, c.name AS customer_name, s.stop_outcome, s.order_ref, s.after_stop_id,
             s.line_items_summary,
             s.payment_method, s.payment_amount_cents, s.settled_at,
             s.bottles_delivered_full, s.bottles_empties_picked_up, s.bottles_lost_damaged
@@ -198,8 +205,15 @@ export async function getSettlementReview(
       ];
     }
 
+    const before = s.order_id && !s.after_stop_id ? await db.one<{ cents: string; receipts: string[] | null }>(
+      `SELECT COALESCE(SUM(amount_cents), 0)::text AS cents,
+              array_agg(DISTINCT receipt_number) FILTER (WHERE receipt_number IS NOT NULL AND NOT is_reversal) AS receipts
+       FROM payments WHERE order_id = $1 AND delivery_stop_id IS NULL AND status = 'Confirmed'`, [s.order_id]) : null;
+
     rows.push({
       stopId: s.id,
+      paidBeforeCents: before ? num(before.cents) : 0,
+      paidBeforeReceipts: before?.receipts ?? [],
       customerName: s.customer_name,
       outcome: s.stop_outcome,
       orderRef: s.order_ref,
@@ -619,6 +633,8 @@ export async function settleRoute(
       cashVarianceIsDriverAccountabilityOnly: true,
       bottleVariance,
       status,
+      notes: args.settlementNotes?.trim() || null,
+      bottleNotes: args.bottleSettleNotes?.trim() || null,
     });
 
     return {

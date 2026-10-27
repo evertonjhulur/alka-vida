@@ -2311,3 +2311,63 @@ Everton: after speaking to customers, some invoices imported from QuickBooks
 - Invoice page: "Change the amount or dates" on a QuickBooks balance - dates,
   Amount owed on it (shows what it was), QuickBooks invoice no., Why.
 - Test added to `api/test/invoiceedit.test.ts`. 559 API tests pass.
+
+## Audit log in plain words; cash taken twice (27 Oct 2026)
+
+Everton: audit the 26 Oct Portmore/Downtown settlement (payment adjustments,
+Atpoint and Ann Marie Hall); audit log descriptions vague; times on the
+system and in the audit log did not match.
+
+Findings on live data (see project doc claude/settlement-audit-26-oct-2026.md):
+the office recorded cash with each order when it was taken ("Now" was the
+default payment timing for customers on Due on receipt terms), and the
+driver then recorded collecting the same cash at the stop, which settlement
+posted as a second payment. Those order-entry payments were dated 12:00 pm
+(a date with no time) while the log showed the real time.
+
+- `NewOrder`: a delivery now defaults to "On delivery" (account terms still
+  "On account"); "Now" for a delivery is labelled "Paid now, in the office"
+  with a warning that the driver must then not collect it.
+- `payments.paymentInstant`: today's date means now (the real time); an
+  earlier day stays noon. Payment changes keep the old rule.
+- Settlement review: each stop shows money already recorded at the office for
+  its order (`paidBeforeCents`, receipts); a banner lists stops where the
+  driver ALSO recorded collecting - "counted twice?".
+- `services/auditwords.ts` `describeAuditRows`: every audit row gets a
+  plain-English `summary` and a readable `record` (customer, receipt, invoice
+  and order numbers, round and day instead of ids), with ids looked up in one
+  batch per kind; `listAuditLog` returns ts as ISO with Z. Audit log screen:
+  "What happened" column, Details on demand, export includes the sentence.
+- Tests: new `api/test/auditwords.test.ts`. 560 API tests pass.
+
+## Moved orders in the audit log; delete-round wording (27 Oct 2026)
+
+- `orders.editOrder` audit now carries `deliveryDateFrom/To` and `roundFrom/To`
+  when an order's day (or address) moves it to another round; the audit
+  sentence says "Delivery moved from Thu 29 Oct to Tue 27 Oct (now on the
+  West St. Andrew round, 2026-10-27, off the ...)". Before, a date change left
+  no trace in the log.
+- Deleting a round: the confirmation says plainly that its orders are NOT
+  cancelled (they wait for delivery again; Cancel order is on Orders). On
+  27 Oct Collin deleted a 2 Nov round expecting it to remove SO-001032.
+- Cancel order: a tick "Email <customer> that it is cancelled" (on by
+  default); `POST /api/orders/:id/cancel` takes `notify: false` to skip the
+  email - for an order entered in error (SO-001032, 27 Oct 2026).
+
+## Settlement notes everywhere (27 Oct 2026)
+
+Everton: opening a settled round he could not see its settlement notes; he
+wants them on everything that shows a round.
+
+- `delivery.getSheet` adds `reconciled_by_name`. Round page, once settled:
+  "Settled <day, time> by <name>", cash handed in, short/over, empties
+  counted, and a Settlement notes box (line by line), with a link to the
+  settlement. Step 4 shows when and who.
+- Settlement page: notes in a box, line by line.
+- `reports.roundsReport` returns `notes` (settlement + bottle notes): shown
+  under each round on Reports -> Rounds and cash and End of day, in the
+  Rounds export, and in the end-of-day PDF.
+- Settlement audit row now stores `notes` / `bottleNotes`; the audit
+  sentence quotes them (for rounds settled before this, the round's current
+  notes).
+- Test added to `api/test/auditwords.test.ts`. 561 API tests pass.

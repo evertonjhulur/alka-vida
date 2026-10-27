@@ -72,6 +72,8 @@ interface RoundRow {
   stops: number; delivered: number; missed: number; pending: number; invoicedCents: number;
   recordedCents: number; handedInCents: number | null; cashVarianceCents: number | null;
   fullOut: number; emptiesRecorded: number; emptiesCounted: number | null; bottleVariance: number | null;
+  /** What the office wrote at settlement (27 Oct 2026). */
+  notes?: string | null;
 }
 interface Rounds {
   totals: { rounds: number; settled: number; stops: number; delivered: number; missed: number;
@@ -274,10 +276,10 @@ export default function Reports() {
       ]);
     } else if (tab === 'rounds' && rounds) {
       downloadCsv(file('rounds-and-cash'), [
-        ['Date', 'Round', 'Driver', 'Status', 'Stops', 'Delivered', 'Not delivered', 'Invoiced', 'Recorded by driver', 'Handed in', 'Difference', 'Full bottles out', 'Empties recorded', 'Empties counted'],
+        ['Date', 'Round', 'Driver', 'Status', 'Stops', 'Delivered', 'Not delivered', 'Invoiced', 'Recorded by driver', 'Handed in', 'Difference', 'Full bottles out', 'Empties recorded', 'Empties counted', 'Settlement notes'],
         ...rounds.rounds.map((r) => [r.date, r.zone, r.driver ?? '', r.status === 'Completed' ? 'Settled' : 'Open', r.stops, r.delivered, r.missed,
           dollars(r.invoicedCents), dollars(r.recordedCents), dollars(r.handedInCents), dollars(r.cashVarianceCents),
-          r.fullOut, r.emptiesRecorded, r.emptiesCounted ?? '']),
+          r.fullOut, r.emptiesRecorded, r.emptiesCounted ?? '', (r.notes ?? '').replace(/\s*\n\s*/g, '; ')]),
       ]);
     } else if (tab === 'margin' && margin) {
       downloadCsv(file('margin'), [
@@ -609,7 +611,8 @@ export default function Reports() {
                 <tbody>{eod.rounds.rounds.map((r) => (
                   <tr key={r.id}>
                     <td data-label="Round"><Link to={`/delivery/${r.id}`}>{r.zone}</Link>
-                      <div className="muted small">{r.status === 'Completed' ? 'settled' : !r.started ? 'not started' : r.pending > 0 ? 'on the road' : 'back, to settle'}</div></td>
+                      <div className="muted small">{r.status === 'Completed' ? 'settled' : !r.started ? 'not started' : r.pending > 0 ? 'on the road' : 'back, to settle'}</div>
+                      {r.notes && <div className="small" style={{ whiteSpace: 'pre-line', marginTop: 4 }}><strong>Notes:</strong> {r.notes}</div>}</td>
                     <td data-label="Driver" className="small">{r.driver ?? '—'}</td>
                     <td data-label="Stops" className="num">{r.delivered} of {r.stops} delivered
                       {(r.missed > 0 || r.pending > 0) && <div className="muted small">{[r.missed ? `${r.missed} not delivered` : '', r.pending ? `${r.pending} not done` : ''].filter(Boolean).join(', ')}</div>}</td>
@@ -744,6 +747,7 @@ export default function Reports() {
                     <td>
                       <Link to={`/delivery/${r.id}`}>{r.zone} · {day(r.date)}</Link>
                       <div className="muted small">{r.status === 'Completed' ? 'settled' : !r.started ? 'not started' : r.pending > 0 ? 'on the road' : 'back, to settle'}</div>
+                      {r.notes && <div className="small" style={{ whiteSpace: 'pre-line', marginTop: 4 }}><strong>Notes:</strong> {r.notes}</div>}
                     </td>
                     <td className="small">{r.driver ?? '—'}</td>
                     <td className="num">{r.delivered} of {r.stops}{r.missed ? <div className="muted small">{r.missed} not delivered</div> : null}</td>
