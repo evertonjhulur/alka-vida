@@ -1,53 +1,68 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
+import { useLocation } from 'react-router-dom';
+import { staleKind, type StaleKind } from '../lib/version';
 
 /**
- * Warns when Alka Vida is running a server older than the app it is serving.
+ * Keeps every open screen on the version of Alka Vida that is live.
  *
- * The server hands the browser whatever is on disk, but keeps running the API
- * it started with. After an update those two are different: new screens call
- * endpoints the running copy has never heard of, and the page dies with no
- * explanation. That has cost several testing sessions here, each one looking
- * like a fresh bug.
+ * Two ways a screen falls behind:
  *
- * The check is a comparison of one string: the script filename the server saw
- * at startup, against the one this browser actually loaded. Vite renames the
- * bundle on every build, so they differ if and only if the app was rebuilt
- * after the server came up.
+ *  - 'page' (28 Oct 2026): a new version went live while this tab stayed
+ *    open. The tab keeps running the old screens - Collin's New order kept
+ *    taking payment at order entry for two days after that was fixed, because
+ *    his tab was opened before the update. The check now runs every two
+ *    minutes and whenever the window comes back into view; when it finds a
+ *    new version it shows a bar with Reload, and the next time the person
+ *    moves to another screen the page reloads by itself (never mid-form).
+ *
+ *  - 'server': on the office computer, the app was rebuilt after the server
+ *    started, so the screens ask a server that is older than they are.
+ *    Restarting Alka Vida fixes it; a reload does not.
  */
 export default function StaleServerNotice() {
-  const [stale, setStale] = useState(false);
+  const [stale, setStale] = useState<StaleKind>(null);
+  const { pathname } = useLocation();
+  const first = useRef(true);
 
   useEffect(() => {
     let cancelled = false;
-    (async () => {
-      try {
-        const res = await fetch('/api/version');
-        // A server old enough not to have this endpoint IS the stale server
-        // this warns about - which is the case that has caught us out so far.
-        // 404 when it routes normally; 401 when its auth hook guards every
-        // /api/ path before routing, which older builds do.
-        if (res.status === 404 || res.status === 401) {
-          if (!cancelled) setStale(true);
-          return;
-        }
-        if (!res.ok) return;
-        const { build } = (await res.json()) as { build: string | null };
-        if (!build) return; // dev server, or no build on disk: nothing to compare
-
-        // Which bundle is this page actually running?
-        const running = [...document.querySelectorAll('script[src]')]
-          .map((s) => (s as HTMLScriptElement).src)
-          .map((src) => src.split('/assets/')[1])
-          .find(Boolean);
-        if (!running) return;
-
-        if (!cancelled && running !== build) setStale(true);
-      } catch { /* offline or starting up: say nothing rather than cry wolf */ }
-    })();
-    return () => { cancelled = true; };
+    const check = async () => {
+      if (document.visibilityState !== 'visible') return;
+      const k = await staleKind(fetch.bind(window), runningBuild());
+      if (!cancelled && k) setStale(k);
+    };
+    void check();
+    const t = setInterval(() => { void check(); }, 120_000);
+    const onShow = () => { void check(); };
+    document.addEventListener('visibilitychange', onShow);
+    window.addEventListener('focus', onShow);
+    return () => {
+      cancelled = true;
+      clearInterval(t);
+      document.removeEventListener('visibilitychange', onShow);
+      window.removeEventListener('focus', onShow);
+    };
   }, []);
 
+  // Moving to another screen is the safe moment: nothing half-typed is lost.
+  useEffect(() => {
+    if (first.current) { first.current = false; return; }
+    if (stale === 'page') window.location.reload();
+  }, [pathname]); // eslint-disable-line react-hooks/exhaustive-deps
+
   if (!stale) return null;
+
+  if (stale === 'page') {
+    return (
+      <div className="notice warn update-bar" style={{ margin: '0 0 12px' }}>
+        <span>
+          <strong>A new version of Alka Vida is ready.</strong>{' '}
+          Reload to use it. It loads by itself when you next move to another screen.
+        </span>
+        <button className="go" onClick={() => window.location.reload()}>Reload now</button>
+      </div>
+    );
+  }
 
   return (
     <div className="notice warn" style={{ margin: '0 0 12px' }}>
@@ -57,4 +72,12 @@ export default function StaleServerNotice() {
       version for things it does not have.
     </div>
   );
+}
+
+/** Which bundle this page is actually running. */
+function runningBuild(): string | null {
+  return [...document.querySelectorAll('script[src]')]
+    .map((s) => (s as HTMLScriptElement).src)
+    .map((src) => src.split('/assets/')[1])
+    .find(Boolean) ?? null;
 }

@@ -53,11 +53,15 @@ export function takeReturnPath(): string | null {
 }
 
 /** The session ran out: remember where they were, and show the sign-in page. */
-function sessionExpired(): void {
+export function rememberReturnPath(): void {
   try {
     const here = window.location.hash;
     if (here && here !== '#/' && !here.startsWith('#/login')) sessionStorage.setItem(RETURN_KEY, here);
   } catch { /* ignore */ }
+}
+
+function sessionExpired(): void {
+  rememberReturnPath();
   clearSession();
   window.dispatchEvent(new Event('alkavida:signed-out'));
   window.location.hash = '#/login';
@@ -158,6 +162,8 @@ export const api = {
   async login(email: string, password: string) {
     const out = await request<{ session: Session }>('POST', '/api/auth/login', { email, password });
     setSession(out.session);
+    // A fresh sign-in starts the idle clock again (lib/idle.ts).
+    try { localStorage.setItem('alkavida.lastActive', String(Date.now())); } catch { /* ignore */ }
     return out.session;
   },
 

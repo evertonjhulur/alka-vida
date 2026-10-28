@@ -2371,3 +2371,45 @@ wants them on everything that shows a round.
   sentence quotes them (for rounds settled before this, the round's current
   notes).
 - Test added to `api/test/auditwords.test.ts`. 561 API tests pass.
+
+## Payment doubles cleared; new-version check; idle sign-out (28 Oct 2026)
+
+Everton: "Collin did not restart yesterday and the autopayment issue at the
+time of order has continued to occur from Monday."
+
+Live data, settlement first (done through the app's own reverse endpoint, as
+admin, each with a reason in the audit log): the live site already had the
+27 Oct "On delivery" default, so Collin's tab was simply opened before that
+update and kept running the old New order screen. Monday's and most of
+Tuesday's doubles had already been reversed on 27 Oct. Reversed on 28 Oct,
+on Everton's say-so (all 11, $12,799.93): RCT-001049 Aston Clarke (West St.
+Andrew 27 Oct, the driver also took $1,000 - RCT-001061, on OB-14400 by the
+oldest-first rule) and the ten order-entry cash payments on the 28 Oct New
+Kingston/Cross Roads round, RCT-001062 to RCT-001071. The driver's screen
+then showed the real amount to collect; at settlement the cash handed in
+decides, and a stop he delivered without recording money is corrected there.
+Left as it was: RCT-001020 Ann Marie Hall (26 Oct; part of the 27 Oct audit,
+not reversed then) and RCT-001073 Vivienne Plummer (recorded on 28 Oct,
+dated 27 Oct, not tied to an order).
+
+- `settlement.getSettlementReview`: `paidBeforeCents` / receipts leave out
+  payments since reversed (reversal rows carry no order_id, so they still
+  showed as "counted twice?"). Test added to `api/test/auditwords.test.ts`.
+- New-version check (`components/StaleServerNotice.tsx`, `lib/version.ts`):
+  checks every 2 minutes and whenever the window comes back into view, not
+  only when the page first loads. `staleKind` tells the two cases apart by
+  the bundle named in the index page now served: 'page' (a new version is
+  live, this tab is old) shows "A new version of Alka Vida is ready" with
+  Reload now, and the page reloads by itself on the next move to another
+  screen (never mid-form); 'server' (office computer rebuilt without a
+  restart) keeps the old close-and-reopen message.
+- Idle sign-out (`components/IdleSignOut.tsx`, `lib/idle.ts`), Everton's
+  rulings: 15 minutes for admin and office logins only (drivers and
+  customers are never timed out), a "Still there?" warning with Stay signed
+  in for the last minute. Last activity is shared across tabs through
+  localStorage (`alkavida.lastActive`, written at most every 5 s and on
+  sign-in), so a screen left overnight signs out the moment it is looked at.
+  Signing back in returns to the same screen; the sign-in page says why.
+- Tests: new `web/test/idleversion.test.ts`. 561 API tests, 16 web tests pass.
+  Checked in a real browser: warning, sign-out, message, return to screen;
+  the update bar and the reload on navigation.

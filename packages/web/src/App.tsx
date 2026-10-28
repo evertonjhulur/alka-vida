@@ -33,6 +33,7 @@ import Bom from './pages/Bom';
 import Payments from './pages/Payments';
 import ErrorBoundary from './components/ErrorBoundary';
 import StaleServerNotice from './components/StaleServerNotice';
+import IdleSignOut from './components/IdleSignOut';
 import TopBar from './components/TopBar';
 import SectionTabs, { BackToSettings, type Tab } from './components/SectionTabs';
 import SettingsHub from './pages/SettingsHub';
@@ -322,6 +323,7 @@ function Shell({ session }: { session: Session }) {
       <TopBar session={session} pending={pending} onSignOut={signOut} />
       <main className="main">
         <StaleServerNotice />
+        <IdleSignOut session={session} />
         <ErrorBoundary>
         <Routes>
           <Route path="/" element={<HomeFor session={session} />} />

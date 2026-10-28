@@ -206,9 +206,14 @@ export async function getSettlementReview(
     }
 
     const before = s.order_id && !s.after_stop_id ? await db.one<{ cents: string; receipts: string[] | null }>(
-      `SELECT COALESCE(SUM(amount_cents), 0)::text AS cents,
-              array_agg(DISTINCT receipt_number) FILTER (WHERE receipt_number IS NOT NULL AND NOT is_reversal) AS receipts
-       FROM payments WHERE order_id = $1 AND delivery_stop_id IS NULL AND status = 'Confirmed'`, [s.order_id]) : null;
+      // A payment since reversed no longer counts (28 Oct 2026: the doubles
+      // reversed after the 26-28 Oct rounds still showed as "counted twice?").
+      `SELECT COALESCE(SUM(p.amount_cents), 0)::text AS cents,
+              array_agg(DISTINCT p.receipt_number) FILTER (WHERE p.receipt_number IS NOT NULL) AS receipts
+       FROM payments p
+       WHERE p.order_id = $1 AND p.delivery_stop_id IS NULL AND p.status = 'Confirmed'
+         AND NOT p.is_reversal
+         AND NOT EXISTS (SELECT 1 FROM payments r WHERE r.reverses_payment_id = p.id)`, [s.order_id]) : null;
 
     rows.push({
       stopId: s.id,

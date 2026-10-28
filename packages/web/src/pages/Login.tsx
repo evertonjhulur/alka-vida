@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { Link, useLocation } from 'react-router-dom';
 import { api, type Session } from '../lib/api';
 import Logo from '../components/Logo';
+import { takeIdleSignedOut } from '../lib/idle';
 
 /**
  * Sign in (approved mockup, 29 Sep 2026): the logo on white on the left, the
@@ -18,6 +19,8 @@ export default function Login({ onSignedIn }: { onSignedIn: (s: Session) => void
   // "Forgotten your password?" on the website comes here with ?forgot=1.
   const [forgot, setForgot] = useState(new URLSearchParams(useLocation().search).get('forgot') === '1');
   const [resetSent, setResetSent] = useState(false);
+  // Signed out for being idle (28 Oct 2026): say so, once.
+  const [idleOut] = useState(takeIdleSignedOut);
 
   /** "Forgotten your password?": a reset link by email, never a yes/no on the address. */
   async function sendReset(e: React.FormEvent) {
@@ -95,6 +98,9 @@ export default function Login({ onSignedIn }: { onSignedIn: (s: Session) => void
         ) : (
         <form className="login-card" onSubmit={submit}>
           <h1>Sign in</h1>
+          {idleOut && !error && (
+            <div className="notice info">You were signed out after 15 minutes without activity. Sign in to carry on where you were.</div>
+          )}
           {error && <div className="notice error">{error}</div>}
           <div className="field">
             <label htmlFor="email">Email</label>

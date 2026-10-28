@@ -1789,3 +1789,13 @@ button.order-tile.delivered { border-left-color: var(--ok); }
 .ns-past-tick input { width: 18px; height: 18px; }
 .ns-past-date { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; }
 .ns-past-date label { margin: 0; color: var(--ink); font-size: 14px; }
+
+/* Idle sign-out warning (28 Oct 2026) and the new-version bar. */
+.idle-overlay { position: fixed; inset: 0; background: rgba(22, 32, 44, .45); display: flex;
+  align-items: center; justify-content: center; z-index: 1000; padding: 16px; }
+.idle-card { background: #fff; border-radius: 10px; padding: 20px 22px; max-width: 380px; width: 100%;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, .25); }
+.idle-card h2 { margin: 0 0 8px; font-size: 20px; }
+.idle-card p { margin: 0 0 10px; }
+.idle-actions { display: flex; justify-content: flex-end; margin-top: 6px; }
+.update-bar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; justify-content: space-between; }

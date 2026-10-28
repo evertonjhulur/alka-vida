@@ -7,7 +7,7 @@ import assert from 'node:assert/strict';
 import { setupFixture, type Fixture } from './helpers.ts';
 import { createOrder } from '../src/services/orders.ts';
 import { markStop } from '../src/services/delivery.ts';
-import { receivePayment } from '../src/services/payments.ts';
+import { receivePayment, reversePayment } from '../src/services/payments.ts';
 import { getSettlementReview, settleRoute } from '../src/services/settlement.ts';
 import { listAuditLog } from '../src/services/auditlog.ts';
 import { roundsReport } from '../src/services/reports.ts';
@@ -41,6 +41,12 @@ describe('Audit words and the double-count check', () => {
     const row = review.stops.find((s) => s.stopId === st.id)!;
     assert.equal(row.paidBeforeCents, 103_500, 'the office payment is shown beside the driver\'s');
     assert.equal(row.collectedCents, 103_500);
+    // Once the office payment is reversed it no longer shows as counted twice (28 Oct 2026).
+    await reversePayment(f.db, f.admin, p.paymentIds[0], 'counted twice');
+    const again = (await getSettlementReview(f.db, st.delivery_sheet_id)).stops.find((s) => s.stopId === st.id)!;
+    assert.equal(again.paidBeforeCents, 0, 'a reversed office payment is not shown');
+    assert.deepEqual(again.paidBeforeReceipts, []);
+    assert.equal(again.expectedCents, 103_500, 'the driver collects the full amount again');
     await settleRoute(f.db, f.office, st.delivery_sheet_id, { actualCashCents: 103_500 });
 
     const log = await listAuditLog(f.db, f.admin, { from: businessToday(), limit: 100 });
