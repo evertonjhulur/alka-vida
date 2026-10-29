@@ -1799,3 +1799,37 @@ button.order-tile.delivered { border-left-color: var(--ok); }
 .idle-card p { margin: 0 0 10px; }
 .idle-actions { display: flex; justify-content: flex-end; margin-top: 6px; }
 .update-bar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; justify-content: space-between; }
+
+/* The send screen (28 Oct 2026): Email... opens in a new tab. */
+.send-page { max-width: 860px; margin: 0 auto; }
+.send-page h1 { margin-bottom: 6px; }
+.send-sub { margin: 0 0 14px; }
+.send-grid { display: grid; grid-template-columns: 90px minmax(0, 1fr); gap: 10px 12px; align-items: start; }
+.send-grid > label, .send-attach-label { margin: 8px 0 0; font-size: 14px; font-weight: 600; color: var(--ink); }
+.send-grid input:not([type=checkbox]), .send-grid textarea { width: 100%; box-sizing: border-box; }
+.send-grid textarea { line-height: 1.45; resize: vertical; min-height: 180px; }
+.send-grid .send-me { margin: 0; }
+.send-files { display: flex; flex-direction: column; gap: 8px; }
+.send-file { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px; }
+.send-file.extra { border-style: dashed; border-color: var(--brand); background: var(--info-bg); }
+.send-spacer { flex: 1 1 auto; }
+.send-attach-row { align-items: center; }
+.send-over { color: var(--bad); font-weight: 600; }
+.send-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--line); }
+.send-batch-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.send-progress { display: flex; gap: 4px; margin: 8px 0 14px; }
+.send-progress span { flex: 1 1 0; height: 6px; border-radius: 3px; background: var(--line); }
+.send-progress span.done { background: var(--ok); }
+.send-progress span.now { background: var(--brand); }
+.send-cannot { margin: 6px 0; padding-left: 20px; }
+.send-done h1 { color: var(--ok); }
+.send-results td { vertical-align: top; }
+.send-result.sent strong { color: var(--ok); }
+.send-result.failed strong, .send-result.not-sent strong { color: var(--bad); }
+.send-link { align-self: center; }
+@media (max-width: 600px) {
+  .send-grid { grid-template-columns: minmax(0, 1fr); gap: 4px; }
+  .send-grid > span:empty { display: none; }
+  .send-actions button { flex: 1 1 100%; }
+}
+button.small-button { padding: 4px 10px; font-size: 13px; }

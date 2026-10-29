@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { api, openPdf, openPdfPost, type Session } from '../lib/api';
-import { BatchBar, SortTh, MultiStatusSelect, passes, TickAllTh, TickTd, sendSummary, useSort, useTicks } from '../components/ListTools';
+import { openBatchSend, openSend, useSentRefresh } from '../lib/send';
+import { BatchBar, SortTh, MultiStatusSelect, passes, TickAllTh, TickTd, useSort, useTicks } from '../components/ListTools';
 import { downloadCsv, dollars } from '../lib/csv';
 import { money, toCents, when } from '../lib/format';
 import CustomerPicker, { type PickerCustomer } from '../components/CustomerPicker';
@@ -132,14 +133,9 @@ export default function CreditNotes({ session }: { session: Session }) {
     } finally { setBusy(false); }
   }
 
-  const email = (r: Row) => async () => {
-    setBusy(true); setError(null); setMsg(null);
-    try {
-      const out = await api.post<{ sentTo: string }>(`/api/invoices/${r.id}/email`, {});
-      setMsg(`${r.invoice_number} emailed to ${out.sentTo}.`);
-      await load();
-    } catch (err) { setError(err instanceof Error ? err.message : 'Could not send it'); } finally { setBusy(false); }
-  };
+  /** The send screen, in a new tab (28 Oct 2026). */
+  const email = (r: Row) => () => openSend({ kind: 'invoice', ids: [r.id] });
+  useSentRefresh(() => { load().catch(() => {}); });
 
   const notYet = prices.filter((p) => !lines.some((l) => l.productId === p.product_id));
 
@@ -298,13 +294,10 @@ export default function CreditNotes({ session }: { session: Session }) {
                       await openPdfPost('/api/batch/invoices/print.pdf', { ids: cnTicks.picked }, `Credit-notes-${cnPicked.length}.pdf`);
                       return `${cnPicked.length} in one PDF.`;
                     }, 'Could not build the PDF') },
-                    { label: 'Email (each customer gets theirs together)', run: () => cnBatch(async () => {
-                      const r = await api.post<Array<{ label: string; sentTo?: string; error?: string }>>('/api/batch/invoices/send', { ids: cnTicks.picked });
-                      const sm = sendSummary(r);
-                      if (sm.problems.length) setError(`Not sent: ${sm.problems.join(' · ')}`);
-                      await load();
-                      return sm.ok;
-                    }, 'Could not send them'),
+                    { label: 'Email, one customer at a time…', run: () => {
+                      openBatchSend('invoices', cnTicks.picked);
+                      setMsg('The emails opened in a new tab, one customer at a time.');
+                    },
                     disabledWhy: cnPicked.every((r) => r.credit_status === 'Approved') ? null : 'Only counted credit notes can be sent' },
                     { label: 'Export to Excel', run: () => exportCns(cnPicked) },
                   ]} />
@@ -346,7 +339,7 @@ export default function CreditNotes({ session }: { session: Session }) {
                       <button type="button" className="secondary" disabled={busy}
                               onClick={() => openPdf(`/api/invoices/${r.id}/pdf`).catch((e) => setError(e.message))}>PDF</button>
                       {r.credit_status === 'Approved' && (
-                        <button type="button" className="secondary" disabled={busy} onClick={email(r)}>Email</button>
+                        <button type="button" className="secondary" disabled={busy} onClick={email(r)}>Email…</button>
                       )}
                     </span>
                   </td>

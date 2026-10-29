@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { api, openPdf } from '../lib/api';
+import { openSend } from '../lib/send';
 import { money, todayInJamaica, when } from '../lib/format';
 import CustomerPicker, { type PickerCustomer } from './CustomerPicker';
 import { MultiStatusSelect } from './ListTools';
@@ -69,8 +70,6 @@ export default function StatementDialog({
   const [to, setTo] = useState(periodDates('this-month').to);
   const [show, setShow] = useState<(typeof SHOW)[number]>('All');
   const [state, setState] = useState<string[]>([]);
-  const [emailing, setEmailing] = useState(false);
-  const [sendTo, setSendTo] = useState('');
   const [preview, setPreview] = useState<Preview | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -114,7 +113,6 @@ export default function StatementDialog({
 
   const picked = customers.find((c) => c.id === customerId);
   const name = customerName ?? picked?.name ?? 'customer';
-  const email = customerEmail ?? picked?.email ?? null;
   const span = from || to
     ? `${from ? when(from) : 'the start'} to ${to ? when(to) : 'today'}`
     : 'everything to date';
@@ -128,26 +126,22 @@ export default function StatementDialog({
     onClose();
   }
 
-  async function send(e: React.FormEvent) {
-    e.preventDefault();
-    setBusy(true); setError(null);
-    try {
-      const r = await api.post<{ sentTo: string }>(`/api/customers/${customerId}/statement/email`, {
-        from: from || undefined, to: to || undefined,
-        filter: show !== 'All' ? show : undefined, status: state.length ? state.join(',') : undefined,
-        sendTo: sendTo.trim() || undefined,
-      });
-      onDone(`Statement for ${name}, ${span}, emailed to ${r.sentTo}.`);
-      onClose();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Could not send the statement');
-    } finally { setBusy(false); }
+  /**
+   * The send screen in a new tab (28 Oct 2026): the statement for these
+   * dates attached, the email written, To / Cc / Bcc and other files.
+   */
+  function emailIt() {
+    openSend({ kind: 'statement', ids: [customerId], from: from || null, to: to || null,
+      filter: show !== 'All' ? show : null, status: state.length ? state.join(',') : null });
+    onDone(`Statement for ${name}, ${span}: the email opened in a new tab.`);
+    onClose();
   }
+
 
   return (
     <div className="dialog-back" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}>
       <form className="dialog statement-dialog" role="dialog" aria-modal="true" aria-labelledby="st-title"
-            onSubmit={emailing ? send : (e) => { e.preventDefault(); download(); }}>
+            onSubmit={(e) => { e.preventDefault(); download(); }}>
         <p id="st-title" className="dialog-q">Statement{given ? ` for ${name}` : ''}</p>
 
         {!given && (
@@ -206,32 +200,13 @@ export default function StatementDialog({
           </p>
         )}
 
-        {emailing && (
-          <div className="field">
-            <label htmlFor="st-sendto">Send to</label>
-            <input id="st-sendto" type="email" value={sendTo} style={{ width: '100%' }}
-                   placeholder={email || 'no address on file: type one'}
-                   onChange={(e) => setSendTo(e.target.value)} autoFocus />
-            <span className="muted small">Leave blank to use the address on the customer record.</span>
-          </div>
-        )}
-
         {error && <div className="notice error" style={{ marginTop: 10, marginBottom: 0 }}>{error}</div>}
 
         <div className="dialog-actions">
           <button type="button" className="secondary" onClick={onClose}>Cancel</button>
-          {emailing ? (
-            <>
-              <button type="button" className="secondary" onClick={() => setEmailing(false)}>Back</button>
-              <button disabled={busy || !customerId || badRange}>{busy ? 'Sending…' : 'Send'}</button>
-            </>
-          ) : (
-            <>
-              <button type="button" className="secondary" disabled={busy || !customerId || badRange}
-                      onClick={() => setEmailing(true)}>Email it…</button>
-              <button disabled={busy || !customerId || badRange}>{busy ? 'Building…' : 'View PDF'}</button>
-            </>
-          )}
+          <button type="button" className="secondary" disabled={busy || !customerId || badRange}
+                  onClick={emailIt}>Email…</button>
+          <button disabled={busy || !customerId || badRange}>{busy ? 'Building…' : 'View PDF'}</button>
         </div>
       </form>
     </div>

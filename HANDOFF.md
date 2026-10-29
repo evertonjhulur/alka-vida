@@ -2413,3 +2413,109 @@ dated 27 Oct, not tied to an order).
 - Tests: new `web/test/idleversion.test.ts`. 561 API tests, 16 web tests pass.
   Checked in a real browser: warning, sign-out, message, return to screen;
   the update bar and the reload on navigation.
+
+## Email send screen, QuickBooks/Zoho style (28 Oct 2026)
+
+Everton: emailing should work "like the download option where it opens into
+another tab and the email is pre-written with attachment", with other
+recipients copied. Agreed in discussion first (project doc
+claude/email-send-screen-oct-2026.md; mockup canvas "Alka Vida batch email").
+A browser cannot attach a file to Outlook/Gmail, so the app sends it.
+
+His rulings: Cc addresses can be saved on the customer; no automatic office
+copy, only a "Send me a copy" tick; staff can attach other files (10 MB per
+email in all); batch emails get the same screen ONE AT A TIME ("Option B":
+Email 1 of N, Send and go to the next / Skip this one / Stop here), not a
+review-all-then-send-all screen; automatic emails go straight out.
+
+- Migration 033: `customers.cc_emails` (comma list). Customer form Contact
+  part: "Copy emails to (Cc)". `customers.customerColumns` checks each.
+- `services/compose.ts`: the Compose the screen sends, checked into an
+  Outgoing (To required, Cc/Bcc, "Send me a copy" = the login's own address
+  as Bcc, 20 addresses max, programs/scripts refused, 10 MB including the
+  document); `savedCopies`; `auditAddresses` (emailedTo, cc, bcc, otherFiles,
+  subject). Imports nothing from the senders, so no import circle.
+- `services/emailwording.ts`: subject + message per kind (invoice, several
+  invoices, credit note, statement, quote, receipt, purchase order, order
+  confirmation) with {blanks}; saved as JSON in system_settings
+  'email_wording'; admin only to change; standard wording = what the emails
+  said before, so nothing changed for customers until he edits it.
+  `blankValues` reads the records itself.
+- `documents.addressing()`: compose given -> exactly what was typed; else the
+  address on file (or override), saved Cc, and the Settings wording. Used by
+  emailInvoice, emailInvoices, emailStatement, emailQuote, emailPurchaseOrder,
+  emailReceipt (each takes an optional `compose`). The typed message replaces
+  greeting/intro/outro; figures, facts and button stay. Overdue reminders
+  keep their own words. `sendMail` takes to as string or list, plus cc/bcc and
+  attachment contentType (Resend and SMTP). A single recipient is still sent
+  as a plain string (old tests compare it).
+- messaging: `sendLogged` copies the customer's saved Cc on order emails;
+  `emailOrderConfirmation(..., { compose })`.
+- `services/sendscreen.ts` + `routes/sendscreen.ts`: GET /api/send/draft,
+  GET /api/send/preview.pdf (the very PDF that will be attached), POST
+  /api/send (bodyLimit 16 MB), POST /api/send/plan (batch: invoices and
+  receipts one email per customer, quotes and POs one each; no-email ones
+  listed in `cannot`), GET /api/email-wording, PUT /api/email-wording/:kind.
+- Web: `lib/send.ts` (openSend, openBatchSend open `#/send?...` in a new tab
+  from the click; BroadcastChannel 'alkavida-sent' so the page it came from
+  reloads and shows it Sent); `pages/SendEmail.tsx` (route /send).
+  Every Email button now opens it: invoice/credit note page, Statement…
+  dialog, Orders "Email the order confirmation…", Credit notes, Invoices
+  batch, customer Transactions batch (invoices together, receipt), Payments
+  batch and a new Email… beside each Receipt, Quotes (detail + batch; "Mark
+  as sent"/"Accept link" kept as its own button), Purchase orders (detail +
+  batch). Settings › Emails & ordering: "Wording of the emails you send".
+  The old send panels are gone; the old routes stay (tests, tick boxes).
+- Still direct, no screen: the "Email a receipt" tick boxes on payment forms
+  and New sale, reminders screen, News & offers, automatic emails. They now
+  use the Settings wording and saved Cc.
+- Audit log words mention copies and other files.
+- Tests: new api/test/sendscreen.test.ts. 573 API, 74 shared, 16 web pass.
+  Walked in a browser with a local test mail server: single send with Bcc,
+  copy to me and an extra file; batch of 4 invoices / 3 customers (one with
+  no email listed first) with send, skip and the results list; phone width;
+  wording settings; customer Cc field.
+
+## Opening balances of our 5-gallon bottles (28 Oct 2026)
+
+Everton: "I now need to update bottles owned by us on the customer accounts."
+Start fresh zeroed every customer's bottle history, so a holding only counted
+deliveries made in the app. The bottles of OURS each customer already had come
+from the bottle-ownership review of the 2026 delivery sheet, as at Fri 23 Oct
+2026 (project doc `claude/bottle-ownership-assessment-oct-2026.md`): 47
+accounts, 225 bottles. He chose both ways in: an upload, and a per-customer
+entry for corrections.
+
+- Migration `034_opening_bottles.sql`: `customer_bottle_moves.opening`
+  (boolean) and `note`; a unique partial index allows ONE opening row per
+  customer. (033 is the email send screen.)
+- `services/bottles.ts`: `CUSTOMER_MOVES` returns an `opening` column (an
+  opening row's bottles are not counted as `delivered`). `customerHoldings`
+  returns `opening`, and `holding` = opening + delivered - returned - lost -
+  sold. `bottleAccount` brings an opening dated in or before the window into
+  `openingHolding` (never into `delivered`), and returns `openingEntered`
+  {quantity, asOf}. `setOpeningBottles` (admin, reason, whole number, not in
+  the future; 0 removes; replaces any earlier one) and `uploadOpeningBottles`
+  (checked first; customers matched by name ignoring case/spacing; unknown,
+  duplicated-in-app or repeated-in-file names and bad counts stop it; one
+  transaction). **The pool's own totals are not moved**: an opening balance
+  says who has bottles already out; the Bottle pool screen's "Not traced /
+  Difference to check" line shows any gap with the pool count. Bottles the
+  customer owns are never entered.
+- Routes: `POST /api/bottle-pool/opening-upload` (admin; `dryRun`),
+  `PUT /api/customers/:id/opening-bottles` (admin).
+- Audit: entity Customer, details `openingBottlesWas/Now`, `asOf`, `from`;
+  sentence "Opening 5-gallon balance for X: N of our bottles as at ...".
+- Web: Stock > Bottle pool > "Upload opening balances of our bottles"
+  (`/bottle-pool/opening`, `pages/OpeningBottlesUpload.tsx`,
+  `lib/openingBottlesUpload.ts`: columns Customer Name + Our Bottles, optional
+  As At; date defaults to 23 Oct 2026). Bottle pool table: Opening column,
+  customer names link to their Bottles tab. Customer page > Bottles: an
+  Opening balance tile, "Ours with them now", and (admin) "Set / Change the
+  opening balance" with a reason.
+- File for him: `Alka Vida_Opening Bottles as at 23 Oct 2026.xlsx` (sent in
+  chat 28 Oct): 47 rows, 225 bottles, names as in Customer Upload v5.
+- Merged onto his folder's email-send-screen work of 28 Oct (not yet on GitHub
+  then). Tests: new `api/test/openingbottles.test.ts`. 581 API tests, 16 web
+  tests pass. Checked in a browser: the upload (check, problem rows, bring in),
+  the Bottle pool table and the customer Bottles tab.

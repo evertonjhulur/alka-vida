@@ -55,6 +55,7 @@ import { registerBrandRoutes } from './routes/brands.ts';
 import { registerWebsiteRoutes } from './routes/website.ts';
 import { registerLocationRoutes } from './routes/locations.ts';
 import { registerGoLiveRoutes } from './routes/golive.ts';
+import { registerSendScreenRoutes } from './routes/sendscreen.ts';
 import { productAvailableSql, ownProductSql } from './services/brands.ts';
 import * as messaging from './services/messaging.ts';
 import * as paperwork from './services/paperwork.ts';
@@ -1588,6 +1589,14 @@ export async function buildServer(db: Db) {
   app.post('/api/bottle-pool/adjust', { preHandler: allow('admin') },
     async (req) => bottles.adjustPool(db, actorOf(req), req.body as never));
 
+  /** Opening balances of our bottles with customers (28 Oct 2026): the upload, checked first. */
+  app.post('/api/bottle-pool/opening-upload', { preHandler: allow('admin') },
+    async (req) => bottles.uploadOpeningBottles(db, actorOf(req), req.body as never));
+
+  /** One customer's opening balance of our bottles, from their Bottles tab. */
+  app.put('/api/customers/:id/opening-bottles', { preHandler: allow('admin') },
+    async (req) => bottles.setOpeningBottles(db, actorOf(req), (req.params as { id: string }).id, req.body as never));
+
   /* ---------------- stock counts / audit ---------------- */
 
   app.get('/api/audits', { preHandler: allow('admin', 'user') },
@@ -1744,6 +1753,7 @@ export async function buildServer(db: Db) {
   registerWebsiteRoutes(app as never, db, { allow: allow as never, actorOf });
   registerLocationRoutes(app as never, db, { allow: allow as never, actorOf });
   registerGoLiveRoutes(app as never, db, { allow: allow as never, actorOf });
+  registerSendScreenRoutes(app as never, db, { allow: allow as never, actorOf });
 
   return app;
 }

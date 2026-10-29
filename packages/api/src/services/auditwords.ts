@@ -152,7 +152,7 @@ function sentence(r: Row, L: Lookups): string {
       if (d.movedToCredit) {
         return `Payment ${payName(pay)} taken off ${d.from ?? 'its invoice'} and left on ${pay?.customer ?? 'the customer'}'s account as credit.${why}`;
       }
-      if (d.receiptEmailedTo) return `Receipt ${r.entity_label ?? ''} emailed to ${d.receiptEmailedTo}.`;
+      if (d.receiptEmailedTo) return `Receipt ${r.entity_label ?? ''} emailed to ${d.receiptEmailedTo}${copiesWords(d)}.`;
       if (d.before && d.after && ('customerId' in d.before || 'invoiceId' in d.before)) {
         const side = (s: Record<string, unknown>) => `${cust(s.customerId) ?? ''}${s.invoiceId ? `, invoice ${inv(s.invoiceId)}` : ', on account'}`;
         return `Payment ${payName(pay)} moved from ${side(d.before)} to ${side(d.after)}.${why}`;
@@ -227,7 +227,7 @@ function sentence(r: Row, L: Lookups): string {
       }
       if (d.lifecycle === 'Cancelled' || d.voided) return `Invoice ${number} (${who}) ${d.voided ? 'voided' : 'cancelled'}.${why}`;
       if (d.lifecycle === 'Sent') return `Invoice ${number} (${who}) marked as sent.`;
-      if (d.emailedTo) return `Invoice ${number} emailed to ${d.emailedTo}.`;
+      if (d.emailedTo) return `Invoice ${number} emailed to ${d.emailedTo}${copiesWords(d)}.`;
       if (d.before && d.after) {
         const b = d.before; const a = d.after; const parts: string[] = [];
         if (b.grandTotalCents !== a.grandTotalCents) parts.push(`total ${cash(b.grandTotalCents)} → ${cash(a.grandTotalCents)}`);
@@ -255,7 +255,7 @@ function sentence(r: Row, L: Lookups): string {
       }
       if (d.dateRequestSettled) return `${number} (${who}): ${d.dateRequestSettled}; its waiting request was settled as approved.`;
       if (d.status === 'Cancelled') return `Order ${number} (${who}) cancelled${d.cancelledByCustomer ? ' by the customer' : ''}.${why}`;
-      if (d.emailedConfirmationTo) return `Confirmation of ${number} emailed to ${d.emailedConfirmationTo}.`;
+      if (d.emailedConfirmationTo) return `Confirmation of ${number} emailed to ${d.emailedConfirmationTo}${copiesWords(d)}.`;
       if ('markedReady' in d) return `Order ${number} (${who}) marked ${d.markedReady ? 'ready' : 'not ready'}.`;
       if (d.startedSchedule) return `${number} (${who}) made a standing order, ${String(d.pattern ?? '').toLowerCase()}, next ${dayWords(d.nextDeliveryDate)}.`;
       if ('recurrencePaused' in d) return `Standing order ${number} (${who}) ${d.recurrencePaused ? 'paused' : 'restarted'}.`;
@@ -277,11 +277,38 @@ function sentence(r: Row, L: Lookups): string {
     case 'Customer': {
       const name = r.entity_label ?? (r.entity_id ? L.customer.get(r.entity_id) : null) ?? 'a customer';
       if (r.action === 'create') return d.from === 'customer upload' ? `Customer ${name} brought in from the customer upload.` : `Customer ${name} added.`;
+      if (d.statementEmailedTo) return `Statement for ${name} emailed to ${d.statementEmailedTo}${copiesWords(d)}.`;
+      if (Array.isArray(d.invoicesEmailedTogether)) return `Invoices ${(d.invoicesEmailedTogether as string[]).join(', ')} (${name}) emailed together to ${d.emailedTo}${copiesWords(d)}.`;
+      if ('openingBottlesNow' in d) {
+        const now = Number(d.openingBottlesNow); const was = Number(d.openingBottlesWas);
+        const src = d.from === 'opening bottles upload' ? ' (opening bottles upload)' : '';
+        return now === 0
+          ? `Opening 5-gallon balance removed for ${name} (was ${was} of our bottles)${src}.${why}`
+          : `Opening 5-gallon balance for ${name}: ${now} of our bottle${now === 1 ? '' : 's'} as at ${dayWords(d.asOf)}${was ? ` (was ${was})` : ''}${src}.${why}`;
+      }
       break;
     }
+    case 'Quotation':
+      if (d.emailedTo) return `Quotation ${r.entity_label ?? ''} emailed to ${d.emailedTo}${copiesWords(d)}.`;
+      break;
+    case 'PurchaseOrder':
+      if (d.emailedTo) return `Purchase order ${r.entity_label ?? ''} emailed to ${d.emailedTo}${copiesWords(d)}.`;
+      break;
+    case 'Settings':
+      if (d.emailWording) return d.reset ? `Wording of the ${String(d.emailWording).toLowerCase()} email put back to the standard.` : `Wording of the ${String(d.emailWording).toLowerCase()} email changed.`;
+      break;
     default: break;
   }
   return '';
+}
+
+/** "; copied to ...; blind copy to ...; also attached ..." (send screen, 28 Oct 2026). */
+function copiesWords(d: Record<string, any>): string { // eslint-disable-line @typescript-eslint/no-explicit-any
+  const bits: string[] = [];
+  if (d.cc) bits.push(`copied to ${d.cc}`);
+  if (d.bcc) bits.push(`blind copy to ${d.bcc}`);
+  if (Array.isArray(d.otherFiles) && d.otherFiles.length) bits.push(`also attached ${d.otherFiles.join(', ')}`);
+  return bits.length ? `; ${bits.join('; ')}` : '';
 }
 
 /** What the record column should say, instead of an id. */

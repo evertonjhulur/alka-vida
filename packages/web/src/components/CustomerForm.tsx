@@ -34,6 +34,8 @@ interface Tier { id: string; name: string }
 export interface CustomerFormValues {
   accountType: 'Corporate' | 'Individual' | '';
   name: string; contactPerson: string; phone: string; email: string;
+  /** Copy addresses for emails, comma-separated (send screen, 28 Oct 2026). */
+  ccEmails: string;
   addressLine1: string; addressLine2: string; city: string; parish: string;
   deliveryAddress: string;
   deliveryZone: string; deliveryDays: string[]; routeSequence: string;
@@ -49,7 +51,7 @@ export interface CustomerFormValues {
 }
 
 export const BLANK_CUSTOMER: CustomerFormValues = {
-  accountType: '', name: '', contactPerson: '', phone: '', email: '',
+  accountType: '', name: '', contactPerson: '', phone: '', email: '', ccEmails: '',
   addressLine1: '', addressLine2: '', city: '', parish: '', deliveryAddress: '',
   deliveryZone: '', deliveryDays: [], routeSequence: '0',
   priceTierId: '', paymentTerms: '', invoiceCycle: 'PerDelivery',
@@ -65,6 +67,7 @@ export function customerToForm(c: Record<string, unknown>): CustomerFormValues {
   return {
     accountType: (c.account_type as 'Corporate' | 'Individual') ?? 'Corporate',
     name: s('name'), contactPerson: s('contact_person'), phone: s('phone'), email: s('email'),
+    ccEmails: s('cc_emails'),
     // Before addresses came in parts the whole thing sat in one line; it
     // opens in line 1 so nothing is lost.
     addressLine1: hasParts ? s('address_line1') : s('delivery_address'),
@@ -93,6 +96,7 @@ export function formToPayload(f: CustomerFormValues) {
     name: f.name.trim(),
     contactPerson: f.accountType === 'Individual' ? null : (f.contactPerson || null),
     phone: f.phone, email: f.email,
+    ccEmails: f.ccEmails.trim() || null,
     addressLine1: f.addressLine1 || null, addressLine2: f.addressLine2 || null,
     city: f.city || null, parish: f.parish || null,
     deliveryZone: f.deliveryZone || null,
@@ -216,6 +220,13 @@ export default function CustomerForm({
                 <label htmlFor="cf-wa">WhatsApp (if not the phone)</label>
                 <input id="cf-wa" type="tel" value={f.whatsapp} onChange={(e) => set('whatsapp', e.target.value)} />
               </div>
+            </div>
+            <div className="field">
+              <label htmlFor="cf-cc">Copy emails to (Cc)</label>
+              <input id="cf-cc" value={f.ccEmails} style={{ width: '100%', maxWidth: 520 }}
+                     placeholder="e.g. accounts@company.com, manager@company.com"
+                     onChange={(e) => set('ccEmails', e.target.value)} />
+              <div className="muted small" style={{ marginTop: 4 }}>Optional. These addresses are put in Cc when invoices, statements and other emails go to this customer. They can be removed on any one email.</div>
             </div>
           </fieldset>
 

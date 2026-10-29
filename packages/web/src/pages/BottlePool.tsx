@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { Link } from 'react-router-dom';
 import { api, type Session } from '../lib/api';
 import { date, when } from '../lib/format';
 
@@ -12,6 +13,8 @@ interface Holding {
   delivered: number; returned: number; lost: number; holding: number;
   /** Bought for empties short (7 Oct 2026): theirs, so not in Holding. */
   sold?: number;
+  /** Opening balance of our bottles entered for them (28 Oct 2026). */
+  opening?: number;
 }
 interface Movement {
   id: string; quantity: number; direction: string; reference: string | null;
@@ -174,14 +177,20 @@ export default function BottlePool({ session }: { session: Session }) {
       <div className="panel">
         <h2 style={{ marginTop: 0 }}>Who is holding bottles</h2>
         <p className="muted small">
-          Delivered to each customer, less what they have handed back — who to
-          chase for empties.
+          Their opening balance of our bottles, plus what was delivered, less what
+          they have handed back — who to chase for empties.
         </p>
+        {session.role === 'admin' && (
+          <p className="small">
+            <Link to="/bottle-pool/opening">Upload opening balances of our bottles</Link>
+            <span className="muted"> — or set one customer's on their Bottles tab.</span>
+          </p>
+        )}
         <table>
           <thead>
             <tr>
               <th>Customer</th><th>Zone</th>
-              <th className="num">Delivered</th><th className="num">Returned</th>
+              <th className="num">Opening</th><th className="num">Delivered</th><th className="num">Returned</th>
               <th className="num">Lost</th><th className="num">Bought (theirs)</th><th className="num">Holding now</th>
             </tr>
           </thead>
@@ -189,10 +198,11 @@ export default function BottlePool({ session }: { session: Session }) {
             {holdings.map((h) => (
               <tr key={h.customer_id}>
                 <td>
-                  {h.name}
+                  <Link to={`/customers/${h.customer_id}?tab=bottles`}>{h.name}</Link>
                   {h.phone && <div className="muted small">{h.phone}</div>}
                 </td>
                 <td className="muted">{h.delivery_zone ?? '—'}</td>
+                <td className="num">{Number(h.opening) || '—'}</td>
                 <td className="num">{Number(h.delivered)}</td>
                 <td className="num">{Number(h.returned)}</td>
                 <td className="num">{Number(h.lost) || '—'}</td>
@@ -217,7 +227,7 @@ export default function BottlePool({ session }: { session: Session }) {
                     {untraced > 0 ? 'Not traced to a customer' : 'Difference to check'}
                     <div className="muted small">
                       {untraced > 0
-                        ? 'opening balance and adjustments, recorded on the pool but not against any delivery'
+                        ? 'pool count and adjustments not yet put against a customer (opening balances are entered per customer above)'
                         : 'deliveries trace more bottles out than the pool count shows - a pool adjustment may be due'}
                     </div>
                   </span>

@@ -1,6 +1,7 @@
 import { useEffect, useState, type ReactNode } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { api, openPdf, type Session } from '../lib/api';
+import { openSend, useSentRefresh } from '../lib/send';
 import { payMethods, useTakeCard } from '../lib/payments';
 import { money, toCents, date, day, time, statusTone } from '../lib/format';
 import Logo from '../components/Logo';
@@ -74,7 +75,7 @@ interface Invoice {
   is_opening_balance?: boolean; opening_reference?: string | null; notes?: string | null;
 }
 
-type Panel = 'pay' | 'email' | 'edit' | 'discount' | 'credit' | 'void' | null;
+type Panel = 'pay' | 'edit' | 'discount' | 'credit' | 'void' | null;
 
 const METHODS = ['Cash', 'Card', 'Bank Transfer', 'Cheque', 'Other'] as const;
 
@@ -98,11 +99,9 @@ export default function InvoiceDetail({ session }: { session: Session }) {
   const [error, setError] = useState<string | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [mailReady, setMailReady] = useState(false);
   const [panel, setPanel] = useState<Panel>(null);
   const [moreOpen, setMoreOpen] = useState(false);
   const [pay, setPay] = useState({ amount: '', method: 'Cash', reference: '', receipt: true });
-  const [mailTo, setMailTo] = useState('');
   const [disc, setDisc] = useState({ percent: '', reason: '', as: '%' as '%' | '$' });
   const [credit, setCredit] = useState({ amount: '', reason: '' });
   const [edit, setEdit] = useState<{
@@ -117,10 +116,8 @@ export default function InvoiceDetail({ session }: { session: Session }) {
 
   async function load() { setInv(await api.get<Invoice>(`/api/invoices/${invoiceId}`)); }
   useEffect(() => { load().catch((e) => setError(e.message)); }, [invoiceId]);
-  useEffect(() => {
-    api.get<{ configured: boolean }>('/api/settings/mail')
-      .then((r) => setMailReady(r.configured)).catch(() => setMailReady(false));
-  }, []);
+  // The send screen is another tab: when it says this went, show it Sent here.
+  useSentRefresh(() => { load().catch(() => {}); });
   useEffect(() => {
     if (!moreOpen) return;
     const close = () => setMoreOpen(false);
@@ -150,7 +147,6 @@ export default function InvoiceDetail({ session }: { session: Session }) {
     setMoreOpen(false); setError(null);
     if (p === panel) { setPanel(null); return; }
     if (p === 'pay') setPay({ amount: (i.balanceCents / 100).toFixed(2), method: 'Cash', reference: '', receipt: true });
-    if (p === 'email') setMailTo(i.customer?.email ?? '');
     if (p === 'discount') setDisc({ percent: '', reason: '', as: '%' });
     if (p === 'credit') setCredit({ amount: '', reason: '' });
     if (p === 'edit') {
@@ -185,11 +181,6 @@ export default function InvoiceDetail({ session }: { session: Session }) {
     setError(null);
     openPdf(`/api/invoices/${i.invoiceId}/pdf`).catch((e) => setError(e instanceof Error ? e.message : 'Could not open the invoice'));
   }
-
-  const sendEmail = () => act(async () => {
-    const out = await api.post<{ sentTo: string }>(`/api/invoices/${i.invoiceId}/email`, { to: mailTo.trim() });
-    return `${i.invoiceNumber} sent to ${out.sentTo}.`;
-  }, 'Could not send the invoice');
 
   const recordPayment = () => act(async () => {
     const cents = toCents(pay.amount);
@@ -357,7 +348,7 @@ export default function InvoiceDetail({ session }: { session: Session }) {
     });
   }
   if (i.status !== 'Cancelled' && !i.sent_date && !(i.history ?? []).some((h) => h.details?.emailedTo)) {
-    steps.push({ tone: 'todo', title: 'Not emailed yet', meta: 'Use Email to customer, or it goes with their next statement' });
+    steps.push({ tone: 'todo', title: 'Not emailed yet', meta: 'Use Email…, or it goes with their next statement' });
   }
   if (i.discount_status === 'Pending') {
     steps.push({ tone: 'warn', title: `${Number(i.discount_fixed_cents) > 0 ? money(Number(i.discount_fixed_cents)) : `${Number(i.discount_percent)}%`} discount waiting for a decision`, meta: 'The full amount is owed until it is approved' });
@@ -428,24 +419,6 @@ export default function InvoiceDetail({ session }: { session: Session }) {
             Email a receipt to {i.customer?.email || 'the customer (no address on file)'}
           </label>
           <p className="muted small">Anything above the {money(i.balanceCents)} owed stays on their account for the next invoice.</p>
-        </>
-      );
-    }
-    if (panel === 'email') {
-      return (
-        <>
-          <h2>Email {i.invoiceNumber}</h2>
-          {!mailReady && (
-            <p className="notice warn small" style={{ margin: '0 0 10px' }}>
-              Sending is not set up on this computer yet; trying will say what is needed. Download PDF always works.
-            </p>
-          )}
-          <div className="row">
-            <div className="field" style={{ flex: '1 1 280px' }}><label htmlFor="m-to">Send to</label>
-              <input id="m-to" type="email" style={{ width: '100%' }} value={mailTo}
-                     onChange={(e) => setMailTo(e.target.value)} /></div>
-            <div className="field"><button disabled={busy || !mailTo.trim()} onClick={sendEmail}>Send it</button></div>
-          </div>
         </>
       );
     }
@@ -650,7 +623,7 @@ export default function InvoiceDetail({ session }: { session: Session }) {
         </div>
         <div className="record-actions">
           <button className="secondary" disabled={busy} onClick={downloadPdf}>View PDF</button>
-          <button className="secondary" disabled={busy} onClick={() => open('email')}>Email to customer</button>
+          <button className="secondary" disabled={busy} onClick={() => openSend({ kind: 'invoice', ids: [i.invoiceId] })}>Email…</button>
           {!closed && i.balanceCents > 0 && (
             <button disabled={busy} onClick={() => open('pay')}>Record a payment</button>
           )}

@@ -9,6 +9,7 @@ import { audit, businessToday, num, requireRole } from './core.ts';
 import { RuleViolation, composeAddress } from '@alka/shared';
 import { assertZoneUsable } from './zones.ts';
 import { productAvailableSql } from './brands.ts';
+import { looksLikeEmail, splitAddresses } from './compose.ts';
 
 /**
  * Merge two customer records.
@@ -85,6 +86,8 @@ export async function mergeCustomers(
 export interface CustomerInput {
   accountType?: 'Corporate' | 'Individual' | null;
   name?: string; phone?: string; email?: string;
+  /** Copy addresses for emails (send screen, 28 Oct 2026), comma-separated. */
+  ccEmails?: string | null;
   contactPerson?: string | null;
   /** Legacy single line; composed from the parts when parts are given. */
   deliveryAddress?: string | null;
@@ -148,6 +151,12 @@ function customerColumns(input: CustomerInput): Record<string, unknown> {
   if (has('phone') && input.phone != null) cols.phone = input.phone.trim();
   // An email address is always trimmed (invariant 15).
   if (has('email') && input.email != null) cols.email = input.email.trim();
+  if (has('ccEmails')) {
+    const list = splitAddresses(input.ccEmails);
+    const bad = list.find((a) => !looksLikeEmail(a));
+    if (bad) throw new RuleViolation(`"${bad}" is not an email address (copy addresses)`);
+    cols.cc_emails = list.length ? list.join(', ') : null;
+  }
   if (has('contactPerson')) cols.contact_person = text(input.contactPerson);
   if (has('brandId')) cols.brand_id = input.brandId ?? null;
   if (has('paymentTerms')) cols.payment_terms = text(input.paymentTerms);

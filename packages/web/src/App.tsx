@@ -43,6 +43,7 @@ import Production from './pages/Production';
 import Stock from './pages/Stock';
 import StockCount from './pages/StockCount';
 import BottlePool from './pages/BottlePool';
+import OpeningBottlesUpload from './pages/OpeningBottlesUpload';
 import Users from './pages/Users';
 import MyAccount from './pages/MyAccount';
 import Register from './pages/Register';
@@ -60,6 +61,7 @@ import AuditLog from './pages/AuditLog';
 import NotificationSettings from './pages/NotificationSettings';
 import Messages from './pages/Messages';
 import Reminders from './pages/Reminders';
+import SendEmail from './pages/SendEmail';
 import MoneySettings from './pages/MoneySettings';
 import DriverCollection from './pages/DriverCollection';
 
@@ -353,6 +355,7 @@ function Shell({ session }: { session: Session }) {
           <Route path="/settings/notifications" element={<><BackToSettings /><NotificationSettings session={session} /></>} />
           <Route path="/messages" element={<><SectionTabs tabs={CUSTOMERS} /><Messages session={session} /></>} />
           <Route path="/reminders" element={<Reminders />} />
+          <Route path="/send" element={<SendEmail />} />
           <Route path="/payments" element={<Payments />} />
           <Route path="/invoices/:invoiceId" element={<InvoiceDetail session={session} />} />
           {/* Statements are on the customer page, and Statement… on Invoices
@@ -369,6 +372,7 @@ function Shell({ session }: { session: Session }) {
           <Route path="/stock" element={<><SectionTabs tabs={STOCK} /><Stock /></>} />
           <Route path="/stock-count" element={<><SectionTabs tabs={STOCK} /><StockCount session={session} /></>} />
           <Route path="/bottle-pool" element={<><SectionTabs tabs={STOCK} /><BottlePool session={session} /></>} />
+          <Route path="/bottle-pool/opening" element={<><SectionTabs tabs={STOCK} /><OpeningBottlesUpload /></>} />
           <Route path="/reports" element={<Reports />} />
           <Route path="/route" element={<DriverRoute session={session} />} />
           <Route path="/route/stop/:stopId" element={<DriverStop />} />

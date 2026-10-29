@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link, useParams, useSearchParams } from 'react-router-dom';
 import { api, openPdfPost, type Session } from '../lib/api';
+import { openSend, useSentRefresh } from '../lib/send';
 import { payMethods, useTakeCard } from '../lib/payments';
 import { money, date, statusTone, toCents, todayInJamaica, when } from '../lib/format';
 import StatementDialog from '../components/StatementDialog';
@@ -54,7 +55,9 @@ interface History {
 interface PickCustomer { id: string; name: string }
 interface Bottles {
   openingHolding: number; delivered: number; returned: number;
-  lost: number; closingHolding: number;
+  lost: number; closingHolding: number; sold?: number;
+  /** Opening balance of our bottles entered for them (28 Oct 2026). */
+  openingEntered?: { quantity: number; asOf: string } | null;
 }
 interface Schedule {
   id: string; orderNumber: string; customerId: string;
@@ -440,6 +443,9 @@ export default function CustomerRecord({ session }: { session: Session }) {
     }, 'Could not change the payment');
   }
 
+  // The send screen is another tab: when it says something went, show it here.
+  useSentRefresh(() => { load().catch(() => {}); });
+
   async function saveDetails(v: CustomerFormValues) {
     await run(async () => {
       const result = await api.patch<{ warnings: string[] }>(`/api/customers/${customerId}`, formToPayload(v));
@@ -452,13 +458,12 @@ export default function CustomerRecord({ session }: { session: Session }) {
 
   /** Ticked invoices and credit notes: one PDF, or one email with that PDF attached. */
   const docIds = () => tickedDocs.map((t) => t.invoice!.invoice_id);
-  const emailPicked = () => run(async () => {
-    const r = await api.post<{ sentTo: string; invoiceNumbers: string[] }>(
-      '/api/invoices/email-batch', { invoiceIds: docIds() });
-    setMsg(`${r.invoiceNumbers.length} invoice${r.invoiceNumbers.length === 1 ? '' : 's'} `
-      + `(${r.invoiceNumbers.join(', ')}) emailed to ${r.sentTo} in one PDF.`);
-    txTicks.clear();
-  }, 'Could not send the invoices');
+  /** The send screen in a new tab (28 Oct 2026): the ticked ones in one PDF. */
+  const emailPicked = () => {
+    const ids = docIds();
+    openSend({ kind: ids.length === 1 ? 'invoice' : 'invoices', ids });
+    setMsg('The email opened in a new tab.');
+  };
   const downloadPicked = () => run(async () => {
     await openPdfPost('/api/invoices/batch.pdf', { invoiceIds: docIds() },
       `invoices-${(h?.customer.name ?? 'customer').replace(/\W+/g, '-')}.pdf`);
@@ -480,11 +485,10 @@ export default function CustomerRecord({ session }: { session: Session }) {
   const printReceipts = () => run(async () => {
     await openPdfPost('/api/batch/receipts/print.pdf', { ids: tickedPayRows }, 'Receipts.pdf');
   }, 'Could not build the receipts');
-  const emailReceipt = () => run(async () => {
-    const r = await api.post<{ sentTo: string; receiptNumber: string }>('/api/receipts/email', { paymentIds: tickedPayRows });
-    setMsg(`Receipt ${r.receiptNumber} emailed to ${r.sentTo}.`);
-    txTicks.clear();
-  }, 'Could not email the receipt');
+  const emailReceipt = () => {
+    openSend({ kind: 'receipt', ids: tickedPayRows });
+    setMsg('The email opened in a new tab.');
+  };
   const receiptFor = (t: Tx) => run(async () => {
     const ids = (t.rows ?? []).filter((r) => Number(r.amount_cents) > 0).map((r) => r.id);
     await openPdfPost('/api/receipts.pdf', { paymentIds: ids }, `Receipt-${t.number || 'payment'}.pdf`);
@@ -1153,7 +1157,7 @@ export default function CustomerRecord({ session }: { session: Session }) {
                         summary={tickedOwed.length ? `${money(tickedOwed.reduce((a, t) => a + t.openCents, 0))} still owed on them` : undefined}
                         onClear={txTicks.clear}
                         actions={[
-                          { label: 'Email invoices together (one PDF)', run: emailPicked,
+                          { label: 'Email invoices together (one PDF)…', run: emailPicked,
                             disabledWhy: tickedDocs.length ? null : 'Tick an invoice or credit note' },
                           { label: 'Print invoices (one PDF)', run: downloadPicked,
                             disabledWhy: tickedDocs.length ? null : 'Tick an invoice or credit note' },
@@ -1163,7 +1167,7 @@ export default function CustomerRecord({ session }: { session: Session }) {
                             disabledWhy: tickedInvoices.some((t) => invoiceState(t.invoice!) === 'Open') ? null : 'No ticked invoice is waiting to be sent' },
                           { label: 'Print receipts (one PDF)', run: printReceipts,
                             disabledWhy: tickedPayRows.length ? null : 'Tick a payment' },
-                          { label: 'Email one receipt for them', run: emailReceipt,
+                          { label: 'Email one receipt for them…', run: emailReceipt,
                             disabledWhy: tickedPayRows.length ? null : 'Tick a payment' },
                           { label: 'Export to Excel', run: () => exportTx(tickedTx) },
                         ]} />
@@ -1284,22 +1288,32 @@ export default function CustomerRecord({ session }: { session: Session }) {
       {tab === 'bottles' && (
         <div className="panel">
           <h2 style={{ marginTop: 0 }}>5-gallon bottles</h2>
-          {bottles ? (
+          {bottles && (bottles.closingHolding !== 0 || bottles.delivered > 0 || bottles.returned > 0 || bottles.openingEntered) ? (
             <>
               <div className="aging" style={{ marginBottom: 12 }}>
+                {bottles.openingEntered && (
+                  <div className="age"><b>Opening balance</b><span>{bottles.openingEntered.quantity}</span></div>
+                )}
                 <div className="age"><b>Delivered full</b><span>{bottles.delivered}</span></div>
                 <div className="age"><b>Empties back</b><span>{bottles.returned}</span></div>
                 <div className="age"><b>Lost or damaged</b><span>{bottles.lost}</span></div>
-                <div className="age"><b>Holding now</b><span>{bottles.closingHolding}</span></div>
+                {Number(bottles.sold) > 0 && <div className="age"><b>Bought (theirs)</b><span>{bottles.sold}</span></div>}
+                <div className="age"><b>Ours with them now</b><span>{bottles.closingHolding}</span></div>
               </div>
               <p className="muted small" style={{ margin: 0 }}>
-                From every delivery recorded for them. Bottles lost or damaged are a
-                business loss and are never charged to the customer. The statement
-                shows the same count for any date range.{' '}
+                {bottles.openingEntered
+                  ? <>Their opening balance of our bottles as at {when(bottles.openingEntered.asOf)}, plus every delivery recorded since, less the empties back. </>
+                  : <>From every delivery recorded for them. </>}
+                Bottles lost or damaged are a business loss and are never charged to the customer. Bottles they bought are
+                theirs and are not counted. The statement shows the same count for any date range.{' '}
                 <Link to="/bottle-pool">Bottle pool</Link>
               </p>
             </>
-          ) : <p className="muted" style={{ margin: 0 }}>They have never had 5-gallon bottles.</p>}
+          ) : <p className="muted" style={{ margin: 0 }}>They have never had any of our 5-gallon bottles.</p>}
+          {session.role === 'admin' && (
+            <OpeningBottlesForm customerId={c.id} current={bottles?.openingEntered ?? null}
+                                onSaved={() => api.get<Bottles>(`/api/customers/${customerId}/bottles`).then(setBottles).catch(() => undefined)} />
+          )}
         </div>
       )}
 
@@ -1337,5 +1351,78 @@ export default function CustomerRecord({ session }: { session: Session }) {
         </>
       )}
     </>
+  );
+}
+
+/*
+ * One customer's opening balance of OUR 5-gallon bottles (Everton, 28 Oct
+ * 2026): what they already had when the app started. Administrators only,
+ * with a reason; saving again replaces it, 0 removes it. Many at once:
+ * Stock > Bottle pool > Upload opening balances.
+ */
+function OpeningBottlesForm({ customerId, current, onSaved }: {
+  customerId: string; current: { quantity: number; asOf: string } | null; onSaved: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [qty, setQty] = useState('');
+  const [asOf, setAsOf] = useState('');
+  const [reason, setReason] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState<string | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+
+  function start() {
+    setQty(current ? String(current.quantity) : '');
+    setAsOf(current?.asOf ?? '2026-10-23');
+    setReason(''); setErr(null); setMsg(null); setOpen(true);
+  }
+
+  async function save(e: React.FormEvent) {
+    e.preventDefault();
+    setBusy(true); setErr(null);
+    try {
+      const r = await api.put<{ was: number; now: number }>(`/api/customers/${customerId}/opening-bottles`,
+        { quantity: Number(qty), asOf, reason });
+      setMsg(r.now === 0 ? 'Opening balance removed.' : `Opening balance set to ${r.now} of our bottles${r.was ? ` (was ${r.was})` : ''}.`);
+      setOpen(false); onSaved();
+    } catch (e2) {
+      setErr(e2 instanceof Error ? e2.message : 'Could not save the opening balance');
+    } finally { setBusy(false); }
+  }
+
+  return (
+    <div style={{ marginTop: 12 }}>
+      {msg && <div className="notice ok">{msg}</div>}
+      {!open ? (
+        <button type="button" className="as-link small" onClick={start}>
+          {current ? `Change the opening balance (${current.quantity} as at ${when(current.asOf)})` : 'Set an opening balance of our bottles'}
+        </button>
+      ) : (
+        <form onSubmit={save} className="panel" style={{ marginTop: 8 }}>
+          <p className="muted small" style={{ marginTop: 0 }}>
+            How many of <strong>our</strong> bottles they had when the app started. Leave out bottles they own. 0 removes it.
+          </p>
+          <div className="row">
+            <div className="field">
+              <label htmlFor="ob-q">Our bottles with them</label>
+              <input id="ob-q" type="number" min="0" step="1" style={{ width: 120 }} value={qty} onChange={(e) => setQty(e.target.value)} required />
+            </div>
+            <div className="field">
+              <label htmlFor="ob-d">As at</label>
+              <input id="ob-d" type="date" value={asOf} onChange={(e) => setAsOf(e.target.value)} required />
+            </div>
+            <div className="field" style={{ flex: 1, minWidth: 220 }}>
+              <label htmlFor="ob-r">Reason</label>
+              <input id="ob-r" value={reason} placeholder="e.g. From the delivery sheet review" onChange={(e) => setReason(e.target.value)} required />
+            </div>
+          </div>
+          {err && <div className="notice error">{err}</div>}
+          <div className="row" style={{ gap: 8 }}>
+            <button className="go" disabled={busy || qty === '' || !reason.trim()}>Save</button>
+            <button type="button" className="secondary" disabled={busy} onClick={() => setOpen(false)}>Cancel</button>
+          </div>
+        </form>
+      )}
+    </div>
   );
 }

@@ -16,9 +16,11 @@ import { audit, businessToday, contactEmail, nextNumber, num, requireRole, siteU
 import { RuleViolation, addDays } from '@alka/shared';
 import {
   BRAND, COLOR_BLUE, COLOR_INDIGO, billTo, emailInvoice, emailStatement, fmtDate, formatCash as cash, letterhead,
-  mailConfigured, newDoc, recipient, sendMail, signOff,
+  addressing, mailConfigured, newDoc, recipient, sendMail, signOff,
 } from './documents.ts';
 import { customerEmail, renderEmail } from './emailkit.ts';
+import { type Compose, auditAddresses } from './compose.ts';
+import { filledWording } from './emailwording.ts';
 import { getQuotation, issueAcceptToken, quoteAcceptLink } from './quotations.ts';
 import { getPurchaseOrder } from './inventory.ts';
 import { raiseCycleInvoices } from './cycles.ts';
@@ -111,7 +113,8 @@ async function drawQuote(doc: PDFKit.PDFDocument, db: Db, quoteId: string) {
  * copied into WhatsApp or read over the phone.
  */
 export async function emailQuote(
-  db: Db, actor: Actor, quoteId: string, opts: { to?: string | null; note?: string | null } = {},
+  db: Db, actor: Actor, quoteId: string,
+  opts: { to?: string | null; note?: string | null; compose?: Compose | null } = {},
 ): Promise<{ sentTo: string | null; link: string; quoteNumber: string }> {
   requireRole(actor, 'admin', 'user');
   const q = await db.one<{ status: string; quote_number: string }>(
@@ -125,7 +128,13 @@ export async function emailQuote(
       + 'yourself, then press "Mark as sent".');
   }
   const doc = await renderQuotePdf(db, quoteId);
-  const to = recipient(opts.to, doc.customerEmail, doc.customerName);
+  const qcust = await db.one<{ customer_id: string }>(`SELECT customer_id FROM quotations WHERE id = $1`, [quoteId]);
+  const out = await addressing(db, actor, {
+    compose: opts.compose, override: opts.to, onFile: doc.customerEmail, who: doc.customerName,
+    customerId: qcust.customer_id, documentBytes: doc.pdf.length,
+    wording: () => filledWording(db, 'quote', [quoteId]),
+  });
+  const to = out.to.join(', ');
   const token = await db.tx((t) => issueAcceptToken(t, quoteId));
   const link = quoteAcceptLink(token);
 
@@ -136,23 +145,20 @@ export async function emailQuote(
     preheader: `Quotation ${doc.quoteNumber} from ${BRAND.name}`,
     heading: `Quotation ${doc.quoteNumber}`,
     subheading: doc.customerName,
-    greeting: 'Good day,',
-    intro: `Please find attached quotation ${doc.quoteNumber} from ${BRAND.name}.`
-      + (opts.note ? `\n\n${opts.note}` : ''),
+    intro: out.message + (opts.note && !out.fromScreen ? `\n\n${opts.note}` : ''),
     facts: [
       ['Total', cash(num(qrow.grand_total_cents))],
       ['Valid until', qrow.valid_until ? fmtDate(qrow.valid_until) : 'Ask us'],
     ],
     button: { label: 'Accept this quotation', url: link },
-    outro: 'Or simply reply to this email and we will take it from there.',
   });
   await sendMail({
-    to,
-    subject: `${BRAND.name} quotation ${doc.quoteNumber}`,
+    to: out.to.length === 1 ? out.to[0] : out.to, cc: out.cc, bcc: out.bcc,
+    subject: out.subject,
     text: mail.text, html: mail.html,
-    attachments: [{ filename: doc.filename, content: doc.pdf }],
+    attachments: [{ filename: doc.filename, content: doc.pdf }, ...out.extra],
   });
-  await db.tx((t) => audit(t, actor, 'update', 'Quotation', quoteId, doc.quoteNumber, { emailedTo: to }));
+  await db.tx((t) => audit(t, actor, 'update', 'Quotation', quoteId, doc.quoteNumber, auditAddresses(out)));
   return { sentTo: to, link, quoteNumber: doc.quoteNumber };
 }
 
@@ -256,27 +262,30 @@ async function drawPo(doc: PDFKit.PDFDocument, db: Db, poId: string) {
 }
 
 export async function emailPurchaseOrder(
-  db: Db, actor: Actor, poId: string, opts: { to?: string | null; note?: string | null } = {},
+  db: Db, actor: Actor, poId: string,
+  opts: { to?: string | null; note?: string | null; compose?: Compose | null } = {},
 ): Promise<{ sentTo: string; poNumber: string }> {
   requireRole(actor, 'admin', 'user');
   const doc = await renderPoPdf(db, poId);
-  const to = recipient(opts.to, doc.supplierEmail, doc.supplierName);
+  const out = await addressing(db, actor, {
+    compose: opts.compose, override: opts.to, onFile: doc.supplierEmail, who: doc.supplierName,
+    customerId: null, documentBytes: doc.pdf.length,
+    wording: () => filledWording(db, 'purchase-order', [poId]),
+  });
+  const to = out.to.join(', ');
   // To a supplier: the same look, no offer band, no unsubscribe.
   const mail = renderEmail({
     preheader: `Purchase order ${doc.poNumber} from ${BRAND.company}`,
     heading: `Purchase order ${doc.poNumber}`,
     subheading: BRAND.company,
-    greeting: 'Good day,',
-    intro: `Please find attached purchase order ${doc.poNumber} from ${BRAND.company}.`
-      + (opts.note ? `\n\n${opts.note}` : ''),
-    outro: 'Kindly confirm receipt and the delivery date.',
+    intro: out.message + (opts.note && !out.fromScreen ? `\n\n${opts.note}` : ''),
     offer: null, contact: await contactEmail(db),
   });
   await sendMail({
-    to,
-    subject: `${BRAND.name} purchase order ${doc.poNumber}`,
+    to: out.to.length === 1 ? out.to[0] : out.to, cc: out.cc, bcc: out.bcc,
+    subject: out.subject,
     text: mail.text, html: mail.html,
-    attachments: [{ filename: doc.filename, content: doc.pdf }],
+    attachments: [{ filename: doc.filename, content: doc.pdf }, ...out.extra],
   });
   await db.tx(async (t) => {
     await t.query(
@@ -284,7 +293,7 @@ export async function emailPurchaseOrder(
          sent_to = $2, updated_at = now()
        WHERE id = $1`, [poId, to],
     );
-    await audit(t, actor, 'update', 'PurchaseOrder', poId, doc.poNumber, { emailedTo: to });
+    await audit(t, actor, 'update', 'PurchaseOrder', poId, doc.poNumber, auditAddresses(out));
   });
   return { sentTo: to, poNumber: doc.poNumber };
 }
@@ -530,7 +539,8 @@ async function drawSalesReceipt(
 
 /** Email a receipt (the "send a receipt" tick box, Zoho-style). */
 export async function emailReceipt(
-  db: Db, actor: Actor, paymentIds: readonly string[], opts: { to?: string | null } = {},
+  db: Db, actor: Actor, paymentIds: readonly string[],
+  opts: { to?: string | null; compose?: Compose | null } = {},
 ): Promise<{ sentTo: string; receiptNumber: string }> {
   requireRole(actor, 'admin', 'user');
   if (!mailConfigured()) {
@@ -538,7 +548,13 @@ export async function emailReceipt(
       + 'from their Transactions tab and sent by hand.');
   }
   const doc = await renderReceiptPdf(db, paymentIds);
-  const to = recipient(opts.to, doc.customerEmail, doc.customerName);
+  const rc = await db.one<{ customer_id: string }>(`SELECT customer_id FROM payments WHERE id = $1`, [paymentIds[0]]);
+  const out = await addressing(db, actor, {
+    compose: opts.compose, override: opts.to, onFile: doc.customerEmail, who: doc.customerName,
+    customerId: rc.customer_id, documentBytes: doc.pdf.length,
+    wording: () => filledWording(db, 'receipt', paymentIds),
+  });
+  const to = out.to.join(', ');
   const rcpt = await db.one<{ customer_id: string; method: string; day: string }>(
     `SELECT customer_id, method, business_date(payment_date)::text AS day FROM payments WHERE id = $1`, [paymentIds[0]],
   );
@@ -551,8 +567,7 @@ export async function emailReceipt(
     tick: true,
     heading: 'Thank you for your payment',
     subheading: `Receipt ${doc.receiptNumber}`,
-    greeting: 'Good day,',
-    intro: `We have received your payment of ${cash(doc.totalCents)}. Your receipt is attached.`,
+    intro: out.message,
     facts: [
       ['Paid', `${cash(doc.totalCents)}${rcpt.method ? ` by ${rcpt.method.toLowerCase()}` : ''}`],
       ['Date', fmtDate(rcpt.day)],
@@ -561,13 +576,17 @@ export async function emailReceipt(
     button: { label: 'See my account', url: `${siteUrl()}/#/portal/account` },
   });
   await sendMail({
-    to,
-    subject: `${BRAND.name} receipt ${doc.receiptNumber}`,
+    to: out.to.length === 1 ? out.to[0] : out.to, cc: out.cc, bcc: out.bcc,
+    subject: out.subject,
     text: mail.text, html: mail.html,
-    attachments: [{ filename: doc.filename, content: doc.pdf }],
+    attachments: [{ filename: doc.filename, content: doc.pdf }, ...out.extra],
   });
-  await db.tx((t) => audit(t, actor, 'update', 'Payment', paymentIds[0], doc.receiptNumber,
-    { receiptEmailedTo: to, paymentIds }));
+  await db.tx((t) => {
+    const a = auditAddresses(out);
+    delete a.emailedTo;
+    return audit(t, actor, 'update', 'Payment', paymentIds[0], doc.receiptNumber,
+      { receiptEmailedTo: to, paymentIds, ...a });
+  });
   return { sentTo: to, receiptNumber: doc.receiptNumber };
 }
 

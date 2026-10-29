@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { api, openPdf, openPdfPost } from '../lib/api';
-import { BatchBar, SortTh, MultiStatusSelect, passes, TickAllTh, TickTd, sendSummary, useSort, useTicks } from '../components/ListTools';
+import { openBatchSend, openSend, useSentRefresh } from '../lib/send';
+import { BatchBar, SortTh, MultiStatusSelect, passes, TickAllTh, TickTd, useSort, useTicks } from '../components/ListTools';
 import { downloadCsv, dollars } from '../lib/csv';
 import { money, statusTone, todayInJamaica, when } from '../lib/format';
 import CustomerPicker, { type PickerCustomer } from '../components/CustomerPicker';
@@ -71,6 +72,7 @@ function QuoteList() {
   const [busy, setBusy] = useState(false);
 
   const load = () => api.get<QuoteRow[]>('/api/quotations').then(setRows).catch((e) => setError(e.message));
+  useSentRefresh(() => { load(); });
   useEffect(() => { void load(); }, []);
 
   const needle = find.trim().toLowerCase();
@@ -133,13 +135,10 @@ function QuoteList() {
                       await openPdfPost('/api/batch/quotes/print.pdf', { ids: ticks.picked }, `Quotes-${picked.length}.pdf`);
                       return `${picked.length} in one PDF.`;
                     }, 'Could not build the PDF') },
-                    { label: 'Email to the customers (with the accept link)', run: () => batch(async () => {
-                      const r = await api.post<Array<{ label: string; sentTo?: string; error?: string }>>('/api/batch/quotes/send', { ids: ticks.picked });
-                      const sm = sendSummary(r);
-                      if (sm.problems.length) setError(`Not sent: ${sm.problems.join(' · ')}`);
-                      await load();
-                      return sm.ok;
-                    }, 'Could not send them'),
+                    { label: 'Email, one at a time (with the accept link)…', run: () => {
+                      openBatchSend('quotes', ticks.picked);
+                      setMsg('The emails opened in a new tab, one quote at a time.');
+                    },
                     disabledWhy: picked.every(sendable) ? null : 'Untick the ones already turned into orders or declined' },
                     { label: 'Mark as sent', run: () => batch(async () => {
                       const drafts = picked.filter((q) => q.status === 'Draft');
@@ -429,20 +428,20 @@ function QuoteView({ quoteId }: { quoteId: string }) {
   const [error, setError] = useState<string | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [panel, setPanel] = useState<'email' | 'convert' | null>(null);
-  const [mailTo, setMailTo] = useState('');
+  const [panel, setPanel] = useState<'convert' | null>(null);
   const [link, setLink] = useState<string | null>(null);
   const [conv, setConv] = useState({ mode: 'Delivery', date: todayInJamaica(), addressId: '' });
   const [addresses, setAddresses] = useState<Address[]>([]);
 
   const load = () => api.get<Quote>(`/api/quotations/${quoteId}`).then((x) => {
     setQ(x);
-    setMailTo(x.customer_email ?? '');
     setConv((c) => ({ ...c, mode: x.delivery_mode }));
     api.get<Address[]>(`/api/customers/${x.customer_id}/addresses`)
       .then((a) => setAddresses(a.filter((y) => y.is_delivery))).catch(() => {});
   });
   useEffect(() => { load().catch((e) => setError(e.message)); }, [quoteId]); // eslint-disable-line react-hooks/exhaustive-deps
+  // Emailed from the send screen in another tab: show it Sent here.
+  useSentRefresh(() => { load().catch(() => {}); });
 
   async function act(what: () => Promise<string | void>, fallback: string) {
     setBusy(true); setError(null); setMsg(null);
@@ -456,11 +455,6 @@ function QuoteView({ quoteId }: { quoteId: string }) {
   const st = statusOf(q);
   const open = ['Draft', 'Sent'].includes(q.status);
 
-  const sendIt = () => act(async () => {
-    const r = await api.post<{ sentTo: string; link: string }>(`/api/quotations/${q.id}/email`, { to: mailTo });
-    setLink(r.link);
-    return `${q.quote_number} emailed to ${r.sentTo}, with a link they can accept it from.`;
-  }, 'Could not send the quote');
   const markSent = () => act(async () => {
     const r = await api.post<{ link: string }>(`/api/quotations/${q.id}/mark-sent`, {});
     setLink(r.link);
@@ -511,7 +505,13 @@ function QuoteView({ quoteId }: { quoteId: string }) {
                   onClick={() => act(async () => { await openPdf(`/api/quotations/${q.id}/pdf`); }, 'Could not open the PDF')}>
             View PDF</button>
           {open && <Link to={`/quotes/${q.id}/edit`}><button type="button" className="secondary">Change it</button></Link>}
-          {open && <button className="secondary" disabled={busy} onClick={() => setPanel(panel === 'email' ? null : 'email')}>Email to customer</button>}
+          {open && <button className="secondary" disabled={busy} onClick={() => openSend({ kind: 'quote', ids: [q.id] })}>Email…</button>}
+          {open && (
+            <button className="secondary" disabled={busy} onClick={markSent}
+                    title="Sent it another way (printed, WhatsApp): mark it sent and get the accept link">
+              {q.status === 'Draft' ? 'Mark as sent' : 'Accept link'}
+            </button>
+          )}
           {(q.status === 'Accepted' || open) && (
             <button disabled={busy} onClick={() => setPanel(panel === 'convert' ? null : 'convert')}>Make it an order</button>
           )}
@@ -528,20 +528,6 @@ function QuoteView({ quoteId }: { quoteId: string }) {
       )}
       {q.status === 'Declined' && q.decline_reason && <div className="notice warn">Declined: {q.decline_reason}</div>}
 
-      {panel === 'email' && (
-        <div className="panel action-panel">
-          <h2>Email {q.quote_number}</h2>
-          <p className="muted small" style={{ marginTop: 0 }}>The PDF goes with a link they can press to accept. They can also just reply.</p>
-          <div className="row">
-            <div className="field grow"><label htmlFor="qm-to">Send to</label>
-              <input id="qm-to" type="email" value={mailTo} onChange={(e) => setMailTo(e.target.value)} /></div>
-            <div className="field"><button disabled={busy || !mailTo.trim()} onClick={sendIt}>Send it</button></div>
-          </div>
-          <p className="muted small">Sent it another way (printed, WhatsApp)?{' '}
-            <button type="button" className="as-link small" onClick={markSent}>Mark it as sent</button></p>
-          <button type="button" className="secondary panel-close" onClick={() => setPanel(null)}>Close</button>
-        </div>
-      )}
       {panel === 'convert' && (
         <div className="panel action-panel">
           <h2>Make {q.quote_number} an order</h2>

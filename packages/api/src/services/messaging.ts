@@ -21,6 +21,7 @@ import {
   mailConfigured, sendMail, renderInvoicePdf, formatCash as cash, fmtDate, qtyWords, invoiceEmailFigures,
 } from './documents.ts';
 import { customerEmail, customerWants, newsImageUrl } from './emailkit.ts';
+import { type Compose, type Outgoing, auditAddresses, outgoing, savedCopies } from './compose.ts';
 
 /* ------------------------------------------------------------------ */
 /* Order confirmations                                                 */
@@ -88,18 +89,26 @@ export async function remainingItems(db: Queryable, orderId: string): Promise<Ar
 
 const portalLink = (tab = 'orders') => `${siteUrl()}/#/portal/${tab}`;
 
-/** Send one customer email and log it; never throws, never sends twice. */
+/**
+ * Send one customer email and log it; never throws, never sends twice.
+ * The copy addresses saved on the customer's account go too (28 Oct 2026),
+ * unless the send screen says exactly who it goes to.
+ */
 async function sendLogged(
-  db: Db, kind: string, key: string, customerId: string, to: string, subject: string,
+  db: Db, kind: string, key: string, customerId: string, to: string | string[], subject: string,
   mail: { text: string; html: string; headers?: Record<string, string> },
-  detail: string, attachments?: Array<{ filename: string; content: Buffer }>,
+  detail: string, attachments?: Array<{ filename: string; content: Buffer; contentType?: string }>,
+  screen?: Outgoing | null,
 ): Promise<{ sent: boolean; reason?: string }> {
+  const cc = screen ? screen.cc : await savedCopies(db, customerId).catch(() => []);
+  const bcc = screen ? screen.bcc : [];
+  const toText = Array.isArray(to) ? to.join(', ') : to;
   try {
-    await sendMail({ to, subject, text: mail.text, html: mail.html, headers: mail.headers, attachments });
-    await logAuto(db, kind, customerId, to, key, detail, true);
+    await sendMail({ to, cc, bcc, subject, text: mail.text, html: mail.html, headers: mail.headers, attachments });
+    await logAuto(db, kind, customerId, toText, key, detail, true);
     return { sent: true };
   } catch (err) {
-    await logAuto(db, kind, customerId, to, key, (err as Error).message, false);
+    await logAuto(db, kind, customerId, toText, key, (err as Error).message, false);
     return { sent: false, reason: (err as Error).message };
   }
 }
@@ -114,7 +123,7 @@ async function sendLogged(
  * delivery email covers those), nor counter sales.
  */
 export async function sendOrderPlacedEmail(
-  db: Db, orderId: string, opts: { to?: string | null; manual?: boolean } = {},
+  db: Db, orderId: string, opts: { to?: string | null; manual?: boolean; screen?: Outgoing | null } = {},
 ): Promise<{ sent: boolean; reason?: string; sentTo?: string }> {
   if (!mailConfigured()) return { sent: false, reason: 'email is not set up' };
   // Sent by hand from the Orders screen (27 Oct 2026): goes even when the
@@ -140,7 +149,8 @@ export async function sendOrderPlacedEmail(
   );
   if (!o) return { sent: false, reason: 'no such order' };
   if (o.delivery_mode === 'Counter' || (!manual && o.parent_recurring_id)) return { sent: false, reason: 'not for this kind of order' };
-  const to = (opts.to ?? '').trim() || o.email?.trim() || '';
+  const screen = opts.screen ?? null;
+  const to = screen ? screen.to.join(', ') : (opts.to ?? '').trim() || o.email?.trim() || '';
   if (!to) return { sent: false, reason: 'no email for this customer' };
   if (!manual && !(await customerWants(db, o.customer_id, 'orders'))) return { sent: false, reason: 'they have turned these off' };
   if (!manual && await alreadySent(db, 'OrderPlaced', o.order_number)) return { sent: false, reason: 'already sent' };
@@ -160,8 +170,8 @@ export async function sendOrderPlacedEmail(
     tick: true,
     heading: 'Thank you for your order',
     subheading: `Order ${o.order_number}${o.customer_po ? ` · your PO ${o.customer_po}` : ''}`,
-    greeting: `Good day ${o.name},`,
-    intro: o.needs_review
+    greeting: screen ? undefined : `Good day ${o.name},`,
+    intro: screen ? screen.message : o.needs_review
       ? 'You asked for delivery today. Orders for the same day after our cut-off need a quick check, so we will confirm the day with you shortly.'
       : 'We have your order and will have it with you as below.',
     items: await orderItems(db, orderId),
@@ -171,11 +181,12 @@ export async function sendOrderPlacedEmail(
       : [['Delivery address', o.address ?? 'Your main address'], ['Delivery date', whenText]],
     button: { label: 'See my orders', url: portalLink('orders') },
     // Wording from Everton, 10 Oct 2026.
-    outro: (o.empties_expected != null ? `Empties to be returned: ${o.empties_expected}\n\n` : '')
-      + 'The invoice is made out from what is actually delivered.',
+    outro: (o.empties_expected != null ? `Empties to be returned: ${o.empties_expected}` : '')
+      + (screen ? '' : `${o.empties_expected != null ? '\n\n' : ''}The invoice is made out from what is actually delivered.`) || undefined,
   });
-  const r = await sendLogged(db, 'OrderPlaced', o.order_number, o.customer_id, to,
-    `Alka Vida order ${o.order_number} received`, mail, manual ? 'order confirmation, sent by hand' : 'order confirmation');
+  const r = await sendLogged(db, 'OrderPlaced', o.order_number, o.customer_id, screen && screen.to.length > 1 ? screen.to : (screen ? screen.to[0] : to),
+    screen ? screen.subject : `Alka Vida order ${o.order_number} received`, mail,
+    manual ? 'order confirmation, sent by hand' : 'order confirmation', screen?.extra, screen);
   return { ...r, sentTo: to };
 }
 
@@ -186,7 +197,7 @@ export async function sendOrderPlacedEmail(
  * collected; again as often as needed. Says plainly why when it cannot go.
  */
 export async function emailOrderConfirmation(
-  db: Db, actor: Actor, orderId: string, input: { to?: string | null },
+  db: Db, actor: Actor, orderId: string, input: { to?: string | null; compose?: Compose | null },
 ): Promise<{ sentTo: string; orderNumber: string }> {
   requireRole(actor, 'admin', 'user');
   if (!mailConfigured()) throw new RuleViolation('Email is not set up yet, so nothing can be sent.');
@@ -197,14 +208,19 @@ export async function emailOrderConfirmation(
   if (o.delivery_mode === 'Counter') throw new RuleViolation('a counter sale has its receipt and invoice instead');
   if (o.status === 'Cancelled') throw new RuleViolation(`${o.order_number} is cancelled`);
   if (o.status === 'Delivered') throw new RuleViolation(`${o.order_number} is already delivered; email the invoice instead`);
+  const screen = input.compose ? await outgoing(db, actor.id, input.compose, 0) : null;
   const typed = String(input.to ?? '').trim();
-  if (typed && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(typed)) throw new RuleViolation(`"${typed}" is not an email address`);
-  if (!typed && !o.email?.trim()) {
-    throw new RuleViolation(`${o.name} has no email address on file. Add one to their record, or type an address to send this to.`);
+  if (!screen) {
+    if (typed && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(typed)) throw new RuleViolation(`"${typed}" is not an email address`);
+    if (!typed && !o.email?.trim()) {
+      throw new RuleViolation(`${o.name} has no email address on file. Add one to their record, or type an address to send this to.`);
+    }
   }
-  const r = await sendOrderPlacedEmail(db, orderId, { to: typed || null, manual: true });
+  const r = await sendOrderPlacedEmail(db, orderId, { to: typed || null, manual: true, screen });
   if (!r.sent) throw new RuleViolation(`The confirmation could not be sent: ${r.reason ?? 'unknown reason'}`);
-  await audit(db, actor, 'update', 'Order', orderId, o.order_number, { emailedConfirmationTo: r.sentTo });
+  const a = screen ? auditAddresses(screen) : {};
+  delete (a as Record<string, unknown>).emailedTo;
+  await audit(db, actor, 'update', 'Order', orderId, o.order_number, { emailedConfirmationTo: r.sentTo, ...a });
   return { sentTo: r.sentTo!, orderNumber: o.order_number };
 }
 

@@ -1,9 +1,10 @@
 import { useEffect, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { api, openPdfPost } from '../lib/api';
+import { openBatchSend, useSentRefresh } from '../lib/send';
 import { money, date, when } from '../lib/format';
 import { INVOICE_FILTERS, STATE_TONE, invoiceMatches, invoiceState } from '../lib/invoiceState';
-import { BatchBar, SortTh, MultiStatusSelect, passes, TickAllTh, TickTd, sendSummary, useSort, useTicks } from '../components/ListTools';
+import { BatchBar, SortTh, MultiStatusSelect, passes, TickAllTh, TickTd, useSort, useTicks } from '../components/ListTools';
 import { downloadCsv, dollars } from '../lib/csv';
 import StatementDialog from '../components/StatementDialog';
 
@@ -75,13 +76,16 @@ export default function Invoices() {
     await openPdfPost('/api/batch/invoices/print.pdf', { ids: ids() }, `Invoices-${picked.length}.pdf`);
     return `${picked.length} printed to one PDF.`;
   }, 'Could not build the PDF');
-  const sendPicked = () => batch(async () => {
-    const r = await api.post<Array<{ label: string; sentTo?: string; error?: string }>>('/api/batch/invoices/send', { ids: ids() });
-    const s = sendSummary(r);
-    if (s.problems.length) setError(`Not sent: ${s.problems.join(' · ')}`);
-    await load();
-    return s.ok;
-  }, 'Could not send them');
+  /**
+   * The send screen in a new tab, one customer at a time (Everton, 28 Oct
+   * 2026, "Option B"): each customer's invoices together in one email.
+   */
+  const sendPicked = () => {
+    openBatchSend('invoices', ids());
+    setError(null);
+    setMsg('The emails opened in a new tab, one customer at a time.');
+  };
+  useSentRefresh(() => { load().catch(() => {}); });
   const markSent = () => batch(async () => {
     const open = picked.filter((r) => ['Open'].includes(invoiceState(r)));
     for (const r of open) await api.post(`/api/invoices/${r.invoice_id}/sent`, {});
@@ -186,7 +190,7 @@ export default function Invoices() {
                   onClear={ticks.clear}
                   actions={[
                     { label: 'Print (one PDF)', run: printPicked },
-                    { label: 'Send by email (each customer gets theirs together)', run: sendPicked },
+                    { label: 'Email, one customer at a time…', run: sendPicked },
                     { label: 'Receive payment', run: receivePayment,
                       disabledWhy: !oneCustomer ? 'Tick invoices of one customer' : owedPicked.length === 0 ? 'Nothing owed on these' : null },
                     { label: 'Mark as sent', run: markSent,

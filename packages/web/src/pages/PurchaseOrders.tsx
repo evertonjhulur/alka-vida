@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { api, openPdf, openPdfPost } from '../lib/api';
-import { BatchBar, SortTh, MultiStatusSelect, passes, TickAllTh, TickTd, sendSummary, useSort, useTicks } from '../components/ListTools';
+import { openBatchSend, openSend, useSentRefresh } from '../lib/send';
+import { BatchBar, SortTh, MultiStatusSelect, passes, TickAllTh, TickTd, useSort, useTicks } from '../components/ListTools';
 import { downloadCsv, dollars } from '../lib/csv';
 import { money, toCents, when, day, todayInJamaica } from '../lib/format';
 import { ask } from '../components/Dialog';
@@ -53,7 +54,6 @@ export default function PurchaseOrders() {
   const [receipts, setReceipts] = useState<Record<string, string>>({});
   /** The day it actually arrived (team feedback, point 18); blank = today. */
   const [arrivedOn, setArrivedOn] = useState('');
-  const [mailTo, setMailTo] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -71,6 +71,11 @@ export default function PurchaseOrders() {
     setOrders(await api.get<PO[]>('/api/purchase-orders'));
     setSuppliers(await api.get<Supplier[]>('/api/suppliers'));
   }
+  // Emailed from the send screen in another tab: show the new state here.
+  useSentRefresh(() => {
+    load().catch(() => {});
+    if (open) api.get<PODetail>(`/api/purchase-orders/${open.id}`).then(setOpen).catch(() => {});
+  });
   useEffect(() => {
     load().catch((e) => setError(e.message));
     // Opened from a round's pick-up: show that PO straight away.
@@ -171,7 +176,6 @@ export default function PurchaseOrders() {
     if (open?.id === id) { setOpen(null); return; }
     const detail = await api.get<PODetail>(`/api/purchase-orders/${id}`);
     setOpen(detail);
-    setMailTo(detail.supplier_email ?? '');
     setReceipts(Object.fromEntries(detail.lines.map((l) => [
       l.id, String(Math.max(Number(l.quantity_ordered) - Number(l.quantity_received), 0)),
     ])));
@@ -216,10 +220,8 @@ export default function PurchaseOrders() {
     return `Received${arrivedOn ? ` (arrived ${day(arrivedOn)})` : ''}. ${result.batchIds.length} stock batch(es) created at this order's prices; production draws from them oldest first.`;
   }, 'Could not record the receipt');
 
-  const emailIt = () => act(async () => {
-    const r = await api.post<{ sentTo: string }>(`/api/purchase-orders/${open!.id}/email`, { to: mailTo });
-    return `${open!.po_number} emailed to ${r.sentTo}.`;
-  }, 'Could not send it');
+  /** The send screen, in a new tab (28 Oct 2026). */
+  const emailIt = () => openSend({ kind: 'purchase-order', ids: [open!.id] });
 
   const deleteIt = async () => {
     if (!open) return;
@@ -396,13 +398,10 @@ export default function PurchaseOrders() {
                           await openPdfPost('/api/batch/purchase-orders/print.pdf', { ids: poTicks.picked }, `Purchase-orders-${poPicked.length}.pdf`);
                           return `${poPicked.length} in one PDF.`;
                         }, 'Could not build the PDF') },
-                        { label: 'Email each to its supplier', run: () => poBatch(async () => {
-                          const r = await api.post<Array<{ label: string; sentTo?: string; error?: string }>>('/api/batch/purchase-orders/send', { ids: poTicks.picked });
-                          const sm = sendSummary(r);
-                          if (sm.problems.length) setError(`Not sent: ${sm.problems.join(' · ')}`);
-                          await load();
-                          return sm.ok;
-                        }, 'Could not send them'),
+                        { label: 'Email each to its supplier, one at a time…', run: () => {
+                          openBatchSend('purchase-orders', poTicks.picked);
+                          setMsg('The emails opened in a new tab, one purchase order at a time.');
+                        },
                         disabledWhy: poPicked.some((p) => p.status === 'Cancelled') ? 'Untick the cancelled ones' : null },
                         { label: 'Export to Excel', run: () => exportPos(poPicked) },
                       ]} />
@@ -462,16 +461,11 @@ export default function PurchaseOrders() {
             </span>
           </div>
 
-          <div className="row" style={{ alignItems: 'flex-end' }}>
-            <div className="field grow" style={{ maxWidth: 360 }}>
-              <label htmlFor="po-to">Email it to the supplier</label>
-              <input id="po-to" type="email" value={mailTo} placeholder="no address on file"
-                     onChange={(e) => setMailTo(e.target.value)} />
-            </div>
-            <div className="field">
-              <button disabled={busy || !mailTo.trim() || ENDED.includes(open.status)} onClick={emailIt}>Send it</button>
-            </div>
-            {open.sent_to && <div className="field muted small">Last sent to {open.sent_to}</div>}
+          <div className="row" style={{ alignItems: 'center' }}>
+            <button className="secondary" disabled={busy || ENDED.includes(open.status)} onClick={emailIt}>Email to the supplier…</button>
+            <span className="muted small">
+              {open.sent_to ? `Last sent to ${open.sent_to}.` : open.supplier_email ? `Goes to ${open.supplier_email}.` : 'No email address on file for this supplier.'}
+            </span>
           </div>
 
           {pickups.length > 0 && !ENDED.includes(open.status) && (

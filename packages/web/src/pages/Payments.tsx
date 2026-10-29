@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api, openPdfPost, idempotencyKey } from '../lib/api';
-import { BatchBar, SortTh, MultiStatusSelect, passes, TickAllTh, TickTd, sendSummary, useSort, useTicks } from '../components/ListTools';
+import { openBatchSend, openSend } from '../lib/send';
+import { BatchBar, SortTh, MultiStatusSelect, passes, TickAllTh, TickTd, useSort, useTicks } from '../components/ListTools';
 import { downloadCsv, dollars } from '../lib/csv';
 import { payMethods, useTakeCard } from '../lib/payments';
 import { money, toCents, day } from '../lib/format';
@@ -432,12 +433,10 @@ function Received({ stamp }: { stamp: number }) {
                       await openPdfPost('/api/batch/receipts/print.pdf', { ids: ticks.picked }, `Receipts-${picked.length}.pdf`);
                       return `${picked.length} receipt${picked.length === 1 ? '' : 's'} in one PDF.`;
                     }, 'Could not build the receipts') },
-                    { label: 'Email receipts (one per customer)', run: () => batch(async () => {
-                      const r = await api.post<Array<{ label: string; sentTo?: string; error?: string }>>('/api/batch/receipts/send', { ids: ticks.picked });
-                      const s = sendSummary(r);
-                      if (s.problems.length) setError(`Not sent: ${s.problems.join(' · ')}`);
-                      return s.ok;
-                    }, 'Could not send the receipts') },
+                    { label: 'Email receipts, one customer at a time…', run: () => {
+                      openBatchSend('receipts', ticks.picked);
+                      setMsg('The emails opened in a new tab, one customer at a time.');
+                    } },
                     { label: 'Export to Excel', run: () => exportRows(picked) },
                   ]} />
       <table className="orders-table">
@@ -474,7 +473,8 @@ function Received({ stamp }: { stamp: number }) {
                 <td data-label="Reference" className="small muted">
                   {p.reference ?? '—'}{p.receipt_number ? ` · ${p.receipt_number}` : ''}
                   {tickable && (
-                    <> · <button type="button" className="as-link small" disabled={busy} onClick={() => viewReceipt(p)}>Receipt</button></>
+                    <> · <button type="button" className="as-link small" disabled={busy} onClick={() => viewReceipt(p)}>Receipt</button>
+                      {' · '}<button type="button" className="as-link small" onClick={() => openSend({ kind: 'receipt', ids: [p.id] })}>Email…</button></>
                   )}
                 </td>
                 <td data-label="Amount" className="num">{money(Number(p.amount_cents))}</td>

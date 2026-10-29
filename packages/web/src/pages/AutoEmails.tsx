@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { api, type Session } from '../lib/api';
 import { when } from '../lib/format';
 
@@ -153,6 +153,7 @@ export default function AutoEmails({ session }: { session: Session }) {
         </div>
       )}
       <OrderingSettings isAdmin={isAdmin} />
+      <EmailWording isAdmin={isAdmin} />
       <form className="panel" onSubmit={save}>
         <h2 style={{ marginTop: 0 }}>Statements and reminders</h2>
         <fieldset className="form-block" disabled={!isAdmin}>
@@ -223,5 +224,114 @@ export default function AutoEmails({ session }: { session: Session }) {
         {log.length === 0 && <p className="muted">Nothing sent automatically yet.</p>}
       </div>
     </>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+
+interface WordingRow {
+  kind: string; label: string; blanks: string[];
+  subject: string; message: string;
+  standardSubject: string; standardMessage: string; changed: boolean;
+}
+
+/**
+ * The wording of the emails the office sends (Everton, 28 Oct 2026). Each
+ * kind of document has a subject and message; the send screen starts from
+ * it and anyone sending can change it for that one email. The automatic
+ * emails use it as it stands. Words in {braces} are filled in per customer.
+ */
+function EmailWording({ isAdmin }: { isAdmin: boolean }) {
+  const [rows, setRows] = useState<WordingRow[]>([]);
+  const [kind, setKind] = useState('invoice');
+  const [subject, setSubject] = useState('');
+  const [message, setMessage] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const box = useRef<HTMLTextAreaElement>(null);
+
+  const pick = (list: WordingRow[], k: string) => {
+    const r = list.find((x) => x.kind === k) ?? list[0];
+    if (!r) return;
+    setKind(r.kind); setSubject(r.subject); setMessage(r.message);
+  };
+  useEffect(() => {
+    api.get<WordingRow[]>('/api/email-wording')
+      .then((list) => { setRows(list); pick(list, 'invoice'); })
+      .catch((e) => setError(e instanceof Error ? e.message : 'Could not load the wording'));
+  }, []);
+
+  const row = rows.find((r) => r.kind === kind);
+  if (!row) return error ? <div className="notice error">{error}</div> : null;
+  const dirty = subject !== row.subject || message !== row.message;
+
+  /** Puts a blank where the cursor is in the message. */
+  const insert = (blank: string) => {
+    const el = box.current;
+    if (!el) { setMessage((m) => m + blank); return; }
+    const a = el.selectionStart ?? message.length;
+    const b = el.selectionEnd ?? message.length;
+    const next = message.slice(0, a) + blank + message.slice(b);
+    setMessage(next);
+    requestAnimationFrame(() => { el.focus(); el.setSelectionRange(a + blank.length, a + blank.length); });
+  };
+
+  async function save(reset: boolean) {
+    setBusy(true); setError(null); setMsg(null);
+    try {
+      const list = await api.put<WordingRow[]>(`/api/email-wording/${kind}`, reset ? { reset: true } : { subject, message });
+      setRows(list);
+      pick(list, kind);
+      setMsg(reset ? `${row!.label}: back to the standard wording.` : `${row!.label} wording saved.`);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Could not save the wording');
+    } finally { setBusy(false); }
+  }
+
+  return (
+    <div className="panel">
+      <h2 style={{ marginTop: 0 }}>Wording of the emails you send</h2>
+      <p className="muted small" style={{ marginTop: 0 }}>
+        What the subject and message say when someone presses Email… on a document. They can change it for that one email before sending.
+        The automatic emails (monthly statements, weekly and monthly invoices, receipts from the tick box) use it as it stands.
+        The figures, the attachment and the "See it online" button are added below the message.
+      </p>
+      {error && <div className="notice error">{error}</div>}
+      {msg && <div className="notice ok">{msg}</div>}
+      <fieldset className="form-block" disabled={!isAdmin || busy}>
+        <div className="field">
+          <label htmlFor="ew-kind">Email for</label>
+          <select id="ew-kind" value={kind} onChange={(e) => pick(rows, e.target.value)}>
+            {rows.map((r) => <option key={r.kind} value={r.kind}>{r.label}{r.changed ? ' (changed)' : ''}</option>)}
+          </select>
+        </div>
+        <div className="field">
+          <label htmlFor="ew-subject">Subject</label>
+          <input id="ew-subject" value={subject} style={{ width: '100%' }} onChange={(e) => setSubject(e.target.value)} />
+        </div>
+        <div className="field">
+          <label htmlFor="ew-message">Message</label>
+          <textarea id="ew-message" ref={box} rows={8} value={message} style={{ width: '100%', lineHeight: 1.45 }}
+                    onChange={(e) => setMessage(e.target.value)} />
+        </div>
+        <div className="row" style={{ alignItems: 'center', marginBottom: 10 }}>
+          <span className="muted small">Add a blank:</span>
+          {row.blanks.map((b) => (
+            <button key={b} type="button" className="secondary small-button" onClick={() => insert(b)}>{b}</button>
+          ))}
+        </div>
+      </fieldset>
+      <p className="muted small" style={{ marginTop: 0 }}>
+        Each blank is filled in for the customer the email goes to: {'{customer}'} is their name, {'{contact}'} the contact person (or the name).
+      </p>
+      {isAdmin ? (
+        <div className="row">
+          <button type="button" disabled={busy || !dirty || !subject.trim() || !message.trim()} onClick={() => save(false)}>Save</button>
+          {dirty && <button type="button" className="secondary" disabled={busy} onClick={() => pick(rows, kind)}>Undo changes</button>}
+          {row.changed && <button type="button" className="secondary" disabled={busy} onClick={() => save(true)}>Use the standard wording</button>}
+        </div>
+      ) : <p className="muted small">Only an administrator can change the wording.</p>}
+    </div>
   );
 }

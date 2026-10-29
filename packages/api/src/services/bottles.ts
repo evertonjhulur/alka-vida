@@ -20,7 +20,7 @@
 
 import type { Db, Queryable } from '../db/index.ts';
 import type { Actor } from './core.ts';
-import { audit, requireRole, num } from './core.ts';
+import { audit, requireRole, num, businessToday } from './core.ts';
 import { RuleViolation } from '@alka/shared';
 
 export interface Pool {
@@ -265,15 +265,22 @@ export async function adjustPool(
  * (customer_bottle_moves). Before 1 Oct 2026 only the rounds counted, so a
  * customer who collected or bought at the counter never showed as holding
  * any bottles.
+ *
+ * `opening` is the customer's opening balance of OUR bottles (28 Oct 2026):
+ * what they already had when the app started, from the delivery sheet. It
+ * counts towards what they hold like a delivery, but is kept apart so it is
+ * never shown as one.
  */
 const CUSTOMER_MOVES = `
   SELECT s.customer_id, sh.delivery_date AS day,
          s.bottles_delivered_full AS delivered, s.bottles_empties_picked_up AS returned,
-         s.bottles_lost_damaged AS lost, 0 AS sold
+         s.bottles_lost_damaged AS lost, 0 AS sold, 0 AS opening
   FROM delivery_stops s JOIN delivery_sheets sh ON sh.id = s.delivery_sheet_id
   WHERE s.stop_outcome = 'Delivered'
   UNION ALL
-  SELECT m.customer_id, m.moved_on, m.delivered, m.returned, m.lost, m.sold
+  SELECT m.customer_id, m.moved_on,
+         CASE WHEN m.opening THEN 0 ELSE m.delivered END, m.returned, m.lost, m.sold,
+         CASE WHEN m.opening THEN m.delivered ELSE 0 END
   FROM customer_bottle_moves m`;
 
 /**
@@ -319,7 +326,9 @@ export async function customerHoldings(db: Db) {
             COALESCE(SUM(s.returned), 0)::int    AS returned,
             COALESCE(SUM(s.lost), 0)::int        AS lost,
             COALESCE(SUM(s.sold), 0)::int        AS sold,
-            (COALESCE(SUM(s.delivered), 0)
+            COALESCE(SUM(s.opening), 0)::int     AS opening,
+            (COALESCE(SUM(s.opening), 0)
+             + COALESCE(SUM(s.delivered), 0)
              - COALESCE(SUM(s.returned), 0)
              - COALESCE(SUM(s.lost), 0)
              - COALESCE(SUM(s.sold), 0))::int    AS holding,
@@ -328,6 +337,7 @@ export async function customerHoldings(db: Db) {
      JOIN (${CUSTOMER_MOVES}) s ON s.customer_id = c.id
      GROUP BY c.id, c.name, c.phone, c.delivery_zone
      HAVING COALESCE(SUM(s.delivered), 0) > 0 OR COALESCE(SUM(s.returned), 0) > 0
+         OR COALESCE(SUM(s.opening), 0) > 0
      ORDER BY holding DESC, c.name`,
   );
 }
@@ -377,6 +387,8 @@ export async function bottleAccount(
   /** Bought outright: theirs, so not part of what they hold of ours. */
   sold: number;
   closingHolding: number;
+  /** The opening balance entered for them (28 Oct 2026), if any: part of openingHolding when it falls in or before the window. */
+  openingEntered: { quantity: number; asOf: string } | null;
 }> {
   const from = opts.from ?? null;
   const to = opts.to ?? null;
@@ -386,9 +398,12 @@ export async function bottleAccount(
   }>(
     `SELECT
        -- everything BEFORE the window, so the period reads as a movement
-       COALESCE(SUM(
+       (COALESCE(SUM(
          CASE WHEN $2::date IS NOT NULL AND m.day < $2::date
-              THEN m.delivered - m.returned - m.lost - m.sold ELSE 0 END), 0)::text AS opening,
+              THEN m.opening + m.delivered - m.returned - m.lost - m.sold ELSE 0 END), 0)
+       -- an opening balance dated inside the window is brought forward too:
+       -- it is what they had, not something delivered in the period
+        + COALESCE(SUM(CASE WHEN w.inWindow THEN m.opening ELSE 0 END), 0))::text AS opening,
        COALESCE(SUM(CASE WHEN w.inWindow THEN m.delivered ELSE 0 END), 0)::text AS delivered,
        COALESCE(SUM(CASE WHEN w.inWindow THEN m.returned ELSE 0 END), 0)::text AS returned,
        COALESCE(SUM(CASE WHEN w.inWindow THEN m.lost ELSE 0 END), 0)::text AS lost,
@@ -396,7 +411,7 @@ export async function bottleAccount(
        -- what they hold now, counting everything up to the end of the window
        COALESCE(SUM(
          CASE WHEN $3::date IS NULL OR m.day <= $3::date
-              THEN m.delivered - m.returned - m.lost - m.sold ELSE 0 END), 0)::text AS closing
+              THEN m.opening + m.delivered - m.returned - m.lost - m.sold ELSE 0 END), 0)::text AS closing
      FROM (${CUSTOMER_MOVES}) m
      CROSS JOIN LATERAL (
        SELECT ($2::date IS NULL OR m.day >= $2::date)
@@ -406,6 +421,10 @@ export async function bottleAccount(
     [customerId, from, to],
   );
 
+  const entered = await db.maybeOne<{ delivered: number; moved_on: string }>(
+    `SELECT delivered, moved_on::text AS moved_on FROM customer_bottle_moves
+     WHERE customer_id = $1 AND opening`, [customerId]);
+
   return {
     openingHolding: num(row.opening),
     delivered: num(row.delivered),
@@ -413,6 +432,7 @@ export async function bottleAccount(
     lost: num(row.lost),
     sold: num(row.sold),
     closingHolding: num(row.closing),
+    openingEntered: entered ? { quantity: num(entered.delivered), asOf: entered.moved_on } : null,
   };
 }
 
@@ -537,4 +557,160 @@ export async function reverseDeliveryMovement(
     `${back} empties taken back off: delivery recorded in error, undone`);
   await logMovement(t, actor, pool, lost + sold, 'in', 'Adjustment', args.reference,
     `${lost + sold} bottles written back: delivery recorded in error, undone`);
+}
+
+/* ------------------------------------------------------------------ */
+/* Opening balances of our bottles (Everton, 28 Oct 2026)              */
+/* ------------------------------------------------------------------ */
+
+/*
+ * "I now need to update bottles owned by us on the customer accounts."
+ *
+ * Start fresh set every customer's bottle holding to nothing, so the app only
+ * knew about bottles delivered since go-live. The bottles of ours a customer
+ * already had (worked out from the 2026 delivery sheet, as at Fri 23 Oct 2026)
+ * go in as an opening balance: ONE row per customer in customer_bottle_moves,
+ * marked `opening` and dated the day the count is as at. Entering it again
+ * replaces it; 0 removes it.
+ *
+ * The pool's own totals are NOT moved. An opening balance says which customer
+ * has bottles that are already out; it does not put new bottles into
+ * circulation. The Bottle pool screen compares the two ("Not traced to a
+ * customer" / "Difference to check"), which is where a pool count that is
+ * out of step shows.
+ *
+ * Bottles the customer owns are never entered: the app counts OUR bottles
+ * with customers. Administrators only, and every change is in the audit log.
+ */
+
+export interface OpeningResult {
+  customerId: string; name: string; was: number; now: number; asOf: string;
+}
+
+const ISO_DAY = /^\d{4}-\d{2}-\d{2}$/;
+
+function wholeBottles(v: unknown): number | null {
+  const n = typeof v === 'number' ? v : Number(String(v ?? '').trim());
+  if (String(v ?? '').trim() === '' || !Number.isFinite(n) || n < 0 || !Number.isInteger(n)) return null;
+  return n;
+}
+
+async function writeOpening(
+  t: Queryable, actor: Actor, c: { id: string; name: string },
+  quantity: number, asOf: string, reason: string, from: string,
+): Promise<OpeningResult> {
+  const prev = await t.maybeOne<{ delivered: number; moved_on: string }>(
+    `SELECT delivered, moved_on::text AS moved_on FROM customer_bottle_moves
+     WHERE customer_id = $1 AND opening FOR UPDATE`, [c.id]);
+  const was = prev ? num(prev.delivered) : 0;
+  if (!prev && quantity === 0) return { customerId: c.id, name: c.name, was, now: 0, asOf };
+  if (prev && was === quantity && prev.moved_on === asOf) {
+    return { customerId: c.id, name: c.name, was, now: quantity, asOf };
+  }
+  await t.query(`DELETE FROM customer_bottle_moves WHERE customer_id = $1 AND opening`, [c.id]);
+  if (quantity > 0) {
+    await t.query(
+      `INSERT INTO customer_bottle_moves (customer_id, moved_on, delivered, opening, reference, note)
+       VALUES ($1, $2::date, $3, true, 'Opening balance', $4)`,
+      [c.id, asOf, quantity, reason],
+    );
+  }
+  await audit(t, actor, 'adjust', 'Customer', c.id, c.name, {
+    openingBottlesWas: was, openingBottlesNow: quantity, asOf,
+    asOfWas: prev?.moved_on ?? null, reason, from,
+  });
+  return { customerId: c.id, name: c.name, was, now: quantity, asOf };
+}
+
+/** One customer's opening balance of our bottles, from their Bottles tab. */
+export async function setOpeningBottles(
+  db: Db, actor: Actor, customerId: string,
+  args: { quantity: unknown; asOf?: string | null; reason?: string | null },
+): Promise<OpeningResult> {
+  requireRole(actor, 'admin');
+  const quantity = wholeBottles(args.quantity);
+  if (quantity === null) throw new RuleViolation('enter the number of our bottles as a whole number, 0 or more');
+  const asOf = (args.asOf ?? '').trim() || businessToday();
+  if (!ISO_DAY.test(asOf)) throw new RuleViolation('the "as at" date is not a date');
+  if (asOf > businessToday()) throw new RuleViolation('an opening balance cannot be dated in the future');
+  const reason = (args.reason ?? '').trim();
+  if (!reason) throw new RuleViolation('a reason is required when setting an opening bottle balance');
+  return db.tx(async (t) => {
+    const c = await t.maybeOne<{ id: string; name: string }>(`SELECT id, name FROM customers WHERE id = $1`, [customerId]);
+    if (!c) throw new RuleViolation('customer not found');
+    return writeOpening(t, actor, c, quantity, asOf, reason, 'customer page');
+  });
+}
+
+export interface OpeningUploadRow { customer: string; quantity: unknown }
+export interface OpeningUploadInput { rows: OpeningUploadRow[]; asOf: string; reason?: string | null; dryRun?: boolean }
+export interface OpeningUploadRowResult {
+  row: number; customer: string; customerId: string | null; matchedName: string | null;
+  inactive: boolean; was: number; now: number;
+  action: 'set' | 'change' | 'remove' | 'same' | 'error'; errors: string[];
+}
+
+/**
+ * The opening balances for many customers at once, from the workbook made
+ * from the bottle-ownership review. Checked first (nothing written), then
+ * brought in as ONE transaction, like the customer and product uploads.
+ * Customers are matched by name exactly as in the app (case and spacing
+ * aside); a name that is not there, or is there twice, stops the upload.
+ */
+export async function uploadOpeningBottles(db: Db, actor: Actor, input: OpeningUploadInput) {
+  requireRole(actor, 'admin');
+  const asOf = String(input.asOf ?? '').trim();
+  if (!ISO_DAY.test(asOf)) throw new RuleViolation('choose the date the counts are as at');
+  if (asOf > businessToday()) throw new RuleViolation('opening balances cannot be dated in the future');
+  const reason = (input.reason ?? '').trim() || `Opening balance of our 5-gallon bottles as at ${asOf}`;
+  const rows = Array.isArray(input.rows) ? input.rows : [];
+  if (rows.length === 0) throw new RuleViolation('the file has no customers in it');
+
+  const key = (s: unknown) => String(s ?? '').replace(/\s+/g, ' ').trim().toLowerCase();
+  const all = await db.query<{ id: string; name: string; active: boolean }>(`SELECT id, name, active FROM customers`);
+  const byName = new Map<string, Array<{ id: string; name: string; active: boolean }>>();
+  for (const c of all) byName.set(key(c.name), [...(byName.get(key(c.name)) ?? []), c]);
+  const current = new Map((await db.query<{ customer_id: string; delivered: number }>(
+    `SELECT customer_id, delivered FROM customer_bottle_moves WHERE opening`)).map((r) => [r.customer_id, num(r.delivered)]));
+
+  const seen = new Set<string>();
+  const results: OpeningUploadRowResult[] = rows.map((r, i) => {
+    const errors: string[] = [];
+    const name = String(r.customer ?? '').replace(/\s+/g, ' ').trim();
+    const qty = wholeBottles(r.quantity);
+    if (!name) errors.push('no customer name');
+    if (qty === null) errors.push('the number of bottles must be a whole number, 0 or more');
+    const hits = name ? (byName.get(key(name)) ?? []) : [];
+    if (name && hits.length === 0) errors.push('no customer with this name in the app');
+    if (hits.length > 1) errors.push('two customers in the app have this name - set this one on the customer page instead');
+    const c = hits.length === 1 ? hits[0] : null;
+    if (c && seen.has(c.id)) errors.push('this customer is in the file twice');
+    if (c) seen.add(c.id);
+    const was = c ? (current.get(c.id) ?? 0) : 0;
+    const now = qty ?? 0;
+    const action: OpeningUploadRowResult['action'] = errors.length ? 'error'
+      : was === now ? 'same' : now === 0 ? 'remove' : was === 0 ? 'set' : 'change';
+    return {
+      row: i + 1, customer: name, customerId: c?.id ?? null, matchedName: c?.name ?? null,
+      inactive: c ? !c.active : false, was, now, action, errors,
+    };
+  });
+
+  const withErrors = results.filter((r) => r.action === 'error').length;
+  const summary = {
+    dryRun: input.dryRun !== false, asOf, rows: results, withErrors,
+    toSet: results.filter((r) => r.action === 'set' || r.action === 'change').length,
+    toRemove: results.filter((r) => r.action === 'remove').length,
+    bottles: results.filter((r) => r.action !== 'error').reduce((a, r) => a + r.now, 0),
+    done: 0,
+  };
+  if (summary.dryRun) return summary;
+  if (withErrors > 0) throw new RuleViolation(`${withErrors} row${withErrors === 1 ? ' has' : 's have'} a problem - nothing was brought in`);
+
+  await db.tx(async (t) => {
+    for (const r of results) {
+      await writeOpening(t, actor, { id: r.customerId!, name: r.matchedName! }, r.now, asOf, reason, 'opening bottles upload');
+    }
+  });
+  return { ...summary, done: results.length };
 }

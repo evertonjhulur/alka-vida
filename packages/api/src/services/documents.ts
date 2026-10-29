@@ -25,6 +25,8 @@ import { getInvoiceDetail } from './invoices.ts';
 import { getStatement, invoicesInStatuses, type StatementFilter, type StatementStatus } from './ledger.ts';
 import { customerEmail } from './emailkit.ts';
 import { bottleAccount } from './bottles.ts';
+import { type Compose, type Outgoing, outgoing, savedCopies, auditAddresses } from './compose.ts';
+import { filledWording } from './emailwording.ts';
 
 /** The logo's colours (Everton chose them over the old teal, 28 Sep 2026). */
 const COLOR_BLUE = '#0E76BC';
@@ -832,7 +834,11 @@ export async function renderStatementPdf(
 /* ================================================================== */
 
 export interface MailMessage {
-  to: string;
+  /** One address or several (the send screen's To box). */
+  to: string | string[];
+  /** Copies (28 Oct 2026): the send screen's Cc and Bcc boxes, saved copy addresses. */
+  cc?: string[];
+  bcc?: string[];
   subject: string;
   /** Always present: the plain-text twin, for mail programs that show only text. */
   text: string;
@@ -840,7 +846,7 @@ export interface MailMessage {
   html?: string;
   /** e.g. List-Unsubscribe on non-essential email. */
   headers?: Record<string, string>;
-  attachments?: Array<{ filename: string; content: Buffer }>;
+  attachments?: Array<{ filename: string; content: Buffer; contentType?: string }>;
 }
 
 /**
@@ -887,7 +893,9 @@ export async function sendMail(m: MailMessage): Promise<void> {
       },
       body: JSON.stringify({
         from: process.env.MAIL_FROM,
-        to: [m.to],
+        to: Array.isArray(m.to) ? m.to : [m.to],
+        ...(m.cc?.length ? { cc: m.cc } : {}),
+        ...(m.bcc?.length ? { bcc: m.bcc } : {}),
         subject: m.subject,
         text: m.text,
         ...(m.html ? { html: m.html } : {}),
@@ -895,6 +903,7 @@ export async function sendMail(m: MailMessage): Promise<void> {
         ...(process.env.MAIL_REPLY_TO ? { reply_to: process.env.MAIL_REPLY_TO } : {}),
         attachments: (m.attachments ?? []).map((a) => ({
           filename: a.filename, content: a.content.toString('base64'),
+          ...(a.contentType ? { content_type: a.contentType } : {}),
         })),
       }),
     });
@@ -916,6 +925,8 @@ export async function sendMail(m: MailMessage): Promise<void> {
   await transport.sendMail({
     from: process.env.MAIL_FROM ?? process.env.SMTP_USER,
     to: m.to, subject: m.subject, text: m.text, html: m.html, headers: m.headers,
+    ...(m.cc?.length ? { cc: m.cc } : {}),
+    ...(m.bcc?.length ? { bcc: m.bcc } : {}),
     attachments: m.attachments,
     ...(process.env.MAIL_REPLY_TO ? { replyTo: process.env.MAIL_REPLY_TO } : {}),
   });
@@ -933,6 +944,30 @@ function recipient(override: string | null | undefined, onFile: string | null, w
 }
 
 const signOff = `\n\nThank you for your business.\n\n${BRAND.company}\n`;
+
+/**
+ * Who an email goes to and what it says (send screen, 28 Oct 2026).
+ *
+ * From the send screen: exactly what was typed there, checked. Otherwise (an
+ * automatic email, a tick box, an older screen): the address on file or the
+ * one given, the copy addresses saved on the customer's account, and the
+ * wording from Settings.
+ */
+export async function addressing(
+  db: Queryable, actor: Actor | null,
+  o: { compose?: Compose | null; override?: string | null; onFile: string | null; who: string;
+       customerId?: string | null; documentBytes: number; wording: () => Promise<{ subject: string; message: string }> },
+): Promise<Outgoing & { fromScreen: boolean }> {
+  if (o.compose) {
+    return { ...(await outgoing(db, actor?.id, o.compose, o.documentBytes)), fromScreen: true };
+  }
+  const w = await o.wording();
+  return {
+    to: [recipient(o.override, o.onFile, o.who)],
+    cc: await savedCopies(db, o.customerId),
+    bcc: [], subject: w.subject, message: w.message, extra: [], fromScreen: false,
+  };
+}
 
 /** "3 cases" / "4 bottles", the way every email counts a line. */
 export function qtyWords(bpc: number, cases: number, loose: number): string {
@@ -1000,14 +1035,23 @@ export async function emailStatement(
           filter?: StatementFilter; status?: StatementStatus | string | string[] | null;
           sendTo?: string | null; note?: string | null;
           subject?: string | null; heading?: string | null;
-          category?: 'statements' | 'reminders' | null } = {},
+          category?: 'statements' | 'reminders' | null;
+          compose?: Compose | null } = {},
 ): Promise<{ sentTo: string; customerName: string }> {
   requireRole(actor, 'admin', 'user');
   if (!mailConfigured()) throw new RuleViolation(NOT_SET_UP);
 
   const doc = await renderStatementPdf(db, customerId,
     { from: opts.from, to: opts.to, filter: opts.filter, status: opts.status ?? null });
-  const to = recipient(opts.sendTo, doc.customerEmail, doc.customerName);
+  const reminder = opts.category === 'reminders';
+  const out = await addressing(db, actor, {
+    compose: opts.compose, override: opts.sendTo, onFile: doc.customerEmail, who: doc.customerName,
+    customerId, documentBytes: doc.pdf.length,
+    wording: async () => (reminder
+      ? { subject: `${BRAND.name} statement of account`, message: '' }
+      : filledWording(db, 'statement', [customerId], { from: opts.from, to: opts.to })),
+  });
+  const to = out.to.join(', ');
   const owed = await db.one<{ balance_cents: number; overdue_cents: number }>(
     `SELECT COALESCE((SELECT balance_cents FROM customer_balances WHERE customer_id = $1), 0)::bigint AS balance_cents,
             COALESCE((SELECT SUM(balance_cents) FROM invoice_ledger
@@ -1015,32 +1059,37 @@ export async function emailStatement(
                         AND balance_cents > 0 AND due_date < business_today()), 0)::bigint AS overdue_cents`,
     [customerId],
   );
-  const reminder = opts.category === 'reminders';
+  // A reminder keeps its own words (the reminders screen writes them);
+  // everything else says what the send screen or Settings says.
+  const ownWords = !reminder || out.fromScreen;
   const mail = await customerEmail(db, customerId, opts.category ?? null, {
     preheader: reminder ? 'A friendly reminder about your account' : `Your statement from ${BRAND.name}`,
     heading: opts.heading ?? (reminder ? 'A friendly payment reminder' : 'Your statement of account'),
     subheading: doc.customerName,
-    greeting: 'Good day,',
-    intro: (reminder ? '' : `Please find attached your statement of account from ${BRAND.name}.`)
-      + (opts.note ? `${reminder ? '' : '\n\n'}${opts.note}` : ''),
+    greeting: ownWords ? undefined : 'Good day,',
+    intro: ownWords
+      ? out.message + (opts.note && !out.fromScreen ? `\n\n${opts.note}` : '')
+      : (opts.note ?? ''),
     facts: [
       [num(owed.balance_cents) < 0 ? 'In credit' : 'Balance on account', cash(Math.abs(num(owed.balance_cents)))],
       ['Past due', cash(num(owed.overdue_cents))],
     ],
     button: { label: 'See my account', url: `${siteUrl()}/#/portal/account` },
-    outro: 'Thank you for your business.',
+    outro: ownWords ? undefined : 'Thank you for your business.',
   });
 
   await sendMail({
-    to,
-    subject: opts.subject ?? `${BRAND.name} statement of account`,
+    to: out.to.length === 1 ? out.to[0] : out.to, cc: out.cc, bcc: out.bcc,
+    subject: out.fromScreen ? out.subject : (opts.subject ?? out.subject),
     text: mail.text, html: mail.html, headers: mail.headers,
-    attachments: [{ filename: doc.filename, content: doc.pdf }],
+    attachments: [{ filename: doc.filename, content: doc.pdf }, ...out.extra],
   });
 
   await db.tx(async (t) => {
+    const a = auditAddresses(out);
+    delete a.emailedTo;
     await audit(t, actor, 'update', 'Customer', customerId, doc.customerName, {
-      statementEmailedTo: to,
+      statementEmailedTo: to, ...a,
     });
   });
   return { sentTo: to, customerName: doc.customerName };
@@ -1057,20 +1106,25 @@ export async function emailInvoice(
   actor: Actor,
   invoiceId: string,
   overrideTo?: string | null,
+  compose?: Compose | null,
 ): Promise<{ sentTo: string; invoiceNumber: string }> {
   requireRole(actor, 'admin', 'user');
   if (!mailConfigured()) throw new RuleViolation(NOT_SET_UP);
 
   const doc = await renderInvoicePdf(db, invoiceId);
-  const to = recipient(overrideTo, doc.customerEmail, doc.customerName);
-  const isCN = doc.invoiceNumber.startsWith('CN');
   const f = await invoiceEmailFigures(db, invoiceId);
+  const isCN = f.isCreditNote || doc.invoiceNumber.startsWith('CN');
+  const out = await addressing(db, actor, {
+    compose, override: overrideTo, onFile: doc.customerEmail, who: doc.customerName,
+    customerId: f.customerId, documentBytes: doc.pdf.length,
+    wording: () => filledWording(db, isCN ? 'credit-note' : 'invoice', [invoiceId]),
+  });
+  const to = out.to.join(', ');
   const mail = await customerEmail(db, f.customerId, null, {
     preheader: `${isCN ? 'Credit note' : 'Invoice'} ${doc.invoiceNumber} from ${BRAND.name}`,
     heading: `${isCN ? 'Credit note' : 'Invoice'} ${doc.invoiceNumber}`,
     subheading: doc.customerName,
-    greeting: 'Good day,',
-    intro: `Please find attached ${isCN ? 'credit note' : 'invoice'} ${doc.invoiceNumber} from ${BRAND.name}.`,
+    intro: out.message,
     items: f.items,
     totals: f.totals,
     facts: isCN ? [['Dated', fmtDate(f.invoiceDate)]] : [
@@ -1079,14 +1133,13 @@ export async function emailInvoice(
       ['To pay', f.balanceCents > 0 ? cash(f.balanceCents) : 'Paid, thank you'],
     ],
     button: { label: 'See it online', url: `${siteUrl()}/#/portal/invoices/${invoiceId}` },
-    outro: 'Thank you for your business.',
   });
 
   await sendMail({
-    to,
-    subject: `${BRAND.name} ${isCN ? 'credit note' : 'invoice'} ${doc.invoiceNumber}`,
+    to: out.to.length === 1 ? out.to[0] : out.to, cc: out.cc, bcc: out.bcc,
+    subject: out.subject,
     text: mail.text, html: mail.html,
-    attachments: [{ filename: doc.filename, content: doc.pdf }],
+    attachments: [{ filename: doc.filename, content: doc.pdf }, ...out.extra],
   });
 
   await db.tx(async (t) => {
@@ -1096,7 +1149,7 @@ export async function emailInvoice(
        WHERE id = $1 AND lifecycle <> 'Cancelled'`,
       [invoiceId],
     );
-    await audit(t, actor, 'update', 'Invoice', invoiceId, doc.invoiceNumber, { emailedTo: to });
+    await audit(t, actor, 'update', 'Invoice', invoiceId, doc.invoiceNumber, auditAddresses(out));
   });
   return { sentTo: to, invoiceNumber: doc.invoiceNumber };
 }
@@ -1109,12 +1162,17 @@ export async function emailInvoices(
   db: Db,
   actor: Actor,
   invoiceIds: readonly string[],
-  opts: { to?: string | null; note?: string | null } = {},
+  opts: { to?: string | null; note?: string | null; compose?: Compose | null } = {},
 ): Promise<{ sentTo: string; invoiceNumbers: string[]; totalDueCents: number }> {
   requireRole(actor, 'admin', 'user');
   if (!mailConfigured()) throw new RuleViolation(NOT_SET_UP);
   const doc = await renderInvoicesPdf(db, invoiceIds);
-  const to = recipient(opts.to, doc.customerEmail, doc.customerName);
+  const out = await addressing(db, actor, {
+    compose: opts.compose, override: opts.to, onFile: doc.customerEmail, who: doc.customerName,
+    customerId: doc.customerId, documentBytes: doc.pdf.length,
+    wording: () => filledWording(db, 'invoices', invoiceIds),
+  });
+  const to = out.to.join(', ');
   const list = doc.numbers.join(', ');
   const each = await db.query<{ invoice_number: string; invoice_date: string; balance_cents: number }>(
     `SELECT invoice_number, invoice_date::text AS invoice_date, balance_cents FROM invoice_ledger
@@ -1124,21 +1182,17 @@ export async function emailInvoices(
     preheader: `${doc.numbers.length} invoices from ${BRAND.name}`,
     heading: doc.numbers.length === 1 ? `Invoice ${list}` : `Your invoices (${doc.numbers.length})`,
     subheading: doc.customerName,
-    greeting: 'Good day,',
-    intro: `Please find attached ${doc.numbers.length === 1 ? 'invoice' : 'invoices'} ${list} from ${BRAND.name}, in one PDF.`
-      + (opts.note ? `\n\n${opts.note}` : ''),
+    intro: out.message + (opts.note && !out.fromScreen ? `\n\n${opts.note}` : ''),
     items: each.map((i) => ({ name: i.invoice_number, qty: fmtDate(i.invoice_date), amount: cash(num(i.balance_cents)) })),
     totals: [['Total still owed on these', cash(doc.totalDueCents), true]],
     button: { label: 'See my account', url: `${siteUrl()}/#/portal/account` },
-    outro: 'Thank you for your business.',
   });
 
   await sendMail({
-    to,
-    subject: `${BRAND.name} invoices ${doc.numbers.length > 3
-      ? `(${doc.numbers.length})` : list}`,
+    to: out.to.length === 1 ? out.to[0] : out.to, cc: out.cc, bcc: out.bcc,
+    subject: out.subject,
     text: mail.text, html: mail.html,
-    attachments: [{ filename: doc.filename, content: doc.pdf }],
+    attachments: [{ filename: doc.filename, content: doc.pdf }, ...out.extra],
   });
 
   await db.tx(async (t) => {
@@ -1150,7 +1204,7 @@ export async function emailInvoices(
       );
     }
     await audit(t, actor, 'update', 'Customer', doc.customerId, doc.customerName, {
-      invoicesEmailedTogether: doc.numbers, emailedTo: to,
+      invoicesEmailedTogether: doc.numbers, ...auditAddresses(out),
     });
   });
   return { sentTo: to, invoiceNumbers: doc.numbers, totalDueCents: doc.totalDueCents };
