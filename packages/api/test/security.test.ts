@@ -43,7 +43,7 @@ describe('Point 17: security headers on every response', () => {
       assert.match(csp, /script-src 'self'( https:\/\/accounts\.google\.com\/gsi\/client)?(;|$)/, `${url}: no inline script`);
       assert.doesNotMatch(csp, /script-src[^;]*unsafe/, `${url}: no inline script`);
       assert.match(csp, /fonts\.googleapis\.com/, url);
-      assert.match(csp, /img-src 'self' data: blob:/, url);
+      assert.match(csp, /img-src 'self' data: blob: https:\/\/tile\.openstreetmap\.org/, url);
       assert.equal(res.headers['x-frame-options'], 'DENY', url);
       assert.equal(res.headers['x-content-type-options'], 'nosniff', url);
       assert.equal(res.headers['referrer-policy'], 'strict-origin-when-cross-origin', url);

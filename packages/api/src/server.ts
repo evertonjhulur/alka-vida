@@ -142,7 +142,9 @@ export async function buildServer(db: Db) {
     // carry a small <style>; no inline script is allowed anywhere.
     "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://accounts.google.com/gsi/style",
     "font-src 'self' https://fonts.gstatic.com data:",
-    "img-src 'self' data: blob:",
+    // Map tiles (OpenStreetMap, through Leaflet) for pins and rounds - without
+    // this the map draws as an empty grey box (fixed 31 Oct 2026).
+    "img-src 'self' data: blob: https://tile.openstreetmap.org",
     "connect-src 'self' https://accounts.google.com/gsi/",
     "frame-src https://accounts.google.com/gsi/",
     "object-src 'none'",
