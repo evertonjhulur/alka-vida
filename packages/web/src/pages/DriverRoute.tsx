@@ -13,6 +13,7 @@ interface Stop {
   id: string; customer_name: string; delivery_address: string | null;
   /** Map pin (23 Oct 2026). */
   lat?: number | null;
+  location_source?: string | null;
   sequence_no: number; stop_outcome: string; line_items_summary: string | null;
   order_ref?: string | null; delivery_instructions?: string | null; order_notes?: string | null;
   remainder_to?: string | null; payment_amount_cents?: number; bottles_empties_picked_up?: number;
@@ -108,6 +109,7 @@ export default function DriverRoute({ session }: { session: Session }) {
             <span className="seq">{i + 1}</span>
             <strong>{stop.customer_name}</strong>
             {stop.lat == null && stop.stop_outcome === 'Pending' && <span className="chip warn" style={{ marginLeft: 6 }}>no location yet</span>}
+            {stop.lat != null && stop.location_source === 'Approximate' && stop.stop_outcome === 'Pending' && <span className="chip" style={{ marginLeft: 6 }} title="Worked out from the typed address; the driver saves the exact spot at the gate">approx. location</span>}
             <div className="muted small" style={{ marginLeft: 34 }}>
               {stop.delivery_address ?? 'No address on file'}
             </div>
@@ -212,6 +214,7 @@ export default function DriverRoute({ session }: { session: Session }) {
                     {sheet.stops.map((st) => (
                       <li key={st.id} style={{ padding: '3px 0' }}>
                         {st.customer_name}{st.lat == null && <span className="chip warn" style={{ marginLeft: 6 }}>no location yet</span>}
+                        {st.lat != null && st.location_source === 'Approximate' && <span className="chip" style={{ marginLeft: 6 }} title="Worked out from the typed address; the driver saves the exact spot at the gate">approx. location</span>}
                       </li>
                     ))}
                   </ol>

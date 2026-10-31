@@ -33,6 +33,7 @@ interface Stop {
   reschedule_reason?: string | null;
   /** Map pin of the address the order goes to (23 Oct 2026). */
   lat?: number | null;
+  location_source?: string | null;
   lng?: number | null;
 }
 
@@ -328,6 +329,7 @@ export default function RouteDetail({ session }: { session: Session }) {
                   <td data-label="Customer">
                     <strong>{s.customer_name}</strong>
                     {s.lat == null && <span className="chip warn" style={{ marginLeft: 6 }}>no map pin</span>}
+                    {s.lat != null && s.location_source === 'Approximate' && <span className="chip" style={{ marginLeft: 6 }} title="Worked out from the typed address; the driver saves the exact spot at the gate">approx. location</span>}
                     <div className="muted small">{s.delivery_address ?? 'No address on file'}</div>
                     <div className="small">{[s.order_ref, s.customer_po ? `PO ${s.customer_po}` : null].filter(Boolean).join(' · ')}</div>
                     {(s.delivery_instructions || (s.order_notes && !/^Standing order for/.test(s.order_notes))) && (

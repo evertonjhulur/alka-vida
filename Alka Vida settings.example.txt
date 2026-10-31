@@ -62,6 +62,26 @@ MAIL_FROM=
 # On Railway, add it as a variable with the same name instead.
 # GOOGLE_CLIENT_ID=
 
+# ---------------------------------------------------------------------------
+# Address suggestions as you type (optional)
+# ---------------------------------------------------------------------------
+# With this, a "Search for the address" box appears above the maps (customer
+# pins, the plant, Open an account, the website's quick order). Picking a
+# suggestion drops the pin. Without it the box simply is not shown.
+# A Google Maps Platform API key with "Places API (New)" enabled - NOT the
+# Google sign-in Client ID above. On Railway, add it as a variable instead.
+# GOOGLE_MAPS_API_KEY=
+# Most suggestion requests sent to Google in one day (default 150, which keeps
+# a month inside Google's free allowance). After that the box rests until
+# tomorrow; the map still works.
+# PLACES_DAILY_LIMIT=150
+#
+# The same key also gives customers with no pin an APPROXIMATE pin worked out
+# from their typed address (when a round is sorted, or Settings > Delivery
+# zones > "Find approximate pins"). For that, also enable "Geocoding API" on
+# the key. Each address is looked up once. Most look-ups in one day:
+# GEOCODE_DAILY_LIMIT=300
+
 
 # ---------------------------------------------------------------------------
 # Advanced - you almost certainly do not need these

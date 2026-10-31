@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import MapView, { type LatLng } from './MapView';
+import PlaceSearch, { type PickedPlace } from './PlaceSearch';
 
 /**
  * "Help our driver find you" on the Open an account form and the website's
@@ -10,8 +11,12 @@ import MapView, { type LatLng } from './MapView';
 export interface DroppedPin extends LatLng { accuracyM: number | null }
 
 export default function PinPicker({
-  value, onChange, className,
-}: { value: DroppedPin | null; onChange: (p: DroppedPin | null) => void; className?: string }) {
+  value, onChange, className, onPlace,
+}: {
+  value: DroppedPin | null; onChange: (p: DroppedPin | null) => void; className?: string;
+  /** A place picked from the address suggestions, so the form can fill empty address boxes. */
+  onPlace?: (p: PickedPlace) => void;
+}) {
   const [busy, setBusy] = useState(false);
   const [problem, setProblem] = useState<string | null>(null);
   const [showMap, setShowMap] = useState(false);
@@ -34,9 +39,11 @@ export default function PinPicker({
       <div>
         <strong>Help our driver find you</strong> <span className="muted small">(optional)</span>
         <p className="muted small" style={{ margin: '2px 0 0' }}>
-          If you are at the delivery address now, use your location. Otherwise, find the spot on the map and click it.
+          If you are at the delivery address now, use your location. Otherwise, search for it or find the spot on the map and click it.
         </p>
       </div>
+      <PlaceSearch id="pin-search" label="Search for your address or a place nearby"
+                   onPick={(p) => { setProblem(null); setShowMap(true); onChange({ lat: p.lat, lng: p.lng, accuracyM: null }); onPlace?.(p); }} />
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
         <button type="button" className="secondary pin-btn" disabled={busy} onClick={here}>
           {busy ? 'Finding where you are…' : 'I\'m there now: use my location'}

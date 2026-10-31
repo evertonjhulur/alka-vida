@@ -14,8 +14,9 @@ import MapView, { type LatLng } from './MapView';
 
 interface Proposal {
   method: 'Road' | 'Straight'; note: string | null; plant: LatLng; order: string[];
-  stops: Array<{ id: string; name: string; lat: number | null; lng: number | null; was: number; now: number }>;
+  stops: Array<{ id: string; name: string; lat: number | null; lng: number | null; was: number; now: number; approximate?: boolean }>;
   currentKm: number; sortedKm: number; roadDurationS: number | null; roadDistanceM: number | null; missing: number;
+  approximate?: number; approxPlaced?: number;
 }
 
 const ordinal = (n: number) => {
@@ -62,7 +63,7 @@ export default function SortStopsPanel({
   };
 
   const points = useMemo(() => (p ? p.stops.filter((s) => s.lat != null && s.lng != null)
-    .map((s) => ({ lat: s.lat as number, lng: s.lng as number, n: s.now, label: s.name })) : []), [p]);
+    .map((s) => ({ lat: s.lat as number, lng: s.lng as number, n: s.now, label: s.name, approximate: !!s.approximate })) : []), [p]);
 
   if (!settings) return null;
   if (!settings.plant) {
@@ -96,6 +97,12 @@ export default function SortStopsPanel({
           </div>
           <div style={{ flex: '2 1 300px', minWidth: 0, display: 'flex', flexDirection: 'column', gap: 10 }}>
             {p.note && <div className="notice info small" style={{ margin: 0 }}>{p.note}</div>}
+            {(p.approximate ?? 0) > 0 && (
+              <div className="notice info small" style={{ margin: 0 }}>
+                {p.approxPlaced ? `${p.approxPlaced === 1 ? '1 stop had' : `${p.approxPlaced} stops had`} no pin, so Google placed ${p.approxPlaced === 1 ? 'it' : 'them'} from the typed address. ` : ''}
+                {p.approximate === 1 ? '1 stop is' : `${p.approximate} stops are`} placed only approximately (paler on the map). The driver saves the exact spot at the gate.
+              </div>
+            )}
             {p.missing > 0 && (
               <div className="notice warn small" style={{ margin: 0 }}>
                 {p.missing === 1 ? '1 stop has' : `${p.missing} stops have`} no map pin, so {p.missing === 1 ? 'it goes' : 'they go'} last.
@@ -113,7 +120,7 @@ export default function SortStopsPanel({
                   <span className="stop-no">{s.now}</span>
                   <span style={{ flex: 1, minWidth: 0 }}>
                     <strong>{s.name}</strong>
-                    <div className="muted small">{s.lat == null ? 'no map pin' : s.was === s.now ? 'same place' : `was ${ordinal(s.was)}`}</div>
+                    <div className="muted small">{s.lat == null ? 'no map pin' : s.was === s.now ? 'same place' : `was ${ordinal(s.was)}`}{s.approximate ? ' · approximate location' : ''}</div>
                   </span>
                 </li>
               ))}

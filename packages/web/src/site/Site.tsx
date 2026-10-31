@@ -1159,7 +1159,12 @@ function QuickOrder({ site, loaded }: { site: SiteInfo; loaded: boolean }) {
                   {['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].map((d) => <option key={d} value={d}>{DAY_WORDS[d]}</option>)}
                 </select></div>
               <p className="muted small" style={{ alignSelf: 'end' }}>We deliver to each area on set days and will confirm yours.</p>
-              <PinPicker value={pin} onChange={setPin} className="full" />
+              <PinPicker value={pin} onChange={setPin} className="full" onPlace={(p) => setF((x) => ({
+                ...x,
+                addressLine1: x.addressLine1 || p.line1 || p.address.split(',')[0] || '',
+                city: x.city || p.town,
+                parish: x.parish || p.parish,
+              }))} />
             </>}
             <div className="s-field full"><label htmlFor="nt">{fulfilment === 'Deliver' ? 'Anything the driver should know (optional)' : 'Anything we should know (optional)'}</label>
               <input id="nt" placeholder={fulfilment === 'Deliver' ? 'Gate code, call on arrival…' : ''} value={f.notes} onChange={set('notes')} /></div>

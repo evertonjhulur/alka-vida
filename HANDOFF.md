@@ -2594,3 +2594,43 @@ Create your account page. Google's sign-in needs it to publish the app.
 Data protection contact: Everton Jhulur. When card payments start, add the
 card provider to "Who we share it with" and change the payment line; change
 PRIVACY_UPDATED with the words.
+
+## Maps show streets; address suggestions as you type (31 Oct 2026)
+- **Grey map fixed.** The Content-Security-Policy (server.ts, img-src) only
+  allowed our own images, so every OpenStreetMap tile was blocked. img-src now
+  includes https://tile.openstreetmap.org. Another tile provider would need
+  adding there too.
+- **Address suggestions (Google, his ruling).** components/PlaceSearch.tsx, a
+  type-ahead box (3+ letters, waits 350 ms, arrow keys/Enter/Escape,
+  "Powered by Google"). It is on PinPicker (Open an account, website quick
+  order - also fills EMPTY street/town/parish boxes), customer › Map pins and
+  the plant. Shows nothing until GOOGLE_MAPS_API_KEY is set.
+- Server: services/places.ts, routes in routes/locations.ts:
+  GET /api/public/places/config | suggest?q=&session= | lookup?id=&session=.
+  Public (sign-up and quick order need them). Places API (New): autocomplete
+  limited to Jamaica, biased to Kingston; details with Essentials fields only
+  (location, formattedAddress, addressComponents). Session tokens so a search
+  ending in a pick bills as one session. Daily ceiling PLACES_DAILY_LIMIT
+  (default 150 suggestion requests, 300 lookups; in memory, Jamaica date) and
+  per-address limits (90 suggestions / 20 lookups per 10 min). Key never sent
+  to the browser. Tests: api/test/places.test.ts (7).
+- Road sorting: unchanged; switched on by ORS_API_KEY (openrouteservice).
+
+## Approximate pins from the typed address (31 Oct 2026)
+His ask: sorting relied on pins and most customers have none. Now, when
+GOOGLE_MAPS_API_KEY is set (with "Geocoding API" enabled on it):
+- services/approxpins.ts: an address with NO pin is looked up once with the
+  Geocoding API (country:JM) and given a pin with location_source
+  'Approximate' (accuracy by location_type: rooftop 30 m, range 150 m,
+  centre 600 m, approximate 2,000 m). Parish- or country-wide answers are not
+  used. Never touches a pin a person placed. geocoded_text records the words
+  looked up (found or not), so nothing is asked twice; an edited address
+  re-works an approximate pin. GEOCODE_DAILY_LIMIT (default 300/day).
+- When: proposeSort does it for the round's stops first (never blocks the
+  sort); admins can do everyone from Settings > Delivery zones > "Find
+  approximate pins" (100 per click; GET/POST /api/settings/approximate-pins).
+- Shown: paler markers and "approximate location" on Sort the stops, an
+  "approx. location" chip on the round and driver's route, "Approximate"
+  chip on customer Map pins, and the driver's stop asks for "Save this
+  location" (which replaces it, source 'Driver').
+- Migration 036_approximate_pins.sql. Tests: api/test/approxpins.test.ts (7).

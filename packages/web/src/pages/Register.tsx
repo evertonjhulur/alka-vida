@@ -204,7 +204,12 @@ export default function Register({ onSignedIn }: { onSignedIn: (s: Session) => v
         </select>
         <span className="small muted">This sets your delivery day. Not sure? We'll place you and let you know.</span>
       </div>
-      <PinPicker value={pin} onChange={setPin} />
+      <PinPicker value={pin} onChange={setPin} onPlace={(p) => setF((x) => ({
+                ...x,
+                addressLine1: x.addressLine1 || p.line1 || p.address.split(',')[0] || '',
+                city: x.city || p.town,
+                parish: x.parish || p.parish,
+              }))} />
 
       <button className="auth-submit" disabled={busy}>{busy ? 'Making your account…' : 'Create my account'}</button>
       <p className="small muted" style={{ margin: 0 }}>See how we use your details in our <Link to="/privacy">privacy policy</Link>.</p>

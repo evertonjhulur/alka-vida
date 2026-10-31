@@ -12,7 +12,7 @@ import 'leaflet/dist/leaflet.css';
  * The map needs internet to draw; with none, the list beside it still works.
  */
 
-export interface MapPoint { lat: number; lng: number; n?: number; label?: string }
+export interface MapPoint { lat: number; lng: number; n?: number; label?: string; approximate?: boolean }
 export interface LatLng { lat: number; lng: number }
 
 const KINGSTON: L.LatLngExpression = [18.01, -76.85];
@@ -76,7 +76,8 @@ export default function MapView({
       L.polyline(path, { color: '#0e76bc', weight: 4, opacity: 0.8 }).addTo(g);
     }
     for (const p of points) {
-      L.marker([p.lat, p.lng], { icon: numberIcon(p.n ?? '•'), title: p.label }).addTo(g);
+      // Approximate pins (from the typed address) in a paler blue.
+      L.marker([p.lat, p.lng], { icon: numberIcon(p.n ?? '•', p.approximate ? '#6aa9d8' : '#0e76bc'), title: p.approximate ? `${p.label ?? ''} (approximate)` : p.label }).addTo(g);
       bounds.push([p.lat, p.lng]);
     }
     if (onPick && pick) {

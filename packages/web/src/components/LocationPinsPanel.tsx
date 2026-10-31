@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { api } from '../lib/api';
 import { when } from '../lib/format';
 import MapView, { type LatLng } from './MapView';
+import PlaceSearch from './PlaceSearch';
 
 /**
  * Map pins on a customer's delivery addresses (23 Oct 2026). One pin per
@@ -13,7 +14,7 @@ import MapView, { type LatLng } from './MapView';
 interface Pin {
   address_id: string | null; label: string; address: string | null;
   lat: number | null; lng: number | null; location_accuracy_m: number | null;
-  location_source: 'Driver' | 'Office' | 'Link' | 'Customer' | null; location_set_at: string | null; location_set_by: string | null;
+  location_source: 'Driver' | 'Office' | 'Link' | 'Customer' | 'Approximate' | null; location_set_at: string | null; location_set_by: string | null;
 }
 
 function where(p: Pin): string {
@@ -23,6 +24,7 @@ function where(p: Pin): string {
   const acc = p.location_accuracy_m != null ? ` · accurate to about ${p.location_accuracy_m} m` : '';
   if (p.location_source === 'Driver') return `Saved at the stop${who}${at}${acc}`;
   if (p.location_source === 'Link') return `From a pasted link${who}${at}`;
+  if (p.location_source === 'Approximate') return `Approximate - worked out by Google from the typed address${at}${acc}. Move it if you know the spot; the driver saves the exact spot at the gate`;
   if (p.location_source === 'Customer') return `Dropped by the customer when they signed up${at}${acc}. The driver can save the exact spot at the gate`;
   return `Placed on the map${who}${at}${acc}`;
 }
@@ -56,9 +58,13 @@ function PinCard({ customerId, pin, onSaved }: { customerId: string; pin: Pin; o
     <section className="panel" aria-label={`Map pin for ${pin.label}`}>
       <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
         <h3 style={{ margin: 0, fontSize: 16, flex: 1 }}>{pin.label}</h3>
-        {pin.lat != null ? <span className="chip ok">Pinned</span> : <span className="chip warn">No pin yet</span>}
+        {pin.lat == null ? <span className="chip warn">No pin yet</span>
+          : pin.location_source === 'Approximate' ? <span className="chip">Approximate</span> : <span className="chip ok">Pinned</span>}
       </div>
       <p style={{ margin: '4px 0 10px' }}>{pin.address || <span className="muted">No address typed</span>}</p>
+      <div style={{ marginBottom: 10 }}>
+        <PlaceSearch id={`find-${pin.address_id ?? 'main'}`} onPick={(p) => { setMsg(null); setDraft({ lat: p.lat, lng: p.lng }); }} />
+      </div>
       <MapView label={`Map for ${pin.label}`} pick={shown} onPick={setDraft} height={260} />
       <p className="muted small" style={{ margin: '6px 0 0' }}>
         {draft ? 'Not saved yet. ' : ''}{draft || !shown ? 'Click the map where the truck stops, or drag the pin.' : where(pin)}

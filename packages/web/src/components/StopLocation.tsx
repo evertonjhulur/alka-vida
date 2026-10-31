@@ -74,7 +74,9 @@ export default function StopLocation({
   // The customer dropped this pin when they signed up: good enough to sort
   // by, but the driver at the gate knows the exact spot (23 Oct 2026).
   const fromCustomer = pinned && source === 'Customer';
-  if (pinned && !fromCustomer && !again && !msg) {
+  // Worked out from the typed address (31 Oct 2026): rough, so ask too.
+  const approximate = pinned && source === 'Approximate';
+  if (pinned && !fromCustomer && !approximate && !again && !msg) {
     return (
       <p className="small muted" style={{ margin: '8px 0 0' }}>
         Location saved for this address. <button type="button" className="as-link" onClick={() => setAgain(true)}>Wrong spot? Save it again</button>
@@ -84,6 +86,7 @@ export default function StopLocation({
   return (
     <div className="stop-location" style={{ marginTop: 10, padding: 12, borderRadius: 8, background: '#f2fafc', border: '1px solid var(--line)' }}>
       {!pinned && !msg && !waiting && <p style={{ margin: '0 0 8px' }}><strong>No location saved for this customer yet.</strong> Stand at their gate or door, then tap the button. It works without signal.</p>}
+      {approximate && !msg && !waiting && <p style={{ margin: '0 0 8px' }}><strong>This location is only approximate</strong> - worked out from the typed address. Standing at their gate? Save the exact spot for next time.</p>}
       {fromCustomer && !msg && !waiting && <p style={{ margin: '0 0 8px' }}><strong>The customer dropped this pin when they signed up.</strong> Standing at their gate? Save the exact spot for next time.</p>}
       {waiting && !msg && <p className="small" style={{ margin: '0 0 8px', color: 'var(--warn)' }}>A location for this stop is waiting on this phone to be sent.</p>}
       {msg && <div className={`notice ${msg.tone}`} style={{ margin: '0 0 8px' }}>{msg.text}</div>}

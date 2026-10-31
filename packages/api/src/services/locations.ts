@@ -17,6 +17,7 @@
 import type { Db, Queryable } from '../db/index.ts';
 import type { Actor } from './core.ts';
 import { audit, getSetting, requireRole } from './core.ts';
+import { approximatePinsForSheet } from './approxpins.ts';
 import {
   RuleViolation, haversineKm, inJamaica, orderStops, parseLatLng, tourKm, type LatLng,
 } from '@alka/shared';
@@ -24,7 +25,7 @@ import {
 const ORS_URL = 'https://api.openrouteservice.org/optimization';
 const ORS_MAX_JOBS = 50;
 
-export type PinSource = 'Driver' | 'Office' | 'Link' | 'Customer';
+export type PinSource = 'Driver' | 'Office' | 'Link' | 'Customer' | 'Approximate';
 
 /* ------------------------------------------------------------------ */
 /* Pins                                                                */
@@ -203,7 +204,7 @@ export async function routingSettings(db: Queryable) {
 /* Sorting a round                                                     */
 /* ------------------------------------------------------------------ */
 
-interface SortStop { id: string; name: string; sequence_no: number; lat: number | null; lng: number | null }
+interface SortStop { id: string; name: string; sequence_no: number; lat: number | null; lng: number | null; location_source: string | null }
 
 async function loadSheetForSort(db: Queryable, actor: Actor, sheetId: string) {
   const sheet = await db.maybeOne<{ status: string; started_at: string | null; assigned_driver_id: string | null; zone: string }>(
@@ -218,7 +219,8 @@ async function loadSheetForSort(db: Queryable, actor: Actor, sheetId: string) {
   const stops = await db.query<SortStop>(
     `SELECT s.id, c.name, s.sequence_no,
             CASE WHEN o.address_id IS NOT NULL THEN ca.lat ELSE c.lat END AS lat,
-            CASE WHEN o.address_id IS NOT NULL THEN ca.lng ELSE c.lng END AS lng
+            CASE WHEN o.address_id IS NOT NULL THEN ca.lng ELSE c.lng END AS lng,
+            CASE WHEN o.address_id IS NOT NULL THEN ca.location_source ELSE c.location_source END AS location_source
      FROM delivery_stops s JOIN customers c ON c.id = s.customer_id
      LEFT JOIN customer_orders o ON o.id = s.order_id
      LEFT JOIN customer_addresses ca ON ca.id = o.address_id
@@ -259,7 +261,7 @@ export interface SortProposal {
   plant: LatLng;
   /** Stop ids, in the proposed order (pinned ones sorted, then unpinned). */
   order: string[];
-  stops: Array<{ id: string; name: string; lat: number | null; lng: number | null; was: number; now: number }>;
+  stops: Array<{ id: string; name: string; lat: number | null; lng: number | null; was: number; now: number; approximate: boolean }>;
   /** Straight-line km from the plant and back, for comparing like with like. */
   currentKm: number;
   sortedKm: number;
@@ -267,6 +269,10 @@ export interface SortProposal {
   roadDurationS: number | null;
   roadDistanceM: number | null;
   missing: number;
+  /** Stops whose pin is only approximate (worked out from the typed address). */
+  approximate: number;
+  /** Rough pins worked out just now for stops that had none. */
+  approxPlaced: number;
 }
 
 export async function proposeSort(
@@ -275,6 +281,14 @@ export async function proposeSort(
   requireRole(actor, 'admin', 'user', 'driver');
   const plant = await plantLocation(db);
   if (!plant) throw new RuleViolation('set the plant\'s location first (Settings › Delivery zones), so rounds start and finish there');
+  await loadSheetForSort(db, actor, sheetId); // the checks, before any look-up
+  // Stops with no pin: a rough one from the typed address, when Google is on
+  // (31 Oct 2026). Never stops the sort - any trouble just leaves them last.
+  let approxPlaced = 0; let approxNote: string | null = null;
+  try {
+    const r = await approximatePinsForSheet(db, actor, sheetId);
+    if (r) { approxPlaced = r.placed; approxNote = r.stopped; }
+  } catch { /* sort without them */ }
   const { stops } = await loadSheetForSort(db, actor, sheetId);
 
   const pinned = stops.filter((s) => s.lat != null && s.lng != null);
@@ -305,16 +319,19 @@ export async function proposeSort(
   const pinnedNow = stops.filter((s) => s.lat != null).map((s) => ({ lat: Number(s.lat), lng: Number(s.lng) }));
   const round1 = (x: number) => Math.round(x * 10) / 10;
   return {
-    method, note, plant,
+    method, note: [note, approxNote].filter(Boolean).join(' ') || null, plant,
     order: sorted.map((s) => s.id),
     stops: sorted.map((s, i) => ({
       id: s.id, name: s.name, lat: s.lat == null ? null : Number(s.lat), lng: s.lng == null ? null : Number(s.lng),
       was: stops.findIndex((x) => x.id === s.id) + 1, now: i + 1,
+      approximate: s.lat != null && s.location_source === 'Approximate',
     })),
     currentKm: round1(tourKm(plant, pinnedNow)),
     sortedKm: round1(tourKm(plant, order.map((i) => pts[i]))),
     roadDurationS, roadDistanceM,
     missing: unpinned.length,
+    approximate: stops.filter((s) => s.lat != null && s.location_source === 'Approximate').length,
+    approxPlaced,
   };
 }
 
