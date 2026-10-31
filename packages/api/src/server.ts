@@ -13,7 +13,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createDb, type Db } from './db/index.ts';
 import { migrate } from './db/migrate.ts';
-import { loadSigningKey, login, userAccess, verifyToken, SESSION_COOKIE, SESSION_TTL_SECONDS, type Session } from './lib/auth.ts';
+import { loadSigningKey, login, signToken, userAccess, verifyToken, SESSION_COOKIE, SESSION_TTL_SECONDS, type Session } from './lib/auth.ts';
 import { loadSettings } from './lib/settings.ts';
 import { ForbiddenError, RuleViolation, type PaymentMethod, type RecurrencePattern } from '@alka/shared';
 import { BUSINESS_TIMEZONE, assertMethodAllowed, type Actor } from './services/core.ts';
@@ -42,6 +42,8 @@ import * as recurring from './services/recurring.ts';
 import * as users from './services/users.ts';
 import * as invitations from './services/invitations.ts';
 import * as registration from './services/registration.ts';
+import * as signup from './services/signup.ts';
+import { googleClientId } from './lib/google.ts';
 import * as zones from './services/zones.ts';
 import * as labour from './services/labour.ts';
 import { collectOrder, counterSale, recordPastDelivery } from './services/counter.ts';
@@ -98,7 +100,7 @@ export async function buildServer(db: Db) {
   // An order or a request just made: look for things to announce now.
   app.addHook('onResponse', async (req, reply) => {
     if (req.method === 'POST' && reply.statusCode < 300
-      && /^\/api\/(orders|counter-sale|approvals|credit-notes|invoices|payments|stops|registration|register|portal|public\/order)/.test(req.url)) {
+      && /^\/api\/(orders|counter-sale|approvals|credit-notes|invoices|payments|stops|registration|register|portal|public\/order|auth\/signup)/.test(req.url)) {
       kickAlerts();
     }
   });
@@ -134,13 +136,15 @@ export async function buildServer(db: Db) {
   // Security headers on every response (point 17).
   const CSP = [
     "default-src 'self'",
-    "script-src 'self'",
+    // Google's sign-in button (31 Oct 2026) loads from accounts.google.com.
+    "script-src 'self' https://accounts.google.com/gsi/client",
     // React sets style attributes, and the few server-made pages (unsubscribe)
     // carry a small <style>; no inline script is allowed anywhere.
-    "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
+    "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://accounts.google.com/gsi/style",
     "font-src 'self' https://fonts.gstatic.com data:",
     "img-src 'self' data: blob:",
-    "connect-src 'self'",
+    "connect-src 'self' https://accounts.google.com/gsi/",
+    "frame-src https://accounts.google.com/gsi/",
     "object-src 'none'",
     "base-uri 'self'",
     "form-action 'self'",
@@ -223,6 +227,11 @@ export async function buildServer(db: Db) {
     if (req.url.startsWith('/api/auth/logout')) return;
     if (req.url.startsWith('/api/auth/login')) return;
     if (req.url.startsWith('/api/auth/forgot-password')) return;
+    // Signing in with Google, opening an account and confirming its email
+    // are done by people who are not signed in yet (31 Oct 2026).
+    if (req.url.startsWith('/api/auth/google')) return;
+    if (req.url.startsWith('/api/auth/signup')) return;
+    if (req.url.startsWith('/api/auth/confirm-email')) return;
     // Answering this is how the browser learns the server is out of date;
     // requiring a token would hide the very problem it exists to report.
     if (req.url.startsWith('/api/version')) return;
@@ -310,6 +319,10 @@ export async function buildServer(db: Db) {
 
   app.get('/health', async () => ({ ok: true }));
   app.get('/api/health', async () => ({ ok: true }));
+
+  // A plain address for the privacy policy (31 Oct 2026): Google's sign-in
+  // set-up and printed material can use alkavidaja.com/privacy.
+  app.get('/privacy', async (_req, reply) => reply.redirect('/#/privacy'));
 
   // Not for search engines, for now (point 19).
   app.get('/robots.txt', async (_req, reply) =>
@@ -412,12 +425,70 @@ export async function buildServer(db: Db) {
   // Signing in sets the session cookie; the token never reaches the page's
   // JavaScript (point 18).
   app.post('/api/auth/login', async (req, reply) => {
-    const { email, password } = (req.body ?? {}) as { email: string; password: string };
+    const { email, password, remember } = (req.body ?? {}) as { email: string; password: string; remember?: boolean };
     const result = await login(db, email, password);
     if (!result) return reply.status(401).send({ error: 'invalid email or password' });
-    reply.header('set-cookie', sessionCookie(req as never, result.token, SESSION_TTL_SECONDS));
+    // "Keep me signed in" (31 Oct 2026): 30 days for a customer. Staff keep
+    // the 12 hours and the idle sign-out.
+    if (remember && result.session.role === 'customer') {
+      const token = signToken(result.session, signup.REMEMBER_TTL_SECONDS);
+      reply.header('set-cookie', sessionCookie(req as never, token, signup.REMEMBER_TTL_SECONDS));
+    } else {
+      reply.header('set-cookie', sessionCookie(req as never, result.token, SESSION_TTL_SECONDS));
+    }
     return { session: result.session };
   });
+
+  /* ---------------- Google sign-in and opening an account (31 Oct 2026) ---------------- */
+
+  /** Sign-ups from one address: a few in ten minutes is plenty for a family. */
+  const signupTimes = new Map<string, number[]>();
+  const tooManySignups = (req: { headers: Record<string, unknown>; ip: string }) => {
+    const ip = String(req.headers['x-forwarded-for'] ?? '').split(',')[0].trim() || req.ip;
+    const now = Date.now();
+    const kept = (signupTimes.get(ip) ?? []).filter((t) => now - t < 10 * 60_000);
+    if (kept.length >= 5) { signupTimes.set(ip, kept); return true; }
+    kept.push(now); signupTimes.set(ip, kept);
+    if (signupTimes.size > 5000) signupTimes.clear();
+    return false;
+  };
+
+  // PUBLIC. Whether the Google button shows: the client id is public by design.
+  app.get('/api/public/auth-config', async () => ({ googleClientId: googleClientId() }));
+
+  // PUBLIC. "Continue with Google": signed in, or asked for delivery details.
+  app.post('/api/auth/google', async (req, reply) => {
+    const b = (req.body ?? {}) as { credential?: string; remember?: boolean };
+    const r = await signup.googleSignIn(db, String(b.credential ?? ''), !!b.remember);
+    if (r.kind === 'needsDetails') return { needsDetails: true, profile: r.profile };
+    reply.header('set-cookie', sessionCookie(req as never, r.token, r.ttl));
+    return { session: r.session };
+  });
+
+  // PUBLIC. Opening an account, all the way through: signed in at once.
+  app.post('/api/auth/signup', async (req, reply) => {
+    if (tooManySignups(req as never)) {
+      return reply.status(429).send({ error: 'Several accounts have just been opened from here. Please wait a few minutes, or call us.' });
+    }
+    const r = await signup.signUp(db, req.body as signup.SignupInput);
+    reply.header('set-cookie', sessionCookie(req as never, r.token, r.ttl));
+    return { session: r.session, existing: r.existing, confirmSent: r.confirmSent };
+  });
+
+  // PUBLIC. The link in the confirm-your-email message.
+  app.post('/api/auth/confirm-email', async (req) => {
+    const b = (req.body ?? {}) as { token?: string };
+    return { confirmed: await signup.confirmEmail(db, String(b.token ?? '')) };
+  });
+
+  // The office: new customers who opened their own accounts, to look at.
+  app.get('/api/signups', { preHandler: allow('admin', 'user') },
+    async (req) => signup.listSignups(db, actorOf(req)));
+  app.post('/api/signups/:id/reviewed', { preHandler: allow('admin', 'user') },
+    async (req) => {
+      await signup.markSignupReviewed(db, actorOf(req), (req.params as { id: string }).id);
+      return { ok: true };
+    });
 
   app.post('/api/auth/logout', async (req, reply) => {
     reply.header('set-cookie', sessionCookie(req as never, '', 0));
@@ -517,7 +588,9 @@ export async function buildServer(db: Db) {
       // in Needs a decision, so one badge counts both (21 Oct 2026).
       const apps = await db.one<{ n: string }>(
         `SELECT ((SELECT COUNT(*) FROM customer_applications WHERE status = 'Pending')
-               + (SELECT COUNT(*) FROM website_orders WHERE status = 'Pending'))::text AS n`);
+               + (SELECT COUNT(*) FROM website_orders WHERE status = 'Pending')
+               + (SELECT COUNT(*) FROM customers WHERE signed_up_at IS NOT NULL
+                    AND signup_reviewed_at IS NULL AND active))::text AS n`);
       const approvals = await db.one<{ n: string }>(
         `SELECT COUNT(*)::text AS n FROM approval_requests WHERE status = 'Pending'`);
       // Quotes a customer has said yes to, waiting to be turned into orders.

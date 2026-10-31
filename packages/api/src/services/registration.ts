@@ -85,9 +85,20 @@ export const PARISHES = [
 /** Longest each sign-up field may be; the form says the same with maxLength. */
 export const MAX = { name: 120, email: 254, phone: 30, line: 160, town: 80, notes: 500 } as const;
 
-export async function submitApplication(
-  db: Db, input: ApplicationInput,
-): Promise<{ id: string; name: string }> {
+/** A sign-up or application, checked and tidied: what goes on the customer. */
+export interface CheckedApplicant {
+  accountType: AccountType; businessName: string | null; contactPerson: string | null;
+  firstName: string | null; lastName: string | null; email: string; phone: string;
+  address: { addressLine1: string; addressLine2: string | null; city: string; parish: string };
+  notes: string | null; name: string;
+}
+
+/**
+ * Everything a new customer must give, checked the same way for an account
+ * request and for a sign-up (31 Oct 2026). Throws a RuleViolation naming the
+ * first thing missing.
+ */
+export function checkApplicant(input: ApplicationInput): CheckedApplicant {
   const accountType = input.accountType;
   if (accountType !== 'Corporate' && accountType !== 'Individual') {
     throw new RuleViolation('choose whether this is a business or a personal account');
@@ -133,6 +144,16 @@ export async function submitApplication(
   if (tooLong) throw new RuleViolation(`the ${tooLong[0]} is too long (${tooLong[2]} characters at most)`);
 
   const name = applicantName({ accountType, businessName, firstName, lastName });
+  return {
+    accountType, businessName, contactPerson, firstName, lastName, email, phone,
+    address: address as CheckedApplicant['address'], notes: clean(input.notes), name,
+  };
+}
+
+export async function submitApplication(
+  db: Db, input: ApplicationInput,
+): Promise<{ id: string; name: string }> {
+  const { accountType, businessName, contactPerson, firstName, lastName, email, phone, address, name } = checkApplicant(input);
 
   // An address that is already trading, or already waiting, must not be able
   // to queue a second application. The message is the same either way - a

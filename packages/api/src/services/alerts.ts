@@ -126,7 +126,16 @@ export async function runAlerts(db: Db): Promise<AlertRun> {
        AND NOT EXISTS (SELECT 1 FROM staff_alerts_sent a WHERE a.kind = 'website-order' AND a.ref_id = website_orders.id)
      ORDER BY created_at LIMIT 50`, [since],
   );
-  if (requests.length || apps.length || webOrders.length) {
+  // Customers who opened their own account (31 Oct 2026): nothing waits on
+  // the office, but it looks at each one and adjusts prices or terms.
+  const signups = await db.query<{ id: string; name: string; account_type: string; phone: string | null; zone: string | null; dup: boolean }>(
+    `SELECT id, name, account_type, phone, delivery_zone AS zone, cardinality(possible_duplicates) > 0 AS dup
+     FROM customers
+     WHERE signed_up_at IS NOT NULL AND signup_reviewed_at IS NULL AND signed_up_at > $1::timestamptz
+       AND NOT EXISTS (SELECT 1 FROM staff_alerts_sent a WHERE a.kind = 'signup' AND a.ref_id = customers.id)
+     ORDER BY signed_up_at LIMIT 50`, [since],
+  );
+  if (requests.length || apps.length || webOrders.length || signups.length) {
     const admins = (await usersInRoles(db, ['admin'])).filter((u) => u.notify_decisions).map((u) => u.id);
     for (const r of requests) {
       if (!(await claim(db, 'decision', r.id))) continue;
@@ -154,6 +163,21 @@ export async function runAlerts(db: Db): Promise<AlertRun> {
       out.emails += await emailAdmins(db, `Alka Vida: new account request from ${a.who}`, 'A new account request',
         [['Who', a.who], ['Account', a.account_type], ...(a.phone ? [['Phone', a.phone] as [string, string]] : [])],
         'Someone asked to open an account. It is waiting for an administrator under Needs a decision.');
+      out.decisions++;
+    }
+    for (const c of signups) {
+      if (!(await claim(db, 'signup', c.id))) continue;
+      const kind = c.account_type === 'Corporate' ? 'Business' : 'Home';
+      await notifyUsers(db, admins, {
+        title: `New customer: ${c.name}`,
+        body: [kind, c.zone ?? 'zone not chosen', c.phone, c.dup ? 'same phone as another customer' : null].filter(Boolean).join(' · '),
+        url: '/#/decisions?show=accounts', tag: `signup-${c.id}`,
+      });
+      out.emails += await emailAdmins(db, `Alka Vida: new customer ${c.name}`, 'A new customer signed up',
+        [['Who', c.name], ['Account', kind], ['Zone', c.zone ?? 'Not sure - place them'],
+         ...(c.phone ? [['Phone', c.phone] as [string, string]] : []),
+         ...(c.dup ? [['Check', 'Same phone as a customer already on file'] as [string, string]] : [])],
+        'They opened their own account and can order now. Look them over under Needs a decision and change their prices, zone or terms if needed.');
       out.decisions++;
     }
     for (const w of webOrders) {

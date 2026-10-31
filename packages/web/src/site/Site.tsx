@@ -542,7 +542,7 @@ function Check() {
   return <svg aria-hidden="true" width="24" height="24" viewBox="0 0 24 24" style={{ flex: 'none' }}><circle cx="12" cy="12" r="11" fill="#0ab0da" /><path d="m7 12 3.5 3.5L17 9" fill="none" stroke="#16202c" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" /></svg>;
 }
 
-function Home({ site, loaded, session, query }: { site: SiteInfo; loaded: boolean; session: Session | null; query: string }) {
+function Home({ site, loaded, session, query, onQuery }: { site: SiteInfo; loaded: boolean; session: Session | null; query: string; onQuery: (q: string) => void }) {
   const { pathname } = useLocation();
   const products = useMemo(() => [...site.products].sort(shopOrder), [site.products]);
   const q = query.trim().toLowerCase();
@@ -573,8 +573,17 @@ function Home({ site, loaded, session, query }: { site: SiteInfo; loaded: boolea
             <ViewCartButton />
           </div>
           {loaded && products.length === 0 && <p className="s-info">Our price list is being updated. Call or WhatsApp us on {site.phone} to order.</p>}
-          {q && <p className="small">{shown.length ? `Showing ${shown.length} of ${products.length} for “${query.trim()}”.` : `Nothing matches “${query.trim()}”.`}</p>}
-          <div className="s-pgrid">{shown.map((p) => <ProductCard key={p.id} p={p} />)}</div>
+          {q && (
+            // Search results (31 Oct 2026): a clear line with a way back to everything,
+            // and the cards keep their normal size however few match.
+            <div className="s-results" role="status">
+              <span>{shown.length
+                ? <><b>{shown.length} {shown.length === 1 ? 'match' : 'matches'}</b> for “{query.trim()}”</>
+                : <>Nothing matches “{query.trim()}”. Try 5 gallon, 500ml or case.</>}</span>
+              <button type="button" className="s-results-all" onClick={() => onQuery('')}>Show all {products.length} products</button>
+            </div>
+          )}
+          <div className={`s-pgrid${q ? ' searching' : ''}`}>{shown.map((p) => <ProductCard key={p.id} p={p} />)}</div>
           <p className="muted small">Prices come straight from our price list. The 5 gallon price includes GCT; case prices are before GCT, which is added at checkout. Business customers see their own prices when they sign in.</p>
         </div>
       </section>
@@ -1247,7 +1256,7 @@ export default function PublicSite({ session, onSignedIn }: { session: Session |
     case '/about': page = <About site={site} />; break;
     case '/contact': page = <Contact site={site} />; break;
     case '/order': page = <QuickOrder site={site} loaded={loaded} />; break;
-    default: page = <Home site={site} loaded={loaded} session={session} query={query} />;
+    default: page = <Home site={site} loaded={loaded} session={session} query={query} onQuery={setQuery} />;
   }
   return (
     <CartContext.Provider value={cart}>

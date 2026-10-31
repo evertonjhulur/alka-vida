@@ -2552,3 +2552,45 @@ Built from the approved design (landing canvas, Round 3 row). All in
 - **Footer:** Instagram, Facebook and WhatsApp.
 - **Photos:** `public/site/` (5gal, 5l, 1.5l, 500ml, 280ml, truck).
 - `/shop` was added to SITE_PATHS; the sitepaths test still passes.
+
+## Sign in redesign; customers open their own accounts, with Google (31 Oct 2026)
+
+Everton's rulings: no approval step ("allow customers to create accounts all
+the way through"); Google only (no Apple); Google links to an existing login
+when the email matches; an email already on a customer never makes a second
+customer; a phone already on file is flagged; Retail for a home, Corporate for
+a business; pay on delivery / bank transfer until the office changes terms;
+the zone chosen from a list with its days, or "Not sure"; confirm-your-email
+for email sign-ups only once customer emails are switched back on.
+
+- **Sign in** (`pages/Login.tsx`): centred card. Continue with Google (only when
+  `GOOGLE_CLIENT_ID` is set), OR, email and password with icons, show/hide,
+  Forgot password, "Keep me signed in" (30 days for customers only; staff keep
+  12 hours and the idle sign-out), Create one.
+- **Create your account** (`pages/Register.tsx`): Google or email, then the
+  delivery details (home/business, names, phone, address, zone, optional pin).
+  `POST /api/auth/signup` (`services/signup.ts`) makes the customer and the
+  login at once and signs them in. Rate-limited per address.
+- **Google** (`lib/google.ts`): the ID token from Google's own button is checked
+  against Google's published keys, issuer, our client id, expiry and a
+  confirmed email. `POST /api/auth/google` signs in a known person (staff
+  included; links the customer on file with that email if it has no login),
+  or answers `needsDetails`. CSP allows accounts.google.com/gsi.
+- **Confirm email**: Settings › Emails & ordering, "When somebody opens an
+  account with an email and password" (off). Link → `/#/confirm-email`.
+- **Office**: Needs a decision › "New customers": prices, zone, duplicate
+  phone, "Open to change" and "Looks right" (`/api/signups`). Admins get the
+  push/email alert. Old account requests still show until dealt with.
+- Migration 035 (customers.signed_up_at/signup_method/signup_reviewed_*/
+  possible_duplicates; users.google_sub/email_confirmed_at/email_confirm_hash).
+- Tests: `api/test/signup.test.ts`.
+
+## Privacy policy page (31 Oct 2026)
+
+Approved by Everton (drafted in the Claude Doc "Alka Vida Privacy Policy").
+`Privacy` in `site/Site.tsx` at `/#/privacy`; `alkavidaja.com/privacy`
+redirects there (server.ts). Linked from the website footer and the
+Create your account page. Google's sign-in needs it to publish the app.
+Data protection contact: Everton Jhulur. When card payments start, add the
+card provider to "Who we share it with" and change the payment line; change
+PRIVACY_UPDATED with the words.

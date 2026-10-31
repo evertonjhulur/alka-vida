@@ -34,6 +34,13 @@ interface Application {
   customer_name: string | null; decided_by_name: string | null;
   lat?: number | null; lng?: number | null; location_accuracy_m?: number | null;
 }
+/** A customer who opened their own account (31 Oct 2026): the office looks them over. */
+interface Signup {
+  id: string; name: string; account_type: string; contact_person: string | null; email: string | null;
+  phone: string | null; delivery_address: string | null; delivery_zone: string | null; delivery_days: string[];
+  tier_name: string | null; signup_method: string; signed_up_at: string; email_confirmed: boolean;
+  lat: number | null; lng: number | null; duplicates: Array<{ id: string; name: string; phone: string | null }> | null;
+}
 interface Tier { id: string; name: string }
 interface Zone { id: string; name: string; covers: string | null; retired_at: string | null }
 
@@ -100,6 +107,7 @@ export default function Decisions({ session }: { session: Session }) {
   const [zones, setZones] = useState<Zone[]>([]);
   // Orders from the website by people without an account (21 Oct 2026).
   const [webOrders, setWebOrders] = useState<WebsiteOrder[]>([]);
+  const [signups, setSignups] = useState<Signup[]>([]);
   const [customers, setCustomers] = useState<PickerCustomer[]>([]);
   const [params] = useSearchParams();
   const asked = params.get('show');
@@ -127,6 +135,7 @@ export default function Decisions({ session }: { session: Session }) {
     try { setTiers(await api.get<Tier[]>('/api/price-tiers')); } catch { /* not fatal */ }
     try { setZones((await api.get<Zone[]>('/api/zones')).filter((z) => !z.retired_at)); } catch { /* not fatal */ }
     try { setWebOrders(await api.get<WebsiteOrder[]>('/api/website-orders?status=Pending')); } catch { /* not fatal */ }
+    try { setSignups(await api.get<Signup[]>('/api/signups')); } catch { /* not fatal */ }
     try { setCustomers(await api.get<PickerCustomer[]>('/api/customers')); } catch { /* not fatal */ }
   }
   useEffect(() => { load().catch((e) => setError(e.message)); }, []);
@@ -193,7 +202,46 @@ export default function Decisions({ session }: { session: Session }) {
 
   const pendingApps = apps.filter((a) => a.status === 'Pending');
   const decidedApps = apps.filter((a) => a.status !== 'Pending').slice(0, 10);
-  const total = approvals.length + pendingApps.length + webOrders.length;
+  const total = approvals.length + pendingApps.length + webOrders.length + signups.length;
+
+  const lookedAt = (c: Signup) => act(async () => {
+    await api.post(`/api/signups/${c.id}/reviewed`);
+    return `${c.name} marked as looked at.`;
+  }, 'Could not mark it');
+
+  const signupRow = (c: Signup) => (
+    <div key={c.id} className="decision">
+      <span className="chip ok decision-type">New customer</span>
+      <div className="decision-body">
+        <Link to={`/customers/${c.id}`}><strong>{c.name}</strong></Link>
+        <span className="muted"> · {c.account_type === 'Corporate' ? `business${c.contact_person ? `, ask for ${c.contact_person}` : ''}` : 'home'}
+          {' '}· signed up {c.signup_method === 'Google' ? 'with Google' : 'with email'} {when(c.signed_up_at)}</span>
+        <div className="muted small">
+          {[c.delivery_address, c.email, c.phone].filter(Boolean).join(' · ')}
+        </div>
+        <div className="small">
+          {c.tier_name ? `${c.tier_name} prices` : 'Standard list prices'} · pay on delivery ·{' '}
+          {c.delivery_zone
+            ? <>{c.delivery_zone}{c.delivery_days.length ? ` (${c.delivery_days.join(', ')})` : ''}</>
+            : <span style={{ color: 'var(--warn)' }}>not sure of their zone: place them</span>}
+          {c.signup_method === 'Email' && !c.email_confirmed ? ' · email not confirmed yet' : ''}
+        </div>
+        {c.lat != null && (
+          <div className="small">Pin dropped: <a href={`https://www.google.com/maps?q=${c.lat},${c.lng}`} target="_blank" rel="noopener">see it on the map</a></div>
+        )}
+        {(c.duplicates?.length ?? 0) > 0 && (
+          <div className="small" style={{ color: 'var(--warn)' }}>
+            Same phone as {c.duplicates!.map((d, i) => <span key={d.id}>{i ? ', ' : ''}<Link to={`/customers/${d.id}`}>{d.name}</Link></span>)}.
+            If it is the same customer, merge them under Customers.
+          </div>
+        )}
+      </div>
+      <div className="decision-actions">
+        <Link className="button-link secondary" style={{ whiteSpace: 'nowrap' }} to={`/customers/${c.id}`}>Open to change</Link>
+        <button className="approve-soft" disabled={busy} onClick={() => lookedAt(c)}>Looks right</button>
+      </div>
+    </div>
+  );
   const showMoney = filter !== 'accounts';
   const showAccounts = filter !== 'money';
 
@@ -394,6 +442,7 @@ export default function Decisions({ session }: { session: Session }) {
       <WebsiteOrderRow key={w.id} w={w} isAdmin={isAdmin} tiers={tiers} zones={zones} customers={customers}
                        busy={busy} act={act} onLink={(l, e) => { setLink(l); setEmailed(e); }} />
     )) : []),
+    ...(showAccounts ? signups.map(signupRow) : []),
     ...(showAccounts ? pendingApps.map(appRow) : []),
   ];
 
@@ -426,7 +475,7 @@ export default function Decisions({ session }: { session: Session }) {
       <div className="pills" role="group" aria-label="Show">
         {pill('all', 'Everything', total)}
         {pill('money', 'Money changes', approvals.length)}
-        {pill('accounts', 'New accounts and website orders', pendingApps.length + webOrders.length)}
+        {pill('accounts', 'New customers and website orders', signups.length + pendingApps.length + webOrders.length)}
       </div>
 
       <div className="panel" style={{ padding: 0 }}>

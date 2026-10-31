@@ -1,212 +1,215 @@
-import { useState } from 'react';
-import { Link } from 'react-router-dom';
-import { api } from '../lib/api';
+import { useEffect, useState } from 'react';
+import { Link, useLocation, useNavigate } from 'react-router-dom';
+import { api, type Session } from '../lib/api';
 import Logo from '../components/Logo';
 import PinPicker, { type DroppedPin } from '../components/PinPicker';
+import GoogleButton, { useGoogleEnabled } from '../components/GoogleButton';
+import { EyeIcon, startedSession } from './Login';
+
+/**
+ * Create your account (approved design, 31 Oct 2026). No approval any more:
+ * "allow customers to create accounts all the way through". Step 1 is Google
+ * or email; step 2 the details for deliveries, with the delivery area picked
+ * from the zones (and their days). The account is made at once - Retail for
+ * a home, Corporate for a business, pay on delivery - and they are signed in.
+ */
 
 type AccountType = 'Corporate' | 'Individual';
 
-/**
- * The fourteen parishes. Fixed, and offered as a list so that a round can
- * later be grouped by parish without three spellings of St Catherine.
- */
+/** The fourteen parishes, as the server checks them. */
 const PARISHES = [
   'Kingston', 'St Andrew', 'St Thomas', 'Portland', 'St Mary', 'St Ann',
   'Trelawny', 'St James', 'Hanover', 'Westmoreland', 'St Elizabeth',
   'Manchester', 'Clarendon', 'St Catherine',
 ];
-
 /** The same maximums the server checks (registration.MAX). */
-const MAX = { name: 120, email: 254, phone: 30, line: 160, town: 80, notes: 500 };
+const MAX = { name: 120, email: 254, phone: 30, line: 160, town: 80 };
+const DAY_WORDS: Record<string, string> = { Mon: 'Mondays', Tue: 'Tuesdays', Wed: 'Wednesdays', Thu: 'Thursdays', Fri: 'Fridays', Sat: 'Saturdays', Sun: 'Sundays' };
+const NOT_SURE = '__not_sure';
 
-const BLANK = {
-  accountType: 'Corporate' as AccountType,
-  businessName: '', contactPerson: '',
-  firstName: '', lastName: '',
-  email: '', phone: '',
-  addressLine1: '', addressLine2: '', city: '', parish: '',
-  notes: '',
-};
+interface Zone { name: string; covers: string | null; days: string[] }
+interface GoogleStart { credential: string; profile?: { email: string; firstName: string; lastName: string } }
 
-/**
- * Asking for an Alka Vida account. Public - nobody filling this in has a way
- * to sign in yet.
- *
- * It creates a REQUEST, not an account. A portal order is a credit order
- * against agreed rates, so the office decides the price tier, the delivery
- * zone and the terms before anything can be ordered. The page says so plainly
- * rather than implying an account appears at once.
- */
-export default function Register() {
-  const [f, setF] = useState({ ...BLANK });
-  /** Their pin for the delivery address, if they drop one (23 Oct 2026). */
+export default function Register({ onSignedIn }: { onSignedIn: (s: Session) => void }) {
+  const navigate = useNavigate();
+  const fromSignIn = (useLocation().state as { google?: GoogleStart } | null)?.google ?? null;
+  const google = useGoogleEnabled();
+  const [via, setVia] = useState<'google' | 'email' | null>(fromSignIn ? 'google' : null);
+  const [g, setG] = useState<GoogleStart | null>(fromSignIn);
+  const [kind, setKind] = useState<AccountType>('Individual');
+  const [f, setF] = useState({
+    businessName: '', firstName: fromSignIn?.profile?.firstName ?? '', lastName: fromSignIn?.profile?.lastName ?? '',
+    email: '', password: '', phone: '', addressLine1: '', addressLine2: '', city: '', parish: '', zone: '',
+  });
+  const [show, setShow] = useState(false);
   const [pin, setPin] = useState<DroppedPin | null>(null);
+  const [zones, setZones] = useState<Zone[]>([]);
   const [error, setError] = useState<string | null>(null);
-  const [done, setDone] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [done, setDone] = useState<{ name: string; confirmSent: boolean; existing: boolean } | null>(null);
 
-  const isCorporate = f.accountType === 'Corporate';
+  useEffect(() => {
+    api.get<{ zones: Zone[] }>('/api/public/site').then((s) => setZones(s.zones)).catch(() => {});
+  }, []);
+  const set = (k: keyof typeof f) => (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) => setF({ ...f, [k]: e.target.value });
 
-  // Where to deliver is required too (10 Oct 2026): street, town and parish.
-  const ready = f.email.trim() && f.phone.trim() && f.addressLine1.trim() && f.city.trim() && f.parish
-    && (isCorporate ? f.businessName.trim() && f.contactPerson.trim() : f.firstName.trim() && f.lastName.trim());
-
-  async function submit(e: React.FormEvent) {
-    e.preventDefault();
+  /** Google said who they are: signed in if we know them, else on to the details. */
+  async function withGoogle(credential: string) {
     setBusy(true); setError(null);
     try {
-      const r = await api.post<{ name: string }>('/api/register', {
-        ...f, lat: pin?.lat ?? null, lng: pin?.lng ?? null, accuracyM: pin?.accuracyM ?? null,
-      });
-      setDone(r.name);
+      const r = await api.post<{ session?: Session; needsDetails?: boolean; profile?: GoogleStart['profile'] }>('/api/auth/google', { credential });
+      if (r.session) {
+        startedSession(r.session, onSignedIn);
+        setDone({ name: r.session.name.split(' ')[0], confirmSent: false, existing: true });
+        return;
+      }
+      setG({ credential, profile: r.profile });
+      setF((x) => ({ ...x, firstName: x.firstName || r.profile?.firstName || '', lastName: x.lastName || r.profile?.lastName || '' }));
+      setVia('google');
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Could not send your request');
+      setError(err instanceof Error ? err.message : 'Google sign-in did not work');
     } finally { setBusy(false); }
   }
 
-  const header = (
-    <header className="public-head">
-      <Link to="/" aria-label="Alka Vida home"><Logo height={52} /></Link>
-      <Link to="/sign-in">Sign in</Link>
-    </header>
-  );
-
-  if (done) {
-    return (
-      <div className="login-page">
-        {header}
-        <main className="public-main">
-          <section className="panel">
-            <h1 className="public-h1">Thank you, {done}</h1>
-            <p>
-              We have your details. Someone from Alka Vida will reach out to you to
-              confirm your delivery day.
-            </p>
-            <p className="muted small">
-              Once your account is set up you will get an email with a link to choose
-              your own password. Nobody here will ever ask you for it.
-            </p>
-            <Link to="/">Back to the home page</Link>
-          </section>
-        </main>
-      </div>
-    );
+  async function submit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!f.zone) { setError('Choose your delivery area, or "Not sure".'); return; }
+    setBusy(true); setError(null);
+    try {
+      const r = await api.post<{ session: Session; existing: boolean; confirmSent: boolean }>('/api/auth/signup', {
+        method: via, credential: via === 'google' ? g?.credential : undefined,
+        email: via === 'email' ? f.email : undefined, password: via === 'email' ? f.password : undefined,
+        accountType: kind, businessName: kind === 'Corporate' ? f.businessName : null,
+        firstName: f.firstName, lastName: f.lastName, phone: f.phone,
+        addressLine1: f.addressLine1, addressLine2: f.addressLine2, city: f.city, parish: f.parish,
+        zone: f.zone === NOT_SURE ? '' : f.zone,
+        lat: pin?.lat ?? null, lng: pin?.lng ?? null, accuracyM: pin?.accuracyM ?? null,
+      });
+      startedSession(r.session, onSignedIn);
+      setDone({ name: f.firstName, confirmSent: r.confirmSent, existing: r.existing });
+      window.scrollTo(0, 0);
+    } catch (err) {
+      const m = err instanceof Error ? err.message : 'Your account could not be made';
+      // Google's token lasts an hour: past that, ask them to press the button again.
+      if (via === 'google' && /google sign-in did not work/i.test(m)) { setVia(null); setG(null); }
+      setError(m);
+    } finally { setBusy(false); }
   }
 
-  const kind = (t: AccountType) => setF({
-    // Switching kind clears only the name fields, which are the ones that
-    // differ. Everything already typed stays.
-    ...BLANK, accountType: t,
-    email: f.email, phone: f.phone,
-    addressLine1: f.addressLine1, addressLine2: f.addressLine2,
-    city: f.city, parish: f.parish, notes: f.notes,
-  });
-
-  return (
-    <div className="login-page">
-      {header}
-      <main className="public-main">
-        <div>
-          <h1 className="public-h1">Open an account</h1>
-          <p className="muted" style={{ margin: '4px 0 0' }}>
-            Tell us who you are and where to deliver. We will call to agree your
-            prices and delivery day. This is a request, not an order.
-          </p>
-        </div>
-
-        {error && <div className="notice error">{error}</div>}
-
-        <form onSubmit={submit} className="public-form">
-          <div className="seg seg-even" role="group" aria-label="Kind of account">
-            <button type="button" className={isCorporate ? 'active' : ''} aria-pressed={isCorporate}
-                    onClick={() => kind('Corporate')}>A business</button>
-            <button type="button" className={!isCorporate ? 'active' : ''} aria-pressed={!isCorporate}
-                    onClick={() => kind('Individual')}>My home</button>
-          </div>
-
-          <section className="panel">
-            {isCorporate ? (
-              <>
-                <div className="field">
-                  <label htmlFor="bn">Business name</label>
-                  <input id="bn" required maxLength={MAX.name} autoComplete="organization" value={f.businessName}
-                         onChange={(e) => setF({ ...f, businessName: e.target.value })} />
-                </div>
-                <div className="field">
-                  <label htmlFor="cp">Who we speak to</label>
-                  <input id="cp" required maxLength={MAX.name} autoComplete="name" value={f.contactPerson}
-                         onChange={(e) => setF({ ...f, contactPerson: e.target.value })} />
-                </div>
-              </>
-            ) : (
-              <div className="two">
-                <div className="field">
-                  <label htmlFor="fn">First name</label>
-                  <input id="fn" required maxLength={MAX.name} autoComplete="given-name" value={f.firstName}
-                         onChange={(e) => setF({ ...f, firstName: e.target.value })} />
-                </div>
-                <div className="field">
-                  <label htmlFor="ln">Last name</label>
-                  <input id="ln" required maxLength={MAX.name} autoComplete="family-name" value={f.lastName}
-                         onChange={(e) => setF({ ...f, lastName: e.target.value })} />
-                </div>
-              </div>
-            )}
-            <div className="two">
-              <div className="field">
-                <label htmlFor="ph">Phone</label>
-                <input id="ph" type="tel" required maxLength={MAX.phone} autoComplete="tel" value={f.phone}
-                       onChange={(e) => setF({ ...f, phone: e.target.value })} />
-              </div>
-              <div className="field">
-                <label htmlFor="em">Email</label>
-                <input id="em" type="email" required maxLength={MAX.email} autoComplete="email" value={f.email}
-                       onChange={(e) => setF({ ...f, email: e.target.value })} />
-              </div>
-            </div>
-          </section>
-
-          <section className="panel">
-            <h2 className="side-h">Where we deliver</h2>
-            <div className="field">
-              <label htmlFor="a1">Street and number</label>
-              <input id="a1" required maxLength={MAX.line} autoComplete="address-line1" value={f.addressLine1}
-                     onChange={(e) => setF({ ...f, addressLine1: e.target.value })} />
-            </div>
-            <div className="field">
-              <label htmlFor="a2">Building, unit or landmark (optional)</label>
-              <input id="a2" maxLength={MAX.line} autoComplete="address-line2" value={f.addressLine2}
-                     onChange={(e) => setF({ ...f, addressLine2: e.target.value })} />
-            </div>
-            <div className="two">
-              <div className="field">
-                <label htmlFor="ct">Town</label>
-                <input id="ct" required maxLength={MAX.town} autoComplete="address-level2" value={f.city} onChange={(e) => setF({ ...f, city: e.target.value })} />
-              </div>
-              <div className="field">
-                <label htmlFor="pa">Parish</label>
-                <select id="pa" required autoComplete="address-level1" value={f.parish} onChange={(e) => setF({ ...f, parish: e.target.value })}>
-                  <option value="">Choose…</option>
-                  {PARISHES.map((p) => <option key={p} value={p}>{p}</option>)}
-                </select>
-              </div>
-            </div>
-            <PinPicker value={pin} onChange={setPin} className="field" />
-            <div className="field" style={{ marginBottom: 0 }}>
-              <label htmlFor="nt">Anything else (optional)</label>
-              <input id="nt" maxLength={MAX.notes} autoComplete="off" value={f.notes} placeholder="How much you use, best delivery times"
-                     onChange={(e) => setF({ ...f, notes: e.target.value })} />
-            </div>
-          </section>
-
-          <button className="wide big" disabled={busy || !ready}>
-            {busy ? 'Sending…' : 'Send my request'}
-          </button>
-          <p className="muted small" style={{ textAlign: 'center', margin: 0 }}>
-            Already have an account? <Link to="/sign-in">Sign in</Link>
-          </p>
-        </form>
+  const page = (body: React.ReactNode) => (
+    <div className="auth-page">
+      <div className="auth-top"><Link to="/">‹ Back to alkavidaja.com</Link></div>
+      <main className="auth-col wide">
+        <Link to="/" className="auth-logo" aria-label="Alka Vida home"><Logo height={84} /></Link>
+        {body}
       </main>
     </div>
   );
+
+  if (done) {
+    return page(
+      <div className="auth-card center">
+        <span className="auth-tick" aria-hidden="true"><svg width="30" height="30" viewBox="0 0 24 24"><path d="m5 12 4.5 4.5L19 7" fill="none" stroke="currentColor" strokeWidth="2.6" strokeLinecap="round" strokeLinejoin="round" /></svg></span>
+        <h1 className="auth-h1">{done.existing ? `Welcome back${done.name ? `, ${done.name}` : ''}` : `Welcome to Alka Vida${done.name ? `, ${done.name}` : ''}`}</h1>
+        <p>{done.existing ? 'You already had an account with us, so we signed you into it.' : "Your account is ready and you're signed in. Order your first water now, or look around your account."}</p>
+        {done.confirmSent && <p className="small muted">We've also sent a link to confirm your email address, so your receipts reach you.</p>}
+        <div className="auth-actions">
+          <button type="button" className="auth-submit" onClick={() => navigate('/portal/order')}>Order water</button>
+          <button type="button" className="auth-submit outline" onClick={() => navigate('/')}>Go to my account</button>
+        </div>
+      </div>,
+    );
+  }
+
+  if (!via) {
+    return page(<>
+      <h1 className="auth-h1">Create your account</h1>
+      <p className="auth-sub">Order again in two taps, follow your delivery and see your statement, any time.</p>
+      <div className="auth-card">
+        {error && <div className="notice error" role="alert">{error}</div>}
+        {google && <>
+          <GoogleButton onCredential={withGoogle} text="continue_with" />
+          <div className="auth-or" role="separator" aria-label="or"><span />OR<span /></div>
+        </>}
+        <button type="button" className="auth-submit outline" disabled={busy} onClick={() => { setError(null); setVia('email'); }}>
+          <svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2" fill="none" stroke="currentColor" strokeWidth="2" /><path d="m4 7 8 6 8-6" fill="none" stroke="currentColor" strokeWidth="2" strokeLinejoin="round" /></svg>
+          Continue with email
+        </button>
+        <p className="small muted" style={{ textAlign: 'center', margin: 0 }}>Just want water today? <Link to="/shop"><b>Order without an account</b></Link></p>
+        <p className="small muted" style={{ textAlign: 'center', margin: 0 }}>By creating an account you agree to how we use your details in our <Link to="/privacy">privacy policy</Link>.</p>
+      </div>
+      <p className="auth-foot">Already have an account? <Link to="/sign-in"><b>Sign in</b></Link></p>
+    </>);
+  }
+
+  const isBusiness = kind === 'Corporate';
+  return page(<>
+    <p className="auth-step">STEP 2 OF 2</p>
+    <h1 className="auth-h1">A few details for your deliveries</h1>
+    <form className="auth-card" onSubmit={submit}>
+      {error && <div className="notice error" role="alert">{error}</div>}
+      {via === 'google' && g?.profile && (
+        <div className="auth-linked">
+          <span><b>Connected with Google</b><span>{g.profile.email}</span></span>
+          <button type="button" className="as-link" onClick={() => { setVia(null); setG(null); }}>Change</button>
+        </div>
+      )}
+
+      <div className="auth-seg" role="group" aria-label="Kind of account">
+        <button type="button" aria-pressed={!isBusiness} onClick={() => setKind('Individual')}>For my home</button>
+        <button type="button" aria-pressed={isBusiness} onClick={() => setKind('Corporate')}>For a business</button>
+      </div>
+
+      {isBusiness && (
+        <div className="auth-field"><label htmlFor="bn">Business name</label>
+          <input id="bn" required maxLength={MAX.name} autoComplete="organization" value={f.businessName} onChange={set('businessName')} /></div>
+      )}
+      <div className="auth-two">
+        <div className="auth-field"><label htmlFor="fn">First name</label>
+          <input id="fn" required maxLength={MAX.name} autoComplete="given-name" value={f.firstName} onChange={set('firstName')} /></div>
+        <div className="auth-field"><label htmlFor="ln">Last name</label>
+          <input id="ln" required maxLength={MAX.name} autoComplete="family-name" value={f.lastName} onChange={set('lastName')} /></div>
+      </div>
+      {via === 'email' && <>
+        <div className="auth-field"><label htmlFor="em">Email</label>
+          <input id="em" type="email" required maxLength={MAX.email} autoComplete="email" placeholder="you@example.com" value={f.email} onChange={set('email')} /></div>
+        <div className="auth-field"><label htmlFor="pw">Choose a password</label>
+          <div className="auth-input">
+            <input id="pw" type={show ? 'text' : 'password'} required minLength={8} autoComplete="new-password" placeholder="At least 8 characters" value={f.password} onChange={set('password')} />
+            <button type="button" className="auth-eye" aria-label={show ? 'Hide password' : 'Show password'} onClick={() => setShow(!show)}><EyeIcon off={show} /></button>
+          </div></div>
+      </>}
+      <div className="auth-field"><label htmlFor="ph">Phone (WhatsApp if you have it)</label>
+        <input id="ph" type="tel" required maxLength={MAX.phone} autoComplete="tel" placeholder="876-" value={f.phone} onChange={set('phone')} /></div>
+
+      <h2 className="auth-h2">Where we deliver</h2>
+      <div className="auth-field"><label htmlFor="a1">Street and number</label>
+        <input id="a1" required maxLength={MAX.line} autoComplete="address-line1" value={f.addressLine1} onChange={set('addressLine1')} /></div>
+      <div className="auth-field"><label htmlFor="a2">Building, unit or landmark (optional)</label>
+        <input id="a2" maxLength={MAX.line} autoComplete="address-line2" value={f.addressLine2} onChange={set('addressLine2')} /></div>
+      <div className="auth-two">
+        <div className="auth-field"><label htmlFor="ct">Town</label>
+          <input id="ct" required maxLength={MAX.town} autoComplete="address-level2" value={f.city} onChange={set('city')} /></div>
+        <div className="auth-field"><label htmlFor="pa">Parish</label>
+          <select id="pa" required autoComplete="address-level1" value={f.parish} onChange={set('parish')}>
+            <option value="">Choose…</option>
+            {PARISHES.map((p) => <option key={p} value={p}>{p}</option>)}
+          </select></div>
+      </div>
+      <div className="auth-field"><label htmlFor="zn">Your delivery area</label>
+        <select id="zn" required value={f.zone} onChange={set('zone')}>
+          <option value="">Choose your area…</option>
+          {zones.map((z) => <option key={z.name} value={z.name}>{z.name}{z.days.length ? ` · ${z.days.map((d) => DAY_WORDS[d] ?? d).join(' and ')}` : ''}</option>)}
+          <option value={NOT_SURE}>Not sure: please place me</option>
+        </select>
+        <span className="small muted">This sets your delivery day. Not sure? We'll place you and let you know.</span>
+      </div>
+      <PinPicker value={pin} onChange={setPin} />
+
+      <button className="auth-submit" disabled={busy}>{busy ? 'Making your account…' : 'Create my account'}</button>
+      <p className="small muted" style={{ margin: 0 }}>See how we use your details in our <Link to="/privacy">privacy policy</Link>.</p>
+      <p className="small muted" style={{ margin: 0 }}>Your account is ready straight away. You pay on delivery or by bank transfer; businesses wanting weekly or monthly invoices can ask the office.</p>
+    </form>
+    <button type="button" className="as-link auth-back" onClick={() => { setVia(null); setError(null); }}>‹ Back</button>
+  </>);
 }

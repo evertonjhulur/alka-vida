@@ -222,6 +222,9 @@ export function registerFeedbackRoutes(
     broadcastDailyCap: 'broadcast_daily_cap',
     orderPlacedEmails: 'order_placed_emails',
     orderDeliveredEmails: 'order_delivered_emails',
+    // Confirm-your-email for email sign-ups (31 Oct 2026). Off until
+    // customers are told about accounts.
+    signupConfirmEmails: 'signup_confirm_emails',
     // The address at the foot of every email and document (7 Oct 2026).
     contactEmail: 'contact_email',
   };
@@ -234,6 +237,7 @@ export function registerFeedbackRoutes(
       broadcastDailyCap: Number(out.broadcastDailyCap) || 80,
       orderPlacedEmails: out.orderPlacedEmails !== 'false',
       orderDeliveredEmails: out.orderDeliveredEmails !== 'false',
+      signupConfirmEmails: out.signupConfirmEmails === 'true',
       contactEmail: String(out.contactEmail || 'orders@alkavidaja.com'),
       mailConfigured: documents.mailConfigured(),
     };

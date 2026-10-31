@@ -56,6 +56,12 @@ MAIL_FROM=
 # On Railway, add it as a variable with the same name instead.
 # ORS_API_KEY=
 
+# "Continue with Google" on the sign-in and create-account pages. Paste the
+# Client ID from Google Cloud (it ends .apps.googleusercontent.com). It is not
+# a secret. Without it the Google button simply does not show.
+# On Railway, add it as a variable with the same name instead.
+# GOOGLE_CLIENT_ID=
+
 
 # ---------------------------------------------------------------------------
 # Advanced - you almost certainly do not need these

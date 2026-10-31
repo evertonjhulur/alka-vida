@@ -47,6 +47,7 @@ import OpeningBottlesUpload from './pages/OpeningBottlesUpload';
 import Users from './pages/Users';
 import MyAccount from './pages/MyAccount';
 import Register from './pages/Register';
+import ConfirmEmail from './pages/ConfirmEmail';
 import SetPassword from './pages/SetPassword';
 import Decisions from './pages/Decisions';
 import Zones from './pages/Zones';
@@ -439,7 +440,7 @@ function HomeFor({ session }: { session: Session }) {
  * where somebody else is signed in - and routing them to a dashboard instead
  * would strand them with no obvious way to the page the link was for.
  */
-const PUBLIC_ROUTES = ['/register', '/set-password'];
+const PUBLIC_ROUTES = ['/register', '/set-password', '/confirm-email'];
 
 /**
  * Chooses between the signed-in app and the pages that belong to nobody.
@@ -473,7 +474,8 @@ function Routed({
         <Route key={p} path={p} element={<PublicSite session={session} onSignedIn={onSignedIn} />} />
       ))}
       <Route path="/quote/:token" element={<QuoteAccept />} />
-      <Route path="/register" element={<Register />} />
+      <Route path="/register" element={<Register onSignedIn={onSignedIn} />} />
+      <Route path="/confirm-email" element={<ConfirmEmail />} />
       <Route path="/set-password" element={<SetPassword />} />
       {/* Any other address: the sign-in page, which after a session ran out
           takes them back to where they were. */}

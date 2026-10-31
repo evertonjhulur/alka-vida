@@ -317,6 +317,13 @@
 
 /* Product cards */
 .s-pgrid { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(205px, 1fr)); }
+/* Searching: fill columns, not stretch, so one match stays card-sized (31 Oct 2026). */
+.s-pgrid.searching { grid-template-columns: repeat(auto-fill, minmax(205px, 1fr)); }
+.s-results { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; padding: 10px 16px; background: #fff; border: 1px solid var(--line); border-left: 4px solid var(--brand); border-radius: 10px; font-size: 16px; }
+.s-results b { color: #0e5fa5; }
+.site .s-results-all { border: 0; background: none; padding: 0; min-height: 36px; color: #0e5fa5; font: inherit; font-weight: 600; text-decoration: underline; cursor: pointer; }
+/* The open search bar makes the sticky header taller: leave room so the heading isn't hidden. */
+.site:has(.s-search) .s-anchor { scroll-margin-top: 190px; }
 .s-pcard { display: flex; flex-direction: column; gap: 8px; background: #fff; border: 1px solid var(--line); border-radius: 12px; padding: 12px; }
 .s-pcard-pic { position: relative; border-radius: 10px; background: #eef5fb; padding: 10px 10px 26px; margin-bottom: 22px; }
 .s-pic { aspect-ratio: 1 / 1; border-radius: 8px; background: #fff; overflow: hidden; display: flex; align-items: center; justify-content: center; }
@@ -432,13 +439,13 @@
   .s-hero3-badge b { font-size: 20px; }
   .s-sec-head h2, .s-split-copy h2.display { font-size: 32px; }
   .site .s-water h2.display { font-size: 36px; }
-  .s-pgrid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+  .s-pgrid, .s-pgrid.searching { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
   .s-pcard { padding: 10px; }
   .s-pcard-price { flex-wrap: wrap; }
   .s-acct-band { padding: 20px; }
 }
 @media (max-width: 380px) {
-  .s-pgrid { grid-template-columns: minmax(0, 1fr); }
+  .s-pgrid:not(.searching) { grid-template-columns: minmax(0, 1fr); }
 }
 .site .s-band p.s-kicker { font-size: 13px; margin-top: 0; }
 .site .s-mission h2.display { color: #fff; }
