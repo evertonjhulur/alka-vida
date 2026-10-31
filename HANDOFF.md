@@ -2519,3 +2519,36 @@ entry for corrections.
   then). Tests: new `api/test/openingbottles.test.ts`. 581 API tests, 16 web
   tests pass. Checked in a browser: the upload (check, problem rows, bring in),
   the Bottle pool table and the customer Bottles tab.
+
+## Website round 3: brand first, shop and cart on the home page (31 Oct 2026)
+
+Built from the approved design (landing canvas, Round 3 row). All in
+`packages/web/src/site/Site.tsx` and `site.css`; no API change.
+
+- **Home** (`/`, and `/shop`, which opens it at the products):
+  - a rotating product slider (all sizes, 01–05 plus arrows, a price badge and
+    Add to cart; it pauses once someone picks one, or for reduced motion);
+  - the benefit strip ("Made right here in Jamaica · Bottled from the aquifers
+    in St. Catherine");
+  - product cards with − / +, PH 9+ and ADD TO CART (500ml tagged MOST POPULAR);
+  - How it works 1-2-3 ("Place an order");
+  - Water & you, with no blood pressure or heartbeat claims;
+  - testimonials posted as given, without names;
+  - About with the truck photo;
+  - delivery areas Kingston, Portmore, Spanish Town;
+  - a sign-in band.
+- **Header:** Shop, About us, Delivery, For business, Contact; sign in (person),
+  search (filters the products), the cart with its count, ORDER NOW.
+- **Cart:** a pop-up from Add to cart or the header. It is kept on the device
+  (localStorage `alkavida.cart`), fills the quick order (`/order`), follows
+  edits made there, and is cleared once the order is sent.
+- **Prices:** the 5 gallon is shown WITH GCT, cases before GCT ("+ GCT"). The
+  estimated total is unchanged (listed prices + 15%). Display only; pricing is
+  untouched.
+- **About:** the new opening text and truck photo, then the original story.
+- **Delivery:** the three areas; Paying is just "Pay on delivery" and
+  "Bank transfer".
+- **Contact:** "We'd love to assist you", Instagram and Facebook.
+- **Footer:** Instagram, Facebook and WhatsApp.
+- **Photos:** `public/site/` (5gal, 5l, 1.5l, 500ml, 280ml, truck).
+- `/shop` was added to SITE_PATHS; the sitepaths test still passes.
