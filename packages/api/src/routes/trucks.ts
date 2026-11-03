@@ -10,6 +10,7 @@
 import type { FastifyInstance } from 'fastify';
 import type { Db } from '../db/index.ts';
 import { backdateDays } from '../services/counter.ts';
+import { envTaxRate } from '../services/inventory.ts';
 import type { Actor } from '../services/core.ts';
 import { DEFAULT_DOCUMENT_FOOTER, documentFooter, requireRole, takesCard, businessToday } from '../services/core.ts';
 import type { Session } from '../lib/auth.ts';
@@ -44,11 +45,13 @@ export function registerTruckRoutes(
     backdateDays: await backdateDays(db),
     documentFooter: await documentFooter(db),
     defaultFooter: DEFAULT_DOCUMENT_FOOTER,
+    // The Environmental Levy on purchase orders (3 Nov 2026).
+    envTaxRatePercent: Math.round((await envTaxRate(db)) * 100 * 10000) / 10000,
   });
   app.get('/api/settings/money', office, async () => readMoney());
   app.put('/api/settings/money', only('admin'), async (req) => {
     requireRole(actor(req), 'admin');
-    const b = (req.body ?? {}) as { takeCard?: boolean; documentFooter?: string; backdateDays?: number };
+    const b = (req.body ?? {}) as { takeCard?: boolean; documentFooter?: string; backdateDays?: number; envTaxRatePercent?: number };
     await db.tx(async (t) => {
       const put = (key: string, value: string) => t.query(
         `INSERT INTO system_settings (key, value) VALUES ($1,$2)
@@ -59,6 +62,11 @@ export function registerTruckRoutes(
         const n = Math.round(Number(b.backdateDays));
         if (!Number.isFinite(n) || n < 0 || n > 31) throw new RuleViolation('days back must be a whole number from 0 to 31');
         await put('backdate_days', String(n));
+      }
+      if (b.envTaxRatePercent !== undefined) {
+        const r = Number(b.envTaxRatePercent);
+        if (!Number.isFinite(r) || r < 0 || r > 5) throw new RuleViolation('the levy rate must be a percentage from 0 to 5');
+        await put('env_tax_rate_percent', String(Math.round(r * 10000) / 10000));
       }
       if (b.documentFooter !== undefined) {
         const text = String(b.documentFooter).replace(/\r\n/g, '\n').trim();

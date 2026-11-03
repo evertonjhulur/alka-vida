@@ -19,6 +19,8 @@ export interface Fixture {
   customerId: string;
   /** A second customer, used for cross-customer reassignment. */
   otherCustomerId: string;
+  /** The returnable 5-gallon jug: its stock is the empties at the plant (100 to start). */
+  jugMaterialId: string;
   close(): Promise<void>;
 }
 
@@ -86,12 +88,18 @@ export async function setupFixture(): Promise<Fixture> {
      VALUES ('Alka Vida 5gal pool', $1, 500)`, [brandId],
   );
 
+  // The jug cycle (3 Nov 2026): the empties at the plant are this material.
+  const jugMaterialId = (await db.one<{ id: string }>(
+    `INSERT INTO raw_materials (name, category, quantity_on_hand, is_returnable_jug)
+     VALUES ('5 Gal (19L) Bottle', 'Bottle', 100, true) RETURNING id`,
+  )).id;
+
   return {
     db,
     admin: { id: adminId, name: 'Admin', role: 'admin' },
     office: { id: officeId, name: 'Office', role: 'user' },
     driver: { id: driverId, name: 'Driver', role: 'driver' },
-    brandId, tierId, casedProductId, fiveGalProductId, customerId, otherCustomerId,
+    brandId, tierId, casedProductId, fiveGalProductId, customerId, otherCustomerId, jugMaterialId,
     close: () => db.close(),
   };
 }

@@ -1651,18 +1651,18 @@ export async function buildServer(db: Db) {
 
   app.get('/api/bottle-pool', { preHandler: allow('admin', 'user', 'driver') },
     async () => ({
-      pools: await bottles.listPools(db),
+      figures: await bottles.poolFigures(db),
       holdings: await bottles.customerHoldings(db),
       history: await bottles.poolHistory(db),
     }));
 
-  /** Returned dirty bottles washed back into clean, ready stock. */
-  app.post('/api/bottle-pool/wash', { preHandler: allow('admin', 'user') },
-    async (req) => bottles.washBottles(db, actorOf(req), req.body as never));
+  /** New jugs bought without a purchase order: straight into the empties (jug cycle, 3 Nov 2026). */
+  app.post('/api/bottle-pool/jugs-bought', { preHandler: allow('admin', 'user') },
+    async (req) => bottles.recordJugsBought(db, actorOf(req), req.body as never));
 
-  /** Direct correction of the counts. Admin only, reason required. */
-  app.post('/api/bottle-pool/adjust', { preHandler: allow('admin') },
-    async (req) => bottles.adjustPool(db, actorOf(req), req.body as never));
+  /** Jugs found unusable at the plant outside a production run. */
+  app.post('/api/bottle-pool/scrap', { preHandler: allow('admin', 'user') },
+    async (req) => bottles.scrapJugs(db, actorOf(req), req.body as never));
 
   /** Opening balances of our bottles with customers (28 Oct 2026): the upload, checked first. */
   app.post('/api/bottle-pool/opening-upload', { preHandler: allow('admin') },

@@ -178,10 +178,10 @@ describe('Purchase orders', () => {
 
     // 20,000 x 8.50 + 20,000 x 4.00 = 170,000.00 + 80,000.00
     assert.equal(po.subtotalCents, 20_000 * 850 + 20_000 * 400);
-    // GCT 15% and, since 30 Sep 2026, the Environmental Levy (0.375%) on
-    // every line not tagged Env-exempt for this supplier.
+    // GCT 15% and the Environmental Levy (0.6375% from 3 Nov 2026: 0.85% on
+    // 75% of a local manufacturer's price) on every line not tagged Env-exempt.
     assert.equal(po.grandTotalCents, po.subtotalCents + Math.round(po.subtotalCents * 0.15)
-      + Math.round(20_000 * 850 * 0.00375) + Math.round(20_000 * 400 * 0.00375));
+      + Math.round(20_000 * 850 * 0.006375) + Math.round(20_000 * 400 * 0.006375));
   });
 
   test('receiving creates a FIFO batch and raises stock', async () => {
@@ -496,6 +496,8 @@ describe('Stock counts (InventoryAudit)', () => {
        FROM raw_materials rm
        LEFT JOIN material_batches mb
          ON mb.raw_material_id = rm.id AND mb.status = 'Open' AND mb.quantity_remaining > 0
+       -- The returnable jug is a count only, costed on purchase (3 Nov 2026).
+       WHERE NOT rm.is_returnable_jug
        GROUP BY rm.id, rm.name, rm.quantity_on_hand`,
     );
     for (const r of rows) {

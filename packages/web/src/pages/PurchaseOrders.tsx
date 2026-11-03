@@ -10,7 +10,7 @@ import { ask } from '../components/Dialog';
 /**
  * Purchase orders.
  *
- * Revised 30 Sep 2026 (Everton): GCT and the Environmental Levy (0.375%) are
+ * Revised 30 Sep 2026 (Everton): GCT and the Environmental Levy (0.6375% from 3 Nov 2026) are
  * worked out per line from how each product is tagged for the supplier
  * (GCT-exempt, Env-exempt); a PO can be changed or deleted until goods are
  * received against it, downloaded as a PDF, and emailed to the supplier.
@@ -49,7 +49,7 @@ interface Pickup {
 export default function PurchaseOrders() {
   const [orders, setOrders] = useState<PO[]>([]);
   const [suppliers, setSuppliers] = useState<Supplier[]>([]);
-  const [envRate, setEnvRate] = useState(0.375);
+  const [envRate, setEnvRate] = useState(0.6375);
   const [open, setOpen] = useState<PODetail | null>(null);
   const [receipts, setReceipts] = useState<Record<string, string>>({});
   /** The day it actually arrived (team feedback, point 18); blank = today. */

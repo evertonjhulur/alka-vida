@@ -336,6 +336,25 @@ async function adjustRawMaterial(
   targetQty: number,
   auditId: string,
 ): Promise<number> {
+  // The returnable 5-gallon jug (jug cycle, 3 Nov 2026): its stock is the
+  // empties at the plant, a count only - costed on purchase, never layered.
+  const jug = await t.maybeOne<{ quantity_on_hand: number }>(
+    `SELECT quantity_on_hand FROM raw_materials WHERE id = $1 AND is_returnable_jug`, [materialId]);
+  if (jug) {
+    const delta = Math.round((targetQty - num(jug.quantity_on_hand)) * 1000) / 1000;
+    await t.query(`UPDATE raw_materials SET quantity_on_hand = $2 WHERE id = $1`, [materialId, targetQty]);
+    if (delta !== 0) {
+      await t.query(
+        `INSERT INTO inventory_transactions
+           (item_type, item_id, item_name, quantity, direction, reference, reference_type, notes)
+         VALUES ('RawMaterial',$1,$2,$3,$4,$5,'Adjustment',$6)`,
+        [materialId, materialName, Math.abs(delta), delta > 0 ? 'in' : 'out', `Stock count ${auditId}`,
+         `Empties at the plant counted: ${delta > 0 ? 'more' : 'fewer'} than on record`],
+      );
+    }
+    return 0;
+  }
+
   const rows = await t.query<{
     id: string; unit_cost_cents: number; quantity_remaining: number; supplier_id: string | null;
   }>(
@@ -499,10 +518,10 @@ export async function stockSnapshot(db: Db, asOf?: string | null) {
   const onTrucks = await goodsOnTrucks(db);
   const materials = await db.query<{
     id: string; name: string; unit_of_measure: string; quantity_on_hand: number;
-    reorder_point: number | null; category: string | null; last_counted: string | null;
+    reorder_point: number | null; category: string | null; last_counted: string | null; is_returnable_jug: boolean;
   }>(
     `SELECT rm.id, rm.name, rm.unit_of_measure, rm.quantity_on_hand, rm.reorder_point,
-            rm.category,
+            rm.category, rm.is_returnable_jug,
             (SELECT MAX(audit_date)::text FROM inventory_audits a
               WHERE a.item_type = 'RawMaterial' AND a.item_id = rm.id) AS last_counted
      FROM raw_materials rm LEFT JOIN material_categories mc ON mc.name = rm.category
@@ -543,6 +562,8 @@ export async function stockSnapshot(db: Db, asOf?: string | null) {
         id: m.id, name: m.name, unit: m.unit_of_measure, onHand, category: m.category,
         reorderPoint: m.reorder_point === null ? null : num(m.reorder_point),
         lastCounted: m.last_counted, makes,
+        // Its stock is the 5-gallon empties at the plant (jug cycle, 3 Nov 2026).
+        isReturnableJug: !!m.is_returnable_jug,
       };
     }),
   };

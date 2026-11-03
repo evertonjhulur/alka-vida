@@ -23,7 +23,7 @@ interface Snapshot {
   finishedGoods: Array<{
     productId: string; name: string; bottlesPerCase: number; bottles: number; cases: number | null; loose: number;
   }>;
-  rawMaterials: Array<{ id: string; name: string; unit: string; onHand: number; category: string | null;
+  rawMaterials: Array<{ id: string; name: string; unit: string; onHand: number; category: string | null; isReturnableJug?: boolean;
     makes: Array<{ productName: string; perCase: number; unit: string }> }>;
 }
 
@@ -291,7 +291,7 @@ export default function StockCount({ session }: { session: Session }) {
                 const offBy = f && f.diff !== 0;
                 return (
                   <tr key={m.id} className={offBy ? 'off' : undefined}>
-                    <td>{m.name}<div className="muted small">{m.category ?? ''}{m.makes[0] ? ` · ${m.makes[0].perCase} ${m.unit} a ${m.makes[0].unit === 'cases' ? 'case' : 'bottle'} of ${m.makes[0].productName.replace(/^Alka Vida\s+/i, '')}` : ''}</div>
+                    <td>{m.name}<div className="muted small">{m.isReturnableJug ? '5-gallon empties at the plant (the Bottle pool reads this) · ' : ''}{m.category ?? ''}{m.makes[0] ? ` · ${m.makes[0].perCase} ${m.unit} a ${m.makes[0].unit === 'cases' ? 'case' : 'bottle'} of ${m.makes[0].productName.replace(/^Alka Vida\s+/i, '')}` : ''}</div>
                       {problems[m.id] && <div className="small" style={{ color: 'var(--bad)' }}>{problems[m.id]}</div>}</td>
                     <td className="num">{Number(m.onHand).toLocaleString()} <span className="muted small">{m.unit}</span></td>
                     <td><input type="number" min="0" step="any" aria-label={`${m.name} counted`} value={e.units} onChange={(ev) => setEntry(m.id, { units: ev.target.value })} /></td>

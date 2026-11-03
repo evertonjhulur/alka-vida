@@ -407,6 +407,8 @@ export interface RawMaterialInput {
   unitCostCents?: Cents;
   madeToOrder?: boolean;
   consigned?: boolean;
+  /** "This is the returnable 5-gallon jug": its stock is the empties at the plant (3 Nov 2026). */
+  isReturnableJug?: boolean;
   brandId?: string | null;
   notes?: string | null;
 }
@@ -485,6 +487,8 @@ export async function updateRawMaterial(
   if ('madeToOrder' in input && input.madeToOrder != null) set('made_to_order', input.madeToOrder);
   if ('consigned' in input && input.consigned != null) set('consigned', input.consigned);
   if ('brandId' in input) set('brand_id', input.brandId ?? null);
+  const jug = 'isReturnableJug' in input && input.isReturnableJug != null ? !!input.isReturnableJug : null;
+  if (jug !== null) set('is_returnable_jug', jug);
 
   if (sets.length === 0) return;
 
@@ -492,7 +496,17 @@ export async function updateRawMaterial(
     const before = await t.one<{ name: string }>(
       `SELECT name FROM raw_materials WHERE id = $1`, [materialId],
     );
+    // Only one material is the jug: ticking this one unticks any other.
+    if (jug) {
+      await t.query(`UPDATE raw_materials SET is_returnable_jug = false WHERE is_returnable_jug AND id <> $1`, [materialId]);
+    }
     await t.query(`UPDATE raw_materials SET ${sets.join(', ')} WHERE id = $1`, args);
+    // The jug is costed on purchase only (3 Nov 2026): close its open layers.
+    if (jug) {
+      await t.query(
+        `UPDATE material_batches SET quantity_remaining = 0, status = 'Consumed'
+         WHERE raw_material_id = $1 AND status = 'Open'`, [materialId]);
+    }
     await audit(t, actor, 'update', 'RawMaterial', materialId, input.name ?? before.name, input);
   });
 }

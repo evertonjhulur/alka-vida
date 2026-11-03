@@ -12,7 +12,7 @@ import { settleRoute, getSettlementReview } from '../src/services/settlement.ts'
 import { startRoute } from '../src/services/routing.ts';
 import { recordPayment } from '../src/services/payments.ts';
 import { counterSale } from '../src/services/counter.ts';
-import { bottleAccount, listPools } from '../src/services/bottles.ts';
+import { bottleAccount, poolFigures } from '../src/services/bottles.ts';
 import { loadRound, confirmLoad, addToLoad, confirmAddition, cancelAddition, confirmReturns, truckPosition, loadingsReport, loadingSummary, goodsOnTrucks } from '../src/services/trucks.ts';
 import { stockSnapshot } from '../src/services/audits.ts';
 import { bottleChargeProduct } from '../src/services/orders.ts';
@@ -120,13 +120,13 @@ describe('Point 3: collection stops', () => {
     const r = await roundWith([{ productId: f.casedProductId, cases: 1 }]);
     await markStop(f.db, f.driver, { stopId: r.stopId, outcome: 'Delivered' });
     const held = (await bottleAccount(f.db, f.otherCustomerId)).closingHolding;
-    const dirty = (await listPools(f.db))[0].returnedDirty;
+    const dirty = (await poolFigures(f.db)).empties;
     const c = await addCollection(f.db, f.driver, r.sheetId, { kind: 'Empties', customerId: f.otherCustomerId, emptiesCount: 3 });
     assert.equal(c.status, 'Collected');
-    assert.equal((await listPools(f.db))[0].returnedDirty, dirty, 'nothing moves before settlement');
+    assert.equal((await poolFigures(f.db)).empties, dirty, 'nothing moves before settlement');
     const s = await settleRoute(f.db, f.office, r.sheetId, { actualCashCents: 0, bottleActualReturned: 3 });
     assert.equal(s.bottleVariance, 0, 'collected empties count towards what should come back');
-    assert.equal((await listPools(f.db))[0].returnedDirty, dirty + 3);
+    assert.equal((await poolFigures(f.db)).empties, dirty + 3);
     assert.equal((await bottleAccount(f.db, f.otherCustomerId)).closingHolding, held - 3);
   });
 

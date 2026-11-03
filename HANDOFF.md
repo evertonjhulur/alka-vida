@@ -2663,3 +2663,56 @@ not set payment terms once a customer was weekly or monthly.
   order is forced onto the logged-in customer" was already failing before
   this change.
 - Note: ALD has no delivery zone or delivery days set.
+
+## The 5-gallon jug cycle, rebuilt; Environmental Levy 0.6375% (3 Nov 2026)
+The 29 Oct jug-cycle build never reached his folder; this is a fresh build on
+the current code (migrations 037 and 038).
+- Rulings (3 Nov 2026): empties = returns + new jugs bought (on a PO or by
+  hand); every 5-gallon run draws on them; lost or scrapped = business loss.
+  A jug's cost is recorded ONCE, on its purchase - filling it adds no jug cost
+  to the water. A run may draw more empties than are on record (the plant
+  fills from empties brought back mid-round before the round is settled):
+  allowed, the figure goes below zero and is flagged.
+- One home per figure, so Bottle pool and Stock always agree
+  (bottles.poolFigures):
+  - empties at the plant = stock of the raw material ticked
+    `is_returnable_jug` ("5 Gal (19L) Bottle", ticked by migration 037 by
+    name; Raw materials edit has the tick, only one material can have it);
+  - full, in stock = finished goods of the `is_returnable` products;
+  - out with customers = the customer accounts (CUSTOMER_MOVES, opening
+    balances of 23 Oct included);
+  - lost or scrapped = account losses + `JugsScrapped` ledger lines.
+  `five_gal_bottle_pool` is no longer read or written (kept for old history).
+  Wash panel, washBottles and adjustPool are gone; corrections are a count on
+  Stock > Count (adjustRawMaterial treats the jug as a count only).
+- Empties IN: driver's stop, counter/collected sale, round collection
+  (applyDeliveryMovement -> moveEmpties, dated the round's day), PO receipt
+  (layer opened and closed at once: cost record only), "New jugs bought
+  without a PO" (POST /api/bottle-pool/jugs-bought, recordJugsBought).
+  OUT: completeProduction for an is_returnable product (one per jug filled,
+  plus "Jugs scrapped on this run" -> production_batches.jugs_scrapped),
+  POST /api/bottle-pool/scrap. Undo delivery takes its empties back off.
+  The truck's "empties back" stays a check figure only (no double count).
+- Migration 037 closes the jug material's open FIFO layers; its on-hand (the
+  3 Nov count, 69) is untouched. Production skips any BOM line for the jug.
+- Screens: Bottle pool rewritten (four figures, jugs bought / scrapped forms,
+  empties history from the stock ledger); Production shows the empties a
+  5-gallon run uses, warns when short, has the scrapped field; Stock > Count
+  labels the jug line "5-gallon empties at the plant"; Reports > Bottles
+  reads the new figures.
+- Environmental Levy: the EPL Act took the levy from 0.5% to 0.85% from
+  1 Oct 2026; local manufacturers charge it on 75% of price, so 0.6375%
+  (was 0.375%) - Parkland's invoices already show 0.6375%. Migration 038
+  moves the setting; Settings > Invoices & payments now has the rate (admin).
+  POs already raised keep their levy; the PO PDF prints the rate the PO was
+  priced at. Lines with no levy on the supplier's invoice: tick "Env exempt"
+  on the Suppliers tab.
+- After it goes live: enter the 3 Nov 5-gallon run (68 jugs) and the other
+  products' production, then recount the empties and reset that one line on
+  Stock > Count.
+- Not done: stop corrections approved after settlement still don't move the
+  empties (as before). SO-001090 (ALD) stock movement still to check in the
+  live app (likely on a confirmed truck load, ledger under the round's name).
+- Tests: bottles.test.ts rewritten for the cycle; api.test.ts adds the levy
+  setting and bottle-pool route; fixture has a jug material (100 empties).
+  The portal-order test's date moved to 2027 (it had gone into the past).

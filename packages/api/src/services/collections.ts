@@ -382,6 +382,7 @@ export async function settleCollections(t: Queryable, actor: Actor, sheetId: str
       );
       await applyDeliveryMovement(t, actor, {
         emptiesPickedUp: num(r.empties_count), reference: `Collection ${r.id}`, customerName: r.customer_name ?? undefined,
+        day: r.sheet_date,
       });
     } else if (r.status === 'Collected' && r.kind === 'Returns' && r.restock) {
       for (const l of r.lines ?? []) {

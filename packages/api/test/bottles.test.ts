@@ -1,4 +1,4 @@
-/** The 5-gallon returnable bottle exchange pool, end to end. */
+/** The 5-gallon jug cycle (3 Nov 2026), end to end. */
 
 import { test, describe, before, after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -7,13 +7,21 @@ import { createOrder } from '../src/services/orders.ts';
 import { markStop } from '../src/services/delivery.ts';
 import { getInvoiceLedger } from '../src/services/invoices.ts';
 import {
-  listPools, washBottles, adjustPool, customerHoldings, poolHistory,
+  poolFigures, recordJugsBought, scrapJugs, customerHoldings, poolHistory,
 } from '../src/services/bottles.ts';
+import {
+  completeProduction, productionFeasibility, createPurchaseOrder, receivePurchaseOrder,
+} from '../src/services/inventory.ts';
+import { recordCount } from '../src/services/audits.ts';
 
 let f: Fixture;
 before(async () => { f = await setupFixture(); });
 after(async () => { await f.close(); });
 
+const empties = async () => Number((await f.db.one<{ q: string }>(
+  `SELECT quantity_on_hand q FROM raw_materials WHERE id = $1`, [f.jugMaterialId])).q);
+const fullInStock = async () => Number((await f.db.maybeOne<{ q: number }>(
+  `SELECT quantity_on_hand q FROM finished_goods_stock WHERE product_id = $1`, [f.fiveGalProductId]))?.q ?? 0);
 /** Deliver `full` bottles, collect `back` empties, report `lost` missing. */
 async function deliver(
   date: string, full: number, back: number, lost = 0, customerId?: string,
@@ -33,82 +41,138 @@ async function deliver(
   });
 }
 
-describe('The exchange cycle', () => {
-  test('a delivery moves clean bottles out to the customer', async () => {
-    const before = (await listPools(f.db))[0];
+describe('The cycle: empties -> production -> full -> customers -> empties', () => {
+  test('a 5-gallon run fills jugs from the empties and puts them in stock', async () => {
+    const e0 = await empties(); const full0 = await fullInStock();
+    const r = await completeProduction(f.db, f.office, { productId: f.fiveGalProductId, looseBottles: 60 });
+    assert.equal(await empties(), e0 - 60, 'one empty per jug filled');
+    assert.equal(await fullInStock(), full0 + 60);
+    assert.equal(r.empties?.drawn, 60);
+    assert.equal(r.materialCostCents, 0, 'filling a jug adds no jug cost to the water');
+  });
+
+  test('jugs scrapped on a run come off the empties as well, and count as a loss', async () => {
+    const e0 = await empties(); const fig0 = await poolFigures(f.db);
+    const r = await completeProduction(f.db, f.office, { productId: f.fiveGalProductId, looseBottles: 10, jugsScrapped: 2 });
+    assert.equal(await empties(), e0 - 12);
+    assert.equal(r.empties?.scrapped, 2);
+    assert.equal((await poolFigures(f.db)).scrapped, fig0.scrapped + 2);
+  });
+
+  test('scrapping only applies to a 5-gallon run', async () => {
+    await assert.rejects(
+      completeProduction(f.db, f.office, { productId: f.casedProductId, cases: 1, jugsScrapped: 1 }),
+      /only apply to a 5-gallon run/);
+  });
+
+  test('a delivery takes full jugs off stock but does not touch the empties', async () => {
+    const e0 = await empties(); const full0 = await fullInStock();
     await deliver('2027-01-04', 20, 0);
-    const after = (await listPools(f.db))[0];
-
-    assert.equal(after.cleanReady, before.cleanReady - 20);
-    assert.equal(after.filledWithCustomer, before.filledWithCustomer + 20);
-    assert.equal(after.inCirculation, before.inCirculation,
-      'the bottles moved state but none left the pool');
+    assert.equal(await empties(), e0);
+    assert.equal(await fullInStock(), full0 - 20);
   });
 
-  test('collecting empties moves them to the awaiting-wash pile', async () => {
-    const before = (await listPools(f.db))[0];
+  test('empties the driver takes back go into the empties at the plant', async () => {
+    const e0 = await empties();
     await deliver('2027-01-11', 10, 15);
-    const after = (await listPools(f.db))[0];
-
-    assert.equal(after.returnedDirty, before.returnedDirty + 15);
-    assert.equal(after.filledWithCustomer, before.filledWithCustomer + 10 - 15);
+    assert.equal(await empties(), e0 + 15);
   });
 
-  test('washing returns them to clean stock, closing the loop', async () => {
-    const before = (await listPools(f.db))[0];
-    assert.ok(before.returnedDirty >= 10, 'there are dirty bottles to wash');
+  test('a run may draw more than the empties on record: allowed, and flagged', async () => {
+    const e0 = await empties();
+    const want = e0 + 5;
+    const feas = await productionFeasibility(f.db, f.fiveGalProductId, want);
+    assert.equal(feas.empties?.short, 5, 'the screen is told how many short');
+    const r = await completeProduction(f.db, f.office, { productId: f.fiveGalProductId, looseBottles: want });
+    assert.equal(r.empties?.left, -5, 'below zero until the empties are recorded or counted');
+    // back to a sensible figure for the tests that follow
+    await recordJugsBought(f.db, f.office, { quantity: 50, unitCostCents: 83341 });
+    assert.equal(await empties(), 45);
+  });
+});
 
-    const after = await washBottles(f.db, f.office, { quantity: 10 });
+describe('Bottle pool shows the same figures as Stock', () => {
+  test('each figure is read from its one home', async () => {
+    const fig = await poolFigures(f.db);
+    assert.equal(fig.jug?.id, f.jugMaterialId);
+    assert.equal(fig.empties, await empties(), 'empties = the jug raw material');
+    assert.equal(fig.full, await fullInStock(), 'full = finished goods of the 5-gallon product');
+    const holdings = await customerHoldings(f.db) as Array<{ holding: number }>;
+    assert.equal(fig.withCustomers, holdings.reduce((a, h) => a + Number(h.holding), 0),
+      'out with customers = the customer accounts');
+    assert.equal(fig.inCycle, fig.empties + fig.full + fig.withCustomers);
+  });
+});
 
-    assert.equal(after.cleanReady, before.cleanReady + 10);
-    assert.equal(after.returnedDirty, before.returnedDirty - 10);
-    assert.equal(after.inCirculation, before.inCirculation,
-      'washing does not create or destroy bottles');
+describe('New jugs', () => {
+  test('bought without a PO: into the empties, cost recorded once and never layered', async () => {
+    const e0 = await empties();
+    await recordJugsBought(f.db, f.office, { quantity: 4, unitCostCents: 83341, notes: 'new customer' });
+    assert.equal(await empties(), e0 + 4);
+    const open = await f.db.one<{ n: number }>(
+      `SELECT COUNT(*)::int n FROM material_batches WHERE raw_material_id = $1 AND status = 'Open'`, [f.jugMaterialId]);
+    assert.equal(Number(open.n), 0, 'no open FIFO layer: the jug is never charged into a run');
+    const cost = await f.db.one<{ c: number }>(
+      `SELECT total_cost_cents c FROM inventory_transactions
+       WHERE item_id = $1 AND reference_type = 'JugsBought' ORDER BY txn_date DESC LIMIT 1`, [f.jugMaterialId]);
+    assert.equal(Number(cost.c), 4 * 83341);
   });
 
-  test('bottles scrapped at washing leave the pool as a loss', async () => {
-    const before = (await listPools(f.db))[0];
-    const after = await washBottles(f.db, f.office, { quantity: 2, scrapped: 3 });
-
-    assert.equal(after.cleanReady, before.cleanReady + 2);
-    assert.equal(after.lostDamaged, before.lostDamaged + 3);
-    assert.equal(after.returnedDirty, before.returnedDirty - 5);
-    assert.equal(after.inCirculation, before.inCirculation - 3,
-      'only the scrapped bottles leave circulation');
+  test('bought on a PO: received into the empties, cost on the PO', async () => {
+    const supplier = await f.db.one<{ id: string }>(`INSERT INTO suppliers (name) VALUES ('Polypet') RETURNING id`);
+    const po = await createPurchaseOrder(f.db, f.admin, {
+      supplierId: supplier.id, lines: [{ rawMaterialId: f.jugMaterialId, quantityOrdered: 50, unitCostCents: 83341 }],
+    });
+    const line = await f.db.one<{ id: string }>(`SELECT id FROM po_line_items WHERE po_id = $1`, [po.id]);
+    const e0 = await empties();
+    await receivePurchaseOrder(f.db, f.admin, po.id, [{ poLineItemId: line.id, quantityReceived: 50 }]);
+    assert.equal(await empties(), e0 + 50);
+    const open = await f.db.one<{ n: number }>(
+      `SELECT COUNT(*)::int n FROM material_batches WHERE raw_material_id = $1 AND status = 'Open'`, [f.jugMaterialId]);
+    assert.equal(Number(open.n), 0);
   });
 
-  test('cannot wash more bottles than have been returned', async () => {
-    const pool = (await listPools(f.db))[0];
-    await assert.rejects(
-      washBottles(f.db, f.office, { quantity: pool.returnedDirty + 1 }),
-      /only \d+ bottles are waiting/,
-    );
+  test('a purchase of nothing, or with no jug ticked, is refused', async () => {
+    await assert.rejects(recordJugsBought(f.db, f.office, { quantity: 0 }), /how many new jugs/);
+  });
+});
+
+describe('Scrapped and counted', () => {
+  test('jugs scrapped at the plant need a reason and come off the empties', async () => {
+    const e0 = await empties();
+    await assert.rejects(scrapJugs(f.db, f.office, { quantity: 2, reason: ' ' }), /say why/);
+    await scrapJugs(f.db, f.office, { quantity: 2, reason: 'cracked' });
+    assert.equal(await empties(), e0 - 2);
   });
 
-  test('a wash of nothing is rejected rather than silently doing nothing', async () => {
-    await assert.rejects(
-      washBottles(f.db, f.office, { quantity: 0 }), /how many bottles/,
-    );
+  test('a count of the empties resets that one line, with no cost layers', async () => {
+    await recordCount(f.db, f.admin, {
+      itemType: 'RawMaterial', itemId: f.jugMaterialId, countedQty: 69, apply: true, notes: 'recount of the empties',
+    });
+    // The 15 empties of the 2027-01-11 round are dated after the count, so
+    // they are carried forward on top of it, like any movement after a count.
+    assert.equal(await empties(), 69 + 15);
+    assert.equal((await poolFigures(f.db)).empties, 69 + 15);
+    const open = await f.db.one<{ n: number }>(
+      `SELECT COUNT(*)::int n FROM material_batches WHERE raw_material_id = $1 AND status = 'Open'`, [f.jugMaterialId]);
+    assert.equal(Number(open.n), 0);
   });
 });
 
 describe('Losses', () => {
-  test('a bottle reported lost leaves circulation permanently', async () => {
-    const before = (await listPools(f.db))[0];
+  test('a jug reported lost comes off the customer and counts as a loss', async () => {
+    const before = await poolFigures(f.db);
     await deliver('2027-02-01', 5, 0, 4);
-    const after = (await listPools(f.db))[0];
-
-    assert.equal(after.lostDamaged, before.lostDamaged + 4);
-    assert.equal(after.inCirculation, before.inCirculation - 4);
+    const after = await poolFigures(f.db);
+    assert.equal(after.lostOnRoad, before.lostOnRoad + 4);
+    assert.equal(after.withCustomers, before.withCustomers + 5 - 4);
   });
 
   test('a loss is a business loss and is never billed to the customer', async () => {
     const result = await deliver('2027-02-08', 6, 0, 6);
     // 6 bottles at the Corporate rate of 450.00 = 2,700.00 + 15% = 3,105.00.
-    // The 6 lost bottles must add nothing on top of that.
     const invoice = await getInvoiceLedger(f.db, result.invoiceId!);
     assert.equal(invoice!.grandTotalCents, 310_500);
-
     const lines = await f.db.query(
       `SELECT id FROM invoice_line_items WHERE invoice_id = $1`, [result.invoiceId],
     );
@@ -117,32 +181,13 @@ describe('Losses', () => {
 });
 
 describe('Movement history', () => {
-  test('every movement is written to the stock ledger, not just the totals', async () => {
-    const history = await poolHistory(f.db) as Array<{
-      reference_type: string; quantity: string; notes: string;
-    }>;
-    assert.ok(history.length > 0, 'the pool has a real history');
-
+  test('the empties have a real history on the stock ledger', async () => {
+    const history = await poolHistory(f.db) as Array<{ reference_type: string; txn_day: string }>;
     const kinds = new Set(history.map((h) => h.reference_type));
-    assert.ok(kinds.has('CustomerOrder'), 'deliveries are recorded');
-    assert.ok(kinds.has('BottleReturn'), 'collections are recorded');
-    assert.ok(kinds.has('BottleWash'), 'washes are recorded');
-  });
-
-  test('every movement carries the business date the screen shows', async () => {
-    // The screen reads txn_day. Without it every row printed its date as a dash.
-    const history = await poolHistory(f.db) as Array<{ txn_day: string | null }>;
-    assert.ok(history.length > 0);
-    for (const h of history) {
-      assert.match(String(h.txn_day), /^\d{4}-\d{2}-\d{2}$/, 'a YYYY-MM-DD business date');
+    for (const k of ['ProductionBatch', 'BottleReturn', 'JugsBought', 'JugsScrapped', 'PurchaseOrder', 'Adjustment']) {
+      assert.ok(kinds.has(k), `${k} is recorded`);
     }
-  });
-
-  test('a loss entry says plainly that it is not charged to the customer', async () => {
-    const history = await poolHistory(f.db) as Array<{ notes: string }>;
-    const loss = history.find((h) => h.notes?.includes('lost or damaged'));
-    assert.ok(loss, 'losses appear in the history');
-    assert.match(loss!.notes, /not charged to the customer/);
+    for (const h of history) assert.match(String(h.txn_day), /^\d{4}-\d{2}-\d{2}$/);
   });
 });
 
@@ -168,33 +213,3 @@ describe('Who is holding bottles', () => {
   });
 });
 
-describe('Corrections', () => {
-  test('an admin can correct the counts, with a reason recorded', async () => {
-    const after = await adjustPool(f.db, f.admin, {
-      cleanReady: 500, reason: 'annual bottle count in the yard',
-    });
-    assert.equal(after.cleanReady, 500);
-
-    const log = await f.db.one<{ details: Record<string, unknown> }>(
-      `SELECT details FROM audit_log
-       WHERE entity_type = 'BottlePool' AND action = 'adjust'
-       ORDER BY ts DESC LIMIT 1`,
-    );
-    assert.equal((log.details as { reason: string }).reason, 'annual bottle count in the yard');
-  });
-
-  test('a reason is required, and office staff cannot correct the pool', async () => {
-    await assert.rejects(
-      adjustPool(f.db, f.admin, { cleanReady: 10, reason: '  ' }), /reason is required/,
-    );
-    await assert.rejects(
-      adjustPool(f.db, f.office, { cleanReady: 10, reason: 'x' }), /requires role admin/,
-    );
-  });
-
-  test('negative counts are rejected', async () => {
-    await assert.rejects(
-      adjustPool(f.db, f.admin, { cleanReady: -5, reason: 'typo' }), /cannot be negative/,
-    );
-  });
-});

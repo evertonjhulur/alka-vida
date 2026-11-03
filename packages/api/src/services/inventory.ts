@@ -10,6 +10,7 @@
 import type { Db, Queryable } from '../db/index.ts';
 import type { Actor } from './core.ts';
 import { markPickupsReceived } from './collections.ts';
+import { jugMaterial, moveEmpties } from './bottles.ts';
 import { audit, businessToday, nextNumber, requireRole, num } from './core.ts';
 import type { Cents } from '@alka/shared';
 import {
@@ -59,19 +60,19 @@ export interface PoLineInput {
   envExempt?: boolean;
 }
 
-/** The Environmental Levy rate as a fraction (0.375% unless changed). */
+/** The Environmental Levy rate as a fraction (0.6375% from 3 Nov 2026 unless changed). */
 export async function envTaxRate(t: Queryable): Promise<number> {
   const row = await t.maybeOne<{ value: string }>(
     `SELECT value FROM system_settings WHERE key = 'env_tax_rate_percent'`,
   );
-  const pct = Number(row?.value ?? 0.375);
-  return Number.isFinite(pct) && pct >= 0 ? pct / 100 : 0.00375;
+  const pct = Number(row?.value ?? 0.6375);
+  return Number.isFinite(pct) && pct >= 0 ? pct / 100 : 0.006375;
 }
 
 /**
  * Price and tax the lines of a PO.
  *
- * GCT (15%) and the Environmental Levy (0.375%) are worked out PER LINE, from
+ * GCT (15%) and the Environmental Levy (0.6375% from 3 Nov 2026) are worked out PER LINE, from
  * how the product is tagged for that supplier (Everton, 30 Sep 2026): a line
  * tagged GCT-exempt carries no GCT, one tagged Env-exempt no levy. Each is
  * worked out on the line's own amount, then summed.
@@ -302,18 +303,23 @@ export async function receivePurchaseOrder(
         [r.poLineItemId, poId],
       );
 
-      const material = await t.one<{ name: string }>(
-        `SELECT name FROM raw_materials WHERE id = $1`, [line.raw_material_id],
+      const material = await t.one<{ name: string; is_returnable_jug: boolean }>(
+        `SELECT name, is_returnable_jug FROM raw_materials WHERE id = $1`, [line.raw_material_id],
       );
 
+      // The returnable 5-gallon jug (jug cycle, 3 Nov 2026): received into
+      // the empties, its cost recorded here once and never charged into a
+      // run - so its layer is closed as soon as it is opened.
+      const jug = material.is_returnable_jug;
       const batch = await t.one<{ id: string }>(
         `INSERT INTO material_batches
            (raw_material_id, supplier_id, po_id, po_line_item_id,
-            unit_cost_cents, quantity_received, quantity_remaining, received_date)
-         VALUES ($1,$2,$3,$4,$5,$6,$6,COALESCE($7::timestamptz, now()))
+            unit_cost_cents, quantity_received, quantity_remaining, status, received_date)
+         VALUES ($1,$2,$3,$4,$5,$6::numeric,CASE WHEN $8::boolean THEN 0::numeric ELSE $6::numeric END,
+                 CASE WHEN $8::boolean THEN 'Consumed' ELSE 'Open' END, COALESCE($7::timestamptz, now()))
          RETURNING id`,
         [line.raw_material_id, po.supplier_id, poId, line.id,
-         num(line.unit_cost_cents), r.quantityReceived, at],
+         num(line.unit_cost_cents), r.quantityReceived, at, jug],
       );
       batchIds.push(batch.id);
 
@@ -488,17 +494,28 @@ export async function completeProduction(
     operator?: string; notes?: string | null;
     /** The day it was made (team feedback, point 19); blank = today. */
     productionDate?: string | null;
+    /** 5-gallon runs: jugs taken from the empties but found unusable (jug cycle, 3 Nov 2026). */
+    jugsScrapped?: number | null;
   },
-): Promise<{ batchId: string; bottlesProduced: number; materialCostCents: Cents }> {
+): Promise<{
+  batchId: string; bottlesProduced: number; materialCostCents: Cents;
+  /** 5-gallon runs: empties drawn (filled + scrapped), and what is left on record. */
+  empties?: { drawn: number; scrapped: number; left: number } | null;
+}> {
   requireRole(actor, 'admin', 'user');
   const day = input.productionDate ? String(input.productionDate).slice(0, 10) : null;
   if (day && !/^\d{4}-\d{2}-\d{2}$/.test(day)) throw new RuleViolation('the production date is not a date');
   if (day && day > businessToday()) throw new RuleViolation('a run cannot be recorded for a day still to come');
 
   return db.tx(async (t) => {
-    const product = await t.one<{ name: string; bottles_per_case: number }>(
-      `SELECT name, bottles_per_case FROM products WHERE id = $1`, [input.productId],
+    const product = await t.one<{ name: string; bottles_per_case: number; is_returnable: boolean }>(
+      `SELECT name, bottles_per_case, is_returnable FROM products WHERE id = $1`, [input.productId],
     );
+    const scrapped = Math.round(Number(input.jugsScrapped ?? 0) || 0);
+    if (scrapped < 0) throw new RuleViolation('jugs scrapped cannot be negative');
+    if (scrapped > 0 && !product.is_returnable) {
+      throw new RuleViolation('jugs scrapped only apply to a 5-gallon run');
+    }
     const bpc = num(product.bottles_per_case);
     const cases = input.cases ?? 0;
     const loose = input.looseBottles ?? 0;
@@ -510,9 +527,9 @@ export async function completeProduction(
     if (bottles <= 0) throw new RuleViolation('a production run must produce at least one bottle');
 
     const batch = await t.one<{ id: string }>(
-      `INSERT INTO production_batches (operator, status, notes, batch_date)
-       VALUES ($1,'Completed',$2, COALESCE($3::date, business_today())) RETURNING id`,
-      [input.operator ?? actor.name, input.notes ?? null, day],
+      `INSERT INTO production_batches (operator, status, notes, batch_date, jugs_scrapped)
+       VALUES ($1,'Completed',$2, COALESCE($3::date, business_today()), $4) RETURNING id`,
+      [input.operator ?? actor.name, input.notes ?? null, day, scrapped],
     );
     await t.query(
       `INSERT INTO production_batch_line_items
@@ -521,8 +538,12 @@ export async function completeProduction(
       [batch.id, input.productId, cases, loose, bottles],
     );
 
+    // The jug itself is never a recipe line: a 5-gallon run draws on the
+    // empties below instead, at no cost (jug cycle, 3 Nov 2026).
     const bom = await t.query<{ raw_material_id: string; quantity: number }>(
-      `SELECT raw_material_id, quantity FROM bom_line_items WHERE product_id = $1`,
+      `SELECT b.raw_material_id, b.quantity FROM bom_line_items b
+       JOIN raw_materials rm ON rm.id = b.raw_material_id
+       WHERE b.product_id = $1 AND NOT rm.is_returnable_jug`,
       [input.productId],
     );
 
@@ -555,10 +576,28 @@ export async function completeProduction(
       // a later stock count compares against)
     );
 
-    await audit(t, actor, 'create', 'ProductionBatch', batch.id, product.name,
-      { bottlesProduced: bottles, materialCostCents: materialCost });
+    // A 5-gallon run washes and fills jugs from the empties: one empty per
+    // jug filled, plus any found unusable. Allowed to go below zero - the
+    // plant may fill from empties a driver brought back mid-round before the
+    // round is settled - and the screen flags it.
+    let empties: { drawn: number; scrapped: number; left: number } | null = null;
+    if (product.is_returnable) {
+      const ref = `Production ${batch.id}`;
+      const moved = await moveEmpties(t, -bottles, 'ProductionBatch', ref,
+        `${bottles} jug${bottles === 1 ? '' : 's'} washed and filled: ${product.name}`, { day });
+      if (scrapped > 0) {
+        await moveEmpties(t, -scrapped, 'JugsScrapped', ref,
+          `${scrapped} jug${scrapped === 1 ? '' : 's'} scrapped on the run - business loss`, { day });
+      }
+      const jug = moved || scrapped > 0 ? await jugMaterial(t) : null;
+      if (jug) empties = { drawn: bottles + scrapped, scrapped, left: jug.onHand };
+    }
 
-    return { batchId: batch.id, bottlesProduced: bottles, materialCostCents: materialCost };
+    await audit(t, actor, 'create', 'ProductionBatch', batch.id, product.name,
+      { bottlesProduced: bottles, materialCostCents: materialCost, jugsScrapped: scrapped || undefined,
+        emptiesLeft: empties?.left });
+
+    return { batchId: batch.id, bottlesProduced: bottles, materialCostCents: materialCost, empties };
   });
 }
 
@@ -576,6 +615,8 @@ export async function productionFeasibility(
 ): Promise<{
   canProduce: boolean;
   estimatedCostCents: Cents;
+  /** 5-gallon products: the empties a run of this size draws on. Never blocks. */
+  empties: { onRecord: number; needed: number; short: number; material: string } | null;
   components: Array<{
     rawMaterialId: string; name: string; unitOfMeasure: string;
     required: number; onHand: number; shortfall: number;
@@ -588,7 +629,7 @@ export async function productionFeasibility(
   }>(
     `SELECT b.raw_material_id, b.quantity, rm.name, rm.unit_of_measure, rm.quantity_on_hand
      FROM bom_line_items b JOIN raw_materials rm ON rm.id = b.raw_material_id
-     WHERE b.product_id = $1 ORDER BY b.component_type`,
+     WHERE b.product_id = $1 AND NOT rm.is_returnable_jug ORDER BY b.component_type`,
     [productId],
   );
 
@@ -622,9 +663,17 @@ export async function productionFeasibility(
     });
   }
 
+  const p = await db.maybeOne<{ is_returnable: boolean }>(
+    `SELECT is_returnable FROM products WHERE id = $1`, [productId]);
+  const jug = p?.is_returnable ? await jugMaterial(db) : null;
+  const empties = jug
+    ? { onRecord: jug.onHand, needed: bottles, short: Math.max(bottles - jug.onHand, 0), material: jug.name }
+    : null;
+
   return {
     canProduce: bom.length > 0 && components.every((c) => c.shortfall === 0),
     estimatedCostCents,
+    empties,
     components,
   };
 }
@@ -661,7 +710,7 @@ export async function getPurchaseOrder(db: Db, poId: string) {
 
 export async function listProductionBatches(db: Db, limit = 50) {
   return db.query(
-    `SELECT pb.id, pb.batch_date::text AS batch_date, pb.operator, pb.status, pb.notes,
+    `SELECT pb.id, pb.batch_date::text AS batch_date, pb.operator, pb.status, pb.notes, pb.jugs_scrapped,
             p.name AS product_name, li.cases, li.loose_bottles, li.total_bottles,
             (SELECT COALESCE(SUM(total_cost_cents),0) FROM inventory_transactions it
              WHERE it.reference = 'Production ' || pb.id::text

@@ -2,11 +2,13 @@ import { useEffect, useState } from 'react';
 import { api } from '../lib/api';
 import { money, date, when, todayInJamaica } from '../lib/format';
 
-interface Product { id: string; name: string; bottles_per_case: number; is_bottle_charge?: boolean }
+interface Product { id: string; name: string; bottles_per_case: number; is_bottle_charge?: boolean; is_returnable?: boolean }
 
 interface Feasibility {
   canProduce: boolean;
   estimatedCostCents: number;
+  /** 5-gallon products: the empties this run draws on (jug cycle, 3 Nov 2026). Never blocks. */
+  empties: { onRecord: number; needed: number; short: number; material: string } | null;
   components: Array<{
     rawMaterialId: string; name: string; unitOfMeasure: string;
     required: number; onHand: number; shortfall: number; estimatedCostCents: number;
@@ -16,7 +18,7 @@ interface Feasibility {
 interface Run {
   id: string; batch_date: string; operator: string | null; product_name: string | null;
   cases: number; loose_bottles: number; total_bottles: number;
-  material_cost_cents: number; status: string;
+  material_cost_cents: number; status: string; jugs_scrapped?: number;
 }
 
 export default function Production() {
@@ -28,6 +30,8 @@ export default function Production() {
   const [operator, setOperator] = useState('');
   /** The day it was made (team feedback, point 19); blank = today. */
   const [madeOn, setMadeOn] = useState('');
+  /** 5-gallon runs: jugs taken from the empties but found unusable. */
+  const [scrapped, setScrapped] = useState('');
   const [check, setCheck] = useState<Feasibility | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
@@ -35,6 +39,7 @@ export default function Production() {
 
   const product = products.find((p) => p.id === productId);
   const bpc = product ? Number(product.bottles_per_case) : 0;
+  const isJug = !!product?.is_returnable;
   const bottles = bpc > 0
     ? (Number(cases) || 0) * bpc + (Number(loose) || 0)
     : (Number(loose) || 0);
@@ -58,7 +63,10 @@ export default function Production() {
     e.preventDefault();
     setBusy(true); setError(null); setMsg(null);
     try {
-      const result = await api.post<{ bottlesProduced: number; materialCostCents: number }>(
+      const result = await api.post<{
+        bottlesProduced: number; materialCostCents: number;
+        empties?: { drawn: number; scrapped: number; left: number } | null;
+      }>(
         '/api/production',
         {
           productId,
@@ -66,13 +74,17 @@ export default function Production() {
           looseBottles: Number(loose) || 0,
           operator: operator || undefined,
           productionDate: madeOn || null,
+          jugsScrapped: isJug ? (Number(scrapped) || 0) : 0,
         },
       );
+      const e = result.empties;
       setMsg(
         `Produced ${result.bottlesProduced} bottles. Materials cost ` +
-        `${money(result.materialCostCents)}, drawn from the oldest stock batches first.`,
+        `${money(result.materialCostCents)}, drawn from the oldest stock batches first.` +
+        (e ? ` ${e.drawn} empties used${e.scrapped ? ` (${e.scrapped} scrapped)` : ''}; ` +
+          `${e.left} left on record${e.left < 0 ? ' - below zero: record the empties brought back, or count them' : ''}.` : ''),
       );
-      setCases(''); setLoose(''); setMadeOn('');
+      setCases(''); setLoose(''); setMadeOn(''); setScrapped('');
       await load();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not record the production run');
@@ -84,7 +96,7 @@ export default function Production() {
       <h1>Production</h1>
       <p className="subtitle">
         A run consumes raw materials from the oldest batches first and adds the
-        finished bottles to stock.
+        finished bottles to stock. A 5-gallon run also uses one empty jug per jug filled.
       </p>
 
       {error && <div className="notice error">{error}</div>}
@@ -132,11 +144,38 @@ export default function Production() {
             </div>
           </div>
 
+          {isJug && (
+            <div className="row">
+              <div className="field">
+                <label htmlFor="js">Jugs scrapped on this run</label>
+                <input id="js" type="number" min="0" style={{ width: 150 }} value={scrapped}
+                       onChange={(e) => setScrapped(e.target.value)} />
+                <div className="muted small">Taken from the empties but found unusable: a business loss.</div>
+              </div>
+            </div>
+          )}
+
           {bottles > 0 && (
             <p className="small">
               Total output: <strong>{bottles} bottles</strong>
             </p>
           )}
+
+          {check?.empties && (() => {
+            const need = check.empties.needed + (Number(scrapped) || 0);
+            const short = Math.max(need - check.empties.onRecord, 0);
+            return (
+              <div className={`notice ${short > 0 ? 'warn' : 'info'}`}>
+                This run uses <strong>{need}</strong> empt{need === 1 ? 'y' : 'ies'} from the{' '}
+                {check.empties.material} ({check.empties.onRecord} on record).
+                {short > 0 && (
+                  <> That is {short} more than on record. It will still be saved — empties brought back
+                    mid-round are recorded when the round is settled — but if the figure stays below zero,
+                    count the empties.</>
+                )}
+              </div>
+            );
+          })()}
 
           {check && (
             <>
@@ -211,6 +250,9 @@ export default function Production() {
                   {Number(r.total_bottles)} bottles
                   {Number(r.cases) > 0 && (
                     <div className="muted small">{Number(r.cases)} cases</div>
+                  )}
+                  {Number(r.jugs_scrapped) > 0 && (
+                    <div className="muted small">{Number(r.jugs_scrapped)} jugs scrapped</div>
                   )}
                 </td>
                 <td className="num">{money(Number(r.material_cost_cents))}</td>

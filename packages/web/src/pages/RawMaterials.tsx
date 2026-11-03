@@ -13,6 +13,8 @@ interface Material {
   stock_value_cents: number; unit_cost_cents: number;
   consigned: boolean; made_to_order: boolean; notes: string | null;
   retired_at: string | null;
+  /** Its stock is the 5-gallon empties at the plant (jug cycle, 3 Nov 2026). */
+  is_returnable_jug?: boolean;
   suppliers: SupplierRef[];
 }
 
@@ -38,7 +40,7 @@ interface Category {
 interface EditDraft {
   name: string; category: string; sizeSpec: string; unitOfMeasure: string;
   reorderPoint: string; unitCost: string; consigned: boolean;
-  madeToOrder: boolean; notes: string;
+  madeToOrder: boolean; notes: string; isReturnableJug: boolean;
 }
 
 const draftOf = (m: Material): EditDraft => ({
@@ -51,6 +53,7 @@ const draftOf = (m: Material): EditDraft => ({
   consigned: m.consigned,
   madeToOrder: m.made_to_order,
   notes: m.notes ?? '',
+  isReturnableJug: !!m.is_returnable_jug,
 });
 
 export default function RawMaterials({ session }: { session: Session }) {
@@ -175,6 +178,7 @@ export default function RawMaterials({ session }: { session: Session }) {
     if (ed.unitCost !== was.unitCost) patch.unitCostCents = toCents(ed.unitCost || '0');
     if (ed.consigned !== was.consigned) patch.consigned = ed.consigned;
     if (ed.madeToOrder !== was.madeToOrder) patch.madeToOrder = ed.madeToOrder;
+    if (ed.isReturnableJug !== was.isReturnableJug) patch.isReturnableJug = ed.isReturnableJug;
     if (ed.notes !== was.notes) patch.notes = ed.notes;
 
     if (Object.keys(patch).length === 0) {
@@ -340,6 +344,11 @@ export default function RawMaterials({ session }: { session: Session }) {
             <strong>{m.name}</strong>
             {m.size_spec && <div className="muted small">{m.size_spec}</div>}
             {m.consigned && <span className="chip info">consigned</span>}
+            {m.is_returnable_jug && (
+              <span className="chip info" title="Its stock is the 5-gallon empties at the plant - see Stock › Bottle pool">
+                returnable 5-gallon jug · empties
+              </span>
+            )}
             {m.retired_at && <span className="chip muted">withdrawn from use</span>}
           </td>
           <td>{m.category}</td>
@@ -486,6 +495,13 @@ export default function RawMaterials({ session }: { session: Session }) {
                     <input type="checkbox" checked={ed.madeToOrder}
                            onChange={(e) => setEd({ ...ed, madeToOrder: e.target.checked })} />
                     {' '}Made to order
+                  </label>
+                </div>
+                <div className="field">
+                  <label title="Its stock is the empties at the plant: returns and new jugs come in, 5-gallon runs draw on it. Costed on purchase only.">
+                    <input type="checkbox" checked={ed.isReturnableJug}
+                           onChange={(e) => setEd({ ...ed, isReturnableJug: e.target.checked })} />
+                    {' '}This is the returnable 5-gallon jug
                   </label>
                 </div>
                 <div className="field">

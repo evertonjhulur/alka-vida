@@ -1,21 +1,32 @@
 /**
- * The 5-gallon returnable bottle exchange pool (Section 2, FiveGalBottlePool).
+ * The 5-gallon jug cycle, as the plant runs it (Everton, 29 Oct and 3 Nov 2026).
  *
- * A bottle is an asset that keeps circulating, so the pool is a closed loop
- * with four states:
+ *   empties at the plant ──production (wash + fill)──▶ full, in stock
+ *        ▲                                                  │ delivered / collected
+ *        └───────────── empties back ◀──── out with customers
  *
- *   clean_ready ──delivery──▶ filled_with_customer ──empties picked up──▶ returned_dirty
- *        ▲                             │                                        │
- *        └──────────── wash ───────────┼────────────────────────────────────────┘
- *                                      │
- *                                      └──reported lost or damaged──▶ lost_damaged
+ * There are no clean empty jugs: once a jug is washed it is filled. Empties
+ * are the returns plus new jugs bought (on a PO, or by hand without one), and
+ * every 5-gallon production run draws on them. A jug lost on the road or
+ * scrapped at the plant is a BUSINESS loss - never charged to the customer.
  *
- * Two rules hold throughout:
+ * Each figure has ONE home, so this screen and Stock can never disagree:
  *
- *  - A loss is a BUSINESS loss. It is never charged to the customer and never
- *    produces an invoice line.
- *  - Every movement writes an InventoryTransaction, so the pool has a real
- *    history rather than just four running totals that can silently drift.
+ *   empties at the plant = the raw material ticked "This is the returnable
+ *                          5-gallon jug" (5 Gal (19L) Bottle): its stock IS
+ *                          the empties, counted on Stock > Count like any
+ *                          other material
+ *   full, in stock       = finished goods of the returnable products
+ *   out with customers   = the customer accounts: OUR bottles on loan, from
+ *                          the opening balances of 23 Oct 2026 onwards
+ *   lost or scrapped     = losses on the customer accounts + jugs scrapped
+ *
+ * The old pool boxes (clean / with customer / awaiting wash) are retired and
+ * the wash stage is gone (migration 037).
+ *
+ * Cost (3 Nov 2026): a jug's price is recorded once, on its purchase. Empties
+ * move as a COUNT only - the jug material keeps no open FIFO layers - so
+ * filling a jug adds no jug cost to the water.
  */
 
 import type { Db, Queryable } from '../db/index.ts';
@@ -23,241 +34,214 @@ import type { Actor } from './core.ts';
 import { audit, requireRole, num, businessToday } from './core.ts';
 import { RuleViolation } from '@alka/shared';
 
-export interface Pool {
-  id: string;
-  label: string;
-  cleanReady: number;
-  filledWithCustomer: number;
-  returnedDirty: number;
-  lostDamaged: number;
-  /** Bottles still owned and circulating - excludes those written off. */
-  inCirculation: number;
+export interface JugMaterial { id: string; name: string; onHand: number }
+
+/** The raw material that IS the returnable 5-gallon jug, if one is ticked. */
+export async function jugMaterial(t: Queryable): Promise<JugMaterial | null> {
+  const r = await t.maybeOne<{ id: string; name: string; quantity_on_hand: string }>(
+    `SELECT id, name, quantity_on_hand FROM raw_materials WHERE is_returnable_jug LIMIT 1`,
+  );
+  return r ? { id: r.id, name: r.name, onHand: num(r.quantity_on_hand) } : null;
 }
 
-function toPool(r: Record<string, unknown>): Pool {
-  const clean = num(r.clean_ready);
-  const filled = num(r.filled_with_customer);
-  const dirty = num(r.returned_dirty);
+export type EmptiesMove = 'BottleReturn' | 'ProductionBatch' | 'JugsBought' | 'JugsScrapped'
+  | 'PurchaseOrder' | 'Adjustment';
+
+/**
+ * Move the empties at the plant by `quantity` (positive in, negative out) and
+ * write it to the stock ledger under the jug material, so Stock's history
+ * explains the figure. The count may go below zero (3 Nov 2026): the plant
+ * sometimes fills jugs from empties a driver brings back mid-round before
+ * the round is settled, and a negative figure is the prompt to count.
+ */
+export async function moveEmpties(
+  t: Queryable,
+  quantity: number,
+  kind: EmptiesMove,
+  reference: string,
+  notes: string,
+  opts: { day?: string | null; costCents?: number | null } = {},
+): Promise<boolean> {
+  const q = Math.round(Number(quantity) || 0);
+  if (q === 0) return false;
+  const jug = await jugMaterial(t);
+  if (!jug) return false;
+  await t.query(
+    `UPDATE raw_materials SET quantity_on_hand = quantity_on_hand + $2 WHERE id = $1`,
+    [jug.id, q],
+  );
+  const cost = opts.costCents == null ? null : Math.round(opts.costCents);
+  const d = opts.day as unknown;
+  const day = d == null || d === '' ? null
+    : d instanceof Date ? d.toISOString().slice(0, 10) : String(d).slice(0, 10);
+  await t.query(
+    `INSERT INTO inventory_transactions
+       (item_type, item_id, item_name, quantity, direction, reference, reference_type,
+        unit_cost_cents, total_cost_cents, notes, txn_date)
+     VALUES ('RawMaterial',$1,$2,$3,$4,$5,$6,$7,$8,$9,
+             COALESCE(($10::text || 'T12:00:00-05:00')::timestamptz, now()))`,
+    [jug.id, jug.name, Math.abs(q), q > 0 ? 'in' : 'out', reference, kind,
+     cost == null ? null : Math.round(cost / Math.abs(q)), cost, notes, day],
+  );
+  return true;
+}
+
+export interface PoolFigures {
+  /** The jug material, or null when none is ticked on Raw materials. */
+  jug: { id: string; name: string } | null;
+  /** Empties at the plant (= Stock's jug material). */
+  empties: number;
+  /** Full jugs in stock (= Stock's finished goods of the returnable products). */
+  full: number;
+  fullProducts: Array<{ productId: string; name: string; bottles: number }>;
+  /** Our bottles on loan, from the customer accounts. */
+  withCustomers: number;
+  /** Lost on the road (customer accounts). */
+  lostOnRoad: number;
+  /** Scrapped at the plant (production runs and by hand). */
+  scrapped: number;
+  /** Bought outright by customers - theirs now. */
+  sold: number;
+  /** Empties + full + with customers: jugs of ours in the cycle. */
+  inCycle: number;
+}
+
+/** The four figures of the cycle, each read from its one home. */
+export async function poolFigures(db: Queryable): Promise<PoolFigures> {
+  const jug = await jugMaterial(db);
+  const full = await db.query<{ id: string; name: string; bottles: number }>(
+    `SELECT p.id, p.name, COALESCE(f.quantity_on_hand, 0)::int AS bottles
+     FROM products p LEFT JOIN finished_goods_stock f ON f.product_id = p.id
+     WHERE p.is_returnable AND NOT p.is_bottle_charge
+       AND (p.active OR COALESCE(f.quantity_on_hand, 0) <> 0)
+     ORDER BY p.name`,
+  );
+  const acc = await db.one<{ holding: number; lost: number; sold: number }>(
+    `SELECT COALESCE(SUM(m.opening + m.delivered - m.returned - m.lost - m.sold), 0)::int AS holding,
+            COALESCE(SUM(m.lost), 0)::int AS lost,
+            COALESCE(SUM(m.sold), 0)::int AS sold
+     FROM (${CUSTOMER_MOVES}) m`,
+  );
+  const scrapped = jug ? await db.one<{ n: number }>(
+    `SELECT COALESCE(SUM(quantity), 0)::int AS n FROM inventory_transactions
+     WHERE item_type = 'RawMaterial' AND item_id = $1 AND reference_type = 'JugsScrapped'
+       AND direction = 'out'`, [jug.id]) : { n: 0 };
+  const empties = jug ? jug.onHand : 0;
+  const fullN = full.reduce((s, r) => s + num(r.bottles), 0);
   return {
-    id: r.id as string,
-    label: r.label as string,
-    cleanReady: clean,
-    filledWithCustomer: filled,
-    returnedDirty: dirty,
-    lostDamaged: num(r.lost_damaged),
-    inCirculation: clean + filled + dirty,
+    jug: jug ? { id: jug.id, name: jug.name } : null,
+    empties,
+    full: fullN,
+    fullProducts: full.map((r) => ({ productId: r.id, name: r.name, bottles: num(r.bottles) })),
+    withCustomers: num(acc.holding),
+    lostOnRoad: num(acc.lost),
+    scrapped: num(scrapped.n),
+    sold: num(acc.sold),
+    inCycle: empties + fullN + num(acc.holding),
   };
 }
 
-export async function listPools(db: Queryable): Promise<Pool[]> {
-  const rows = await db.query<Record<string, unknown>>(
-    `SELECT * FROM five_gal_bottle_pool ORDER BY label`,
-  );
-  return rows.map(toPool);
-}
-
-/** Record one pool movement in the stock ledger. */
-async function logMovement(
-  t: Queryable,
-  actor: Actor | null,
-  pool: { id: string; label: string },
-  quantity: number,
-  direction: 'in' | 'out' | 'transfer',
-  referenceType: 'CustomerOrder' | 'BottleReturn' | 'BottleWash' | 'Adjustment',
-  reference: string,
-  notes: string,
-): Promise<void> {
-  if (quantity === 0) return;
-  await t.query(
-    `INSERT INTO inventory_transactions
-       (item_type, item_id, item_name, quantity, direction,
-        reference, reference_type, notes)
-     VALUES ('BottlePool',$1,$2,$3,$4,$5,$6,$7)`,
-    [pool.id, pool.label, Math.abs(quantity), direction, reference, referenceType, notes],
-  );
-}
-
-async function defaultPool(t: Queryable): Promise<{ id: string; label: string } | null> {
-  return t.maybeOne<{ id: string; label: string }>(
-    `SELECT id, label FROM five_gal_bottle_pool ORDER BY label LIMIT 1`,
-  );
-}
-
 /**
- * Apply the bottle movements recorded at a delivery stop.
- *
- *   full bottles delivered : clean_ready        -> filled_with_customer
- *   empties picked up      : filled_with_customer -> returned_dirty
- *   lost or damaged        : filled_with_customer -> lost_damaged
+ * The jug movements at a delivery stop, counter sale or collection. Only the
+ * EMPTIES move a stored figure here: full jugs leave finished goods where the
+ * sale is recorded (stockmoves.takeFinishedGoods or the truck load), and
+ * what the customer holds is read from their account. A loss is a business
+ * loss and never produces an invoice line.
  */
 export async function applyDeliveryMovement(
   t: Queryable,
-  actor: Actor | null,
+  _actor: Actor | null,
   args: {
     delivered?: number;
     emptiesPickedUp?: number;
     lostDamaged?: number;
     reference: string;
     customerName?: string;
+    day?: string | null;
   },
 ): Promise<void> {
-  const out = args.delivered ?? 0;
-  const back = args.emptiesPickedUp ?? 0;
-  const lost = args.lostDamaged ?? 0;
-  if (out === 0 && back === 0 && lost === 0) return;
-
-  const pool = await defaultPool(t);
-  if (!pool) return;
-
-  await t.query(
-    `UPDATE five_gal_bottle_pool
-     SET clean_ready = GREATEST(clean_ready - $2, 0),
-         filled_with_customer = GREATEST(filled_with_customer + $2 - $3 - $4, 0),
-         returned_dirty = returned_dirty + $3,
-         lost_damaged = lost_damaged + $4
-     WHERE id = $1`,
-    [pool.id, out, back, lost],
-  );
-
-  const who = args.customerName ? ` to ${args.customerName}` : '';
-  await logMovement(t, actor, pool, out, 'out', 'CustomerOrder', args.reference,
-    `${out} full bottles delivered${who}`);
-  await logMovement(t, actor, pool, back, 'in', 'BottleReturn', args.reference,
-    `${back} empties collected${who}`);
-  // Written off as a business loss - never billed to the customer.
-  await logMovement(t, actor, pool, lost, 'out', 'Adjustment', args.reference,
-    `${lost} bottles reported lost or damaged - business loss, not charged to the customer`);
+  const back = Math.max(0, Math.round(args.emptiesPickedUp ?? 0));
+  if (back === 0) return;
+  const who = args.customerName ? ` from ${args.customerName}` : '';
+  await moveEmpties(t, back, 'BottleReturn', args.reference,
+    `${back} empt${back === 1 ? 'y' : 'ies'} back${who}`, { day: args.day ?? null });
 }
 
 /**
- * Wash returned bottles back into circulation: returned_dirty -> clean_ready.
- *
- * Bottles found unusable during washing are written off instead, which is the
- * only way a bottle leaves the pool other than a loss reported on the road.
+ * New jugs bought WITHOUT a purchase order (bottles running low, a new
+ * customer): they go straight into the empties, and their cost is recorded
+ * here once. Jugs bought on a PO arrive by receiving the PO instead.
  */
-export async function washBottles(
-  db: Db,
-  actor: Actor,
-  args: { poolId?: string; quantity: number; scrapped?: number; notes?: string },
-): Promise<Pool> {
-  requireRole(actor, 'admin', 'user');
-  const scrapped = args.scrapped ?? 0;
-  if (args.quantity < 0 || scrapped < 0) {
-    throw new RuleViolation('bottle quantities cannot be negative');
-  }
-  if (args.quantity === 0 && scrapped === 0) {
-    throw new RuleViolation('enter how many bottles were washed or scrapped');
-  }
-
-  return db.tx(async (t) => {
-    const pool = args.poolId
-      ? await t.one<{ id: string; label: string; returned_dirty: number }>(
-          `SELECT id, label, returned_dirty FROM five_gal_bottle_pool
-           WHERE id = $1 FOR UPDATE`, [args.poolId])
-      : await t.one<{ id: string; label: string; returned_dirty: number }>(
-          `SELECT id, label, returned_dirty FROM five_gal_bottle_pool
-           ORDER BY label LIMIT 1 FOR UPDATE`);
-
-    const dirty = num(pool.returned_dirty);
-    if (args.quantity + scrapped > dirty) {
-      throw new RuleViolation(
-        `only ${dirty} bottles are waiting to be washed, but ` +
-        `${args.quantity + scrapped} were entered`,
-      );
-    }
-
-    await t.query(
-      `UPDATE five_gal_bottle_pool
-       SET returned_dirty = returned_dirty - $2 - $3,
-           clean_ready = clean_ready + $2,
-           lost_damaged = lost_damaged + $3
-       WHERE id = $1`,
-      [pool.id, args.quantity, scrapped],
-    );
-
-    await logMovement(t, actor, pool, args.quantity, 'transfer', 'BottleWash',
-      `Wash by ${actor.name}`,
-      args.notes ?? `${args.quantity} bottles washed and returned to clean stock`);
-    await logMovement(t, actor, pool, scrapped, 'out', 'BottleWash',
-      `Wash by ${actor.name}`,
-      `${scrapped} bottles scrapped at washing - business loss`);
-
-    await audit(t, actor, 'adjust', 'BottlePool', pool.id, pool.label, {
-      washed: args.quantity, scrapped, notes: args.notes ?? null,
-    });
-
-    const updated = await t.one<Record<string, unknown>>(
-      `SELECT * FROM five_gal_bottle_pool WHERE id = $1`, [pool.id],
-    );
-    return toPool(updated);
-  });
-}
-
-/**
- * Correct the pool counts directly. Admin only, reason required - this is a
- * stock count for an asset that moves constantly, so who changed what and why
- * has to be recoverable.
- */
-export async function adjustPool(
+export async function recordJugsBought(
   db: Db,
   actor: Actor,
   args: {
-    poolId?: string;
-    cleanReady?: number;
-    filledWithCustomer?: number;
-    returnedDirty?: number;
-    lostDamaged?: number;
-    reason: string;
+    quantity: number; unitCostCents?: number | null; supplierId?: string | null;
+    boughtOn?: string | null; notes?: string | null;
   },
-): Promise<Pool> {
-  requireRole(actor, 'admin');
-  if (!args.reason?.trim()) {
-    throw new RuleViolation('a reason is required when correcting the bottle pool');
-  }
+): Promise<PoolFigures> {
+  requireRole(actor, 'admin', 'user');
+  const qty = Math.round(Number(args.quantity));
+  if (!Number.isFinite(qty) || qty <= 0) throw new RuleViolation('enter how many new jugs were bought');
+  const unit = args.unitCostCents == null || (args.unitCostCents as unknown) === ''
+    ? null : Math.round(Number(args.unitCostCents));
+  if (unit != null && (!Number.isFinite(unit) || unit < 0)) throw new RuleViolation('a cost cannot be negative');
+  const day = (args.boughtOn ?? '').trim() || null;
+  if (day && !/^\d{4}-\d{2}-\d{2}$/.test(day)) throw new RuleViolation('the day they were bought is not a date');
+  if (day && day > businessToday()) throw new RuleViolation('they cannot have been bought in the future');
 
   return db.tx(async (t) => {
-    const pool = args.poolId
-      ? await t.one<Record<string, unknown>>(
-          `SELECT * FROM five_gal_bottle_pool WHERE id = $1 FOR UPDATE`, [args.poolId])
-      : await t.one<Record<string, unknown>>(
-          `SELECT * FROM five_gal_bottle_pool ORDER BY label LIMIT 1 FOR UPDATE`);
-
-    const before = toPool(pool);
-    const next = {
-      cleanReady: args.cleanReady ?? before.cleanReady,
-      filledWithCustomer: args.filledWithCustomer ?? before.filledWithCustomer,
-      returnedDirty: args.returnedDirty ?? before.returnedDirty,
-      lostDamaged: args.lostDamaged ?? before.lostDamaged,
-    };
-    for (const [k, v] of Object.entries(next)) {
-      if (v < 0) throw new RuleViolation(`${k} cannot be negative`);
+    const jug = await jugMaterial(t);
+    if (!jug) {
+      throw new RuleViolation('no raw material is ticked as the returnable 5-gallon jug - tick it on Raw materials first');
     }
-
-    await t.query(
-      `UPDATE five_gal_bottle_pool
-       SET clean_ready = $2, filled_with_customer = $3,
-           returned_dirty = $4, lost_damaged = $5
-       WHERE id = $1`,
-      [before.id, next.cleanReady, next.filledWithCustomer,
-       next.returnedDirty, next.lostDamaged],
-    );
-
-    const delta = (next.cleanReady + next.filledWithCustomer + next.returnedDirty)
-      - before.inCirculation;
-    await logMovement(t, actor, before, delta, delta >= 0 ? 'in' : 'out',
-      'Adjustment', `Correction by ${actor.name}`, args.reason);
-
-    await audit(t, actor, 'adjust', 'BottlePool', before.id, before.label, {
-      reason: args.reason, before, after: next,
+    const supplier = args.supplierId
+      ? await t.maybeOne<{ name: string }>(`SELECT name FROM suppliers WHERE id = $1`, [args.supplierId])
+      : null;
+    // The cost record: a layer received and closed at once, so the jug's
+    // price is kept against the purchase but never charged into a run.
+    if (unit != null) {
+      await t.query(
+        `INSERT INTO material_batches
+           (raw_material_id, supplier_id, unit_cost_cents, quantity_received, quantity_remaining,
+            status, received_date)
+         VALUES ($1,$2,$3,$4,0,'Consumed',
+                 COALESCE(($5::text || 'T12:00:00-05:00')::timestamptz, now()))`,
+        [jug.id, args.supplierId || null, unit, qty, day],
+      );
+    }
+    const note = [
+      `${qty} new jug${qty === 1 ? '' : 's'} bought without a purchase order`,
+      supplier ? `from ${supplier.name}` : null,
+      args.notes?.trim() || null,
+    ].filter(Boolean).join(', ');
+    await moveEmpties(t, qty, 'JugsBought', `Bought by ${actor.name}`, note,
+      { day, costCents: unit == null ? null : unit * qty });
+    await audit(t, actor, 'create', 'RawMaterial', jug.id, jug.name, {
+      jugsBought: qty, unitCostCents: unit, supplierId: args.supplierId ?? null, boughtOn: day,
+      notes: args.notes ?? null,
     });
-
-    const updated = await t.one<Record<string, unknown>>(
-      `SELECT * FROM five_gal_bottle_pool WHERE id = $1`, [before.id],
-    );
-    return toPool(updated);
+    return poolFigures(t);
   });
 }
 
+/** Jugs found unusable at the plant outside a production run. */
+export async function scrapJugs(
+  db: Db, actor: Actor, args: { quantity: number; reason: string },
+): Promise<PoolFigures> {
+  requireRole(actor, 'admin', 'user');
+  const qty = Math.round(Number(args.quantity));
+  if (!Number.isFinite(qty) || qty <= 0) throw new RuleViolation('enter how many jugs were scrapped');
+  if (!args.reason?.trim()) throw new RuleViolation('say why the jugs were scrapped');
+  return db.tx(async (t) => {
+    const jug = await jugMaterial(t);
+    if (!jug) throw new RuleViolation('no raw material is ticked as the returnable 5-gallon jug');
+    await moveEmpties(t, -qty, 'JugsScrapped', `Scrapped by ${actor.name}`,
+      `${qty} jug${qty === 1 ? '' : 's'} scrapped - business loss: ${args.reason.trim()}`);
+    await audit(t, actor, 'adjust', 'RawMaterial', jug.id, jug.name, { jugsScrapped: qty, reason: args.reason.trim() });
+    return poolFigures(t);
+  });
+}
 
 /**
  * Every 5-gallon movement against a customer: bottles on delivery rounds, plus
@@ -302,16 +286,8 @@ export async function recordBottlesSold(
      VALUES ($1, COALESCE($2::date, business_today()), $3, $4, $5)`,
     [args.customerId, args.day ?? null, n, args.orderId ?? null, args.reference],
   );
-  const pool = await defaultPool(t);
-  if (!pool) return;
-  await t.query(
-    `UPDATE five_gal_bottle_pool
-     SET filled_with_customer = GREATEST(filled_with_customer - $2, 0), sold = sold + $2
-     WHERE id = $1`, [pool.id, n],
-  );
-  const c = await t.maybeOne<{ name: string }>(`SELECT name FROM customers WHERE id = $1`, [args.customerId]);
-  await logMovement(t, actor, pool, n, 'out', 'Adjustment', args.reference,
-    `${n} bottle${n === 1 ? '' : 's'} sold to ${c?.name ?? 'the customer'} - theirs now, no refund`);
+  // What the customer holds of ours is read from their account, so this
+  // row is the whole of it: no separate pool figure to move.
 }
 
 /**
@@ -343,22 +319,21 @@ export async function customerHoldings(db: Db) {
 }
 
 /**
- * The pool's own movement history.
- *
- * `txn_day` is the business date the screen shows. It was missing, so every
- * row of the movement history printed its date as a dash - the screen read
- * `txn_day`, the same name the stock ledger uses, and this query only
- * returned the raw timestamp.
+ * The empties' movement history: the jug material's lines on the stock
+ * ledger (returns, runs, jugs bought, scrapped, counts). Movements recorded
+ * under the retired pool (before 3 Nov 2026) are not shown.
  */
 export async function poolHistory(db: Db, limit = 100) {
+  const jug = await jugMaterial(db);
+  if (!jug) return [];
   return db.query(
     `SELECT id, quantity, direction, reference, reference_type, txn_date,
             business_date(txn_date)::text AS txn_day, notes
      FROM inventory_transactions
-     WHERE item_type = 'BottlePool'
+     WHERE item_type = 'RawMaterial' AND item_id = $1
      ORDER BY txn_date DESC
-     LIMIT $1`,
-    [limit],
+     LIMIT $2`,
+    [jug.id, limit],
   );
 }
 
@@ -493,26 +468,17 @@ export async function correctStopBottles(
       `SELECT name FROM customers WHERE id = $1`, [stop.customer_id],
     );
 
-    // Only the difference moves: the pool must not be charged twice if this
-    // is run again.
+    // Only the difference moves, so running it again changes nothing.
     if (delta > 0) {
       await applyDeliveryMovement(t, actor, {
         delivered: delta,
         reference: `Correction ${stopId}`,
         customerName: customer?.name,
       });
-    } else {
-      const pool = await defaultPool(t);
-      if (pool) {
-        await t.query(
-          `UPDATE five_gal_bottle_pool
-           SET clean_ready = clean_ready + $2,
-               filled_with_customer = GREATEST(filled_with_customer - $2, 0)
-           WHERE id = $1`,
-          [pool.id, Math.abs(delta)],
-        );
-      }
     }
+    // (What the customer holds is read from the stop itself, so correcting
+    // the stop is the whole correction; full jugs already left stock when
+    // the delivery was recorded.)
 
     await audit(t, actor, 'adjust', 'DeliveryStop', stopId, `bottles ${was} -> ${args.delivered}`, {
       bottlesWas: was, bottlesNow: args.delivered, poolMoved: delta,
@@ -534,29 +500,13 @@ export async function reverseDeliveryMovement(
   actor: Actor | null,
   args: { delivered?: number; emptiesPickedUp?: number; lostDamaged?: number; sold?: number; reference: string },
 ): Promise<void> {
-  const out = Math.max(0, args.delivered ?? 0);
-  const back = Math.max(0, args.emptiesPickedUp ?? 0);
-  const lost = Math.max(0, args.lostDamaged ?? 0);
-  const sold = Math.max(0, args.sold ?? 0);
-  if (out + back + lost + sold === 0) return;
-  const pool = await defaultPool(t);
-  if (!pool) return;
-  await t.query(
-    `UPDATE five_gal_bottle_pool
-     SET clean_ready = clean_ready + $2,
-         filled_with_customer = GREATEST(filled_with_customer - $2 + $3 + $4 + $5, 0),
-         returned_dirty = GREATEST(returned_dirty - $3, 0),
-         lost_damaged = GREATEST(lost_damaged - $4, 0),
-         sold = GREATEST(sold - $5, 0)
-     WHERE id = $1`,
-    [pool.id, out, back, lost, sold],
-  );
-  await logMovement(t, actor, pool, out, 'in', 'Adjustment', args.reference,
-    `${out} full bottles back: delivery recorded in error, undone`);
-  await logMovement(t, actor, pool, back, 'out', 'Adjustment', args.reference,
-    `${back} empties taken back off: delivery recorded in error, undone`);
-  await logMovement(t, actor, pool, lost + sold, 'in', 'Adjustment', args.reference,
-    `${lost + sold} bottles written back: delivery recorded in error, undone`);
+  // Full jugs go back on the shelf where the undo restores the stock
+  // (undodelivery.ts); lost and sold live on the customer account, which
+  // the undo deletes with the stop. Only the empties are a stored figure.
+  const back = Math.max(0, Math.round(args.emptiesPickedUp ?? 0));
+  if (back === 0) return;
+  await moveEmpties(t, -back, 'Adjustment', args.reference,
+    `${back} empt${back === 1 ? 'y' : 'ies'} taken back off: delivery recorded in error, undone`);
 }
 
 /* ------------------------------------------------------------------ */

@@ -10,7 +10,7 @@ import { setTakeCard } from '../lib/payments';
  *  - Whether we take card payments. Off: Card is left out of every list of
  *    ways to pay; card payments already recorded still show as recorded.
  */
-interface Money { takeCard: boolean; documentFooter: string; defaultFooter: string; backdateDays: number }
+interface Money { takeCard: boolean; documentFooter: string; defaultFooter: string; backdateDays: number; envTaxRatePercent: number }
 
 export default function MoneySettings({ session }: { session: Session }) {
   const [m, setM] = useState<Money | null>(null);
@@ -25,7 +25,7 @@ export default function MoneySettings({ session }: { session: Session }) {
     e.preventDefault();
     setBusy(true); setErr(null); setNote(null);
     try {
-      const out = await api.put<Money>('/api/settings/money', { takeCard: m!.takeCard, documentFooter: m!.documentFooter, backdateDays: m!.backdateDays });
+      const out = await api.put<Money>('/api/settings/money', { takeCard: m!.takeCard, documentFooter: m!.documentFooter, backdateDays: m!.backdateDays, envTaxRatePercent: m!.envTaxRatePercent });
       setM(out);
       setTakeCard(out.takeCard);
       setNote('Saved. The next invoice or statement printed carries it.');
@@ -78,6 +78,19 @@ export default function MoneySettings({ session }: { session: Session }) {
             <div className="muted small">
               On New sale, "It already went out on an earlier day" dates the invoice and any payment that day.
               Office staff can go this many days back; administrators can choose any day.
+            </div>
+          </div>
+        </fieldset>
+        <fieldset className="form-block" disabled={!isAdmin}>
+          <legend>Environmental Levy on purchases</legend>
+          <div className="field">
+            <label htmlFor="env">Rate charged on purchase order lines not ticked "Env exempt" (%)</label>
+            <input id="env" type="number" min={0} max={5} step="0.0001" style={{ width: 110 }}
+                   value={m.envTaxRatePercent} onChange={(e) => setM({ ...m, envTaxRatePercent: Number(e.target.value) })} />
+            <div className="muted small">
+              From 1 Oct 2026 the levy is 0.85%; a local manufacturer charges it on 75% of its price, so its
+              invoice shows 0.6375%. Tick "Env exempt" on the Suppliers tab for any item whose invoice carries
+              no levy. Purchase orders already raised keep the levy they were priced with.
             </div>
           </div>
         </fieldset>

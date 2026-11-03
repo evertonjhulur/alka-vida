@@ -9,6 +9,7 @@
 import type { Db } from '../db/index.ts';
 import type { Cents } from '@alka/shared';
 import { num } from './core.ts';
+import { poolFigures } from './bottles.ts';
 import { pendingDeliveries } from './cycles.ts';
 
 export interface DiscountTotals {
@@ -104,13 +105,9 @@ export async function reorderReport(db: Db) {
   );
 }
 
-/** The 5-gallon pool, including bottles written off as a business loss. */
+/** The 5-gallon jug cycle, each figure from its one home (jug cycle, 3 Nov 2026). */
 export async function bottlePoolReport(db: Db) {
-  return db.query(
-    `SELECT label, clean_ready, filled_with_customer, returned_dirty, lost_damaged,
-            (clean_ready + filled_with_customer + returned_dirty) AS in_circulation
-     FROM five_gal_bottle_pool ORDER BY label`,
-  );
+  return poolFigures(db);
 }
 
 /* ------------------------------------------------------------------ */

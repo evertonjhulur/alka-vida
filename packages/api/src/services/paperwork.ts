@@ -249,7 +249,14 @@ async function drawPo(doc: PDFKit.PDFDocument, db: Db, poId: string) {
   };
   row('Subtotal', num(po.subtotal_cents));
   row('GCT 15% (items marked G)', num(po.gct_cents));
-  row(`Environmental Levy ${envRate?.value ?? '0.375'}% (items marked E)`, num(po.env_tax_cents));
+  // The rate this PO was priced at, so an older PO still prints its own
+  // rate after the setting changes (0.375% -> 0.6375%, 3 Nov 2026).
+  const envBase = po.lines.filter((l) => !l.env_exempt)
+    .reduce((a, l) => a + num(l.line_total_cents), 0);
+  const pricedAt = envBase > 0 && num(po.env_tax_cents) > 0
+    ? String(Math.round((num(po.env_tax_cents) / envBase) * 100 * 10000) / 10000)
+    : (envRate?.value ?? '0.6375');
+  row(`Environmental Levy ${pricedAt}% (items marked E)`, num(po.env_tax_cents));
   row('Total', num(po.grand_total_cents), true);
   if (po.notes) doc.moveDown(1).fontSize(9).fillColor('#333').text(String(po.notes), 50, doc.y, { width: 510 });
   doc.moveDown(2).fontSize(8).fillColor('#777')

@@ -78,8 +78,6 @@ describe('Start fresh', () => {
     assert.equal(await count('price_tiers'), 4, 'tier names stay');
     assert.deepEqual((await f.db.query<{ name: string }>(`SELECT name FROM brands`)).map((b) => b.name), ['Alka Vida']);
     assert.equal((await f.db.one<{ value: string }>(`SELECT value FROM system_settings WHERE key = 'whatsapp_number'`)).value, '8765286112');
-    const pool = await f.db.one<{ clean_ready: number }>(`SELECT clean_ready FROM five_gal_bottle_pool LIMIT 1`);
-    assert.equal(Number(pool.clean_ready), 0);
   });
 });
 

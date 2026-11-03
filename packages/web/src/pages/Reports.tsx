@@ -98,7 +98,8 @@ interface Aging {
 const AGES: Array<[Age | 'all', string]> = [['current', 'Not yet due'], ['d30', '1–30 days'], ['d60', '31–60 days'], ['d90', 'Over 60 days'], ['all', 'All owed']];
 const ageCents = (t: { currentCents: number; d30Cents: number; d60Cents: number; d90Cents: number; openCents: number }, a: Age | 'all') =>
   a === 'all' ? t.openCents : a === 'current' ? t.currentCents : a === 'd30' ? t.d30Cents : a === 'd60' ? t.d60Cents : t.d90Cents;
-interface Pool { label: string; clean_ready: number; filled_with_customer: number; returned_dirty: number; lost_damaged: number; in_circulation: number }
+/** The jug cycle (3 Nov 2026): each figure read from its one home. */
+interface Pool { empties: number; full: number; withCustomers: number; lostOnRoad: number; scrapped: number }
 interface DiscountTotals { totalDiscountCents: number; discountedDocumentCount: number; averageDiscountPercent: number }
 interface PerClient { customerId: string; customerName: string; totalDiscountCents: number; discountedDocumentCount: number; averageDiscountPercent: number }
 interface MaterialCost {
@@ -184,7 +185,7 @@ export default function Reports() {
   const [margin, setMargin] = useState<Margin[] | null>(null);
   const [rounds, setRounds] = useState<Rounds | null>(null);
   const [owed, setOwed] = useState<Aging | null>(null);
-  const [pool, setPool] = useState<Pool[] | null>(null);
+  const [pool, setPool] = useState<Pool | null>(null);
   const [disc, setDisc] = useState<{ totals: DiscountTotals; byClient: PerClient[] } | null>(null);
   const [materials, setMaterials] = useState<MaterialCost[] | null>(null);
   const [txns, setTxns] = useState<Txn[] | null>(null);
@@ -209,7 +210,7 @@ export default function Reports() {
   }, [tab, qs, eodDay]);
   useEffect(() => {
     if (tab === 'owed' && !owed) api.get<Aging>('/api/reports/aging').then(setOwed).catch((e) => setError(e.message));
-    if (tab === 'bottles' && !pool) api.get<Pool[]>('/api/reports/bottle-pool').then(setPool).catch(() => setPool([]));
+    if (tab === 'bottles' && !pool) api.get<Pool>('/api/reports/bottle-pool').then(setPool).catch(() => setPool(null));
     if (tab === 'materials' && !materials) api.get<MaterialCost[]>('/api/reports/material-costs').then(setMaterials).catch((e) => setError(e.message));
   }, [tab]);
 
@@ -329,8 +330,8 @@ export default function Reports() {
     } else if (tab === 'bottles' && sales) {
       downloadCsv(file('bottles'), [
         ['Returnable bottles', range.label], ['Out full', sales.bottles.out], ['Back empty', sales.bottles.back], ['Lost or damaged', sales.bottles.lost],
-        [], ['Pool', 'Clean and ready', 'With customers', 'Back dirty', 'Lost or damaged'],
-        ...(pool ?? []).map((p) => [p.label, p.clean_ready, p.filled_with_customer, p.returned_dirty, p.lost_damaged]),
+        [], ['Empties at the plant', 'Full, in stock', 'Out with customers', 'Lost on the road', 'Scrapped'],
+        ...(pool ? [[pool.empties, pool.full, pool.withCustomers, pool.lostOnRoad, pool.scrapped]] : []),
       ]);
     } else if (tab === 'discounts' && disc) {
       downloadCsv(file('discounts'), [
@@ -900,14 +901,14 @@ export default function Reports() {
       )}
       <div className="panel">
         <h2 className="side-h">Where the bottles are now</h2>
-        {(pool ?? []).map((p) => (
-          <div key={p.label} className="row" style={{ gap: 28, marginBottom: 8 }}>
-            <div><div className="muted small">Clean and ready</div><strong>{p.clean_ready}</strong></div>
-            <div><div className="muted small">With customers</div><strong>{p.filled_with_customer}</strong></div>
-            <div><div className="muted small">Back, to wash</div><strong>{p.returned_dirty}</strong></div>
-            <div><div className="muted small">Lost or damaged</div><strong>{p.lost_damaged}</strong></div>
+        {pool && (
+          <div className="row" style={{ gap: 28, marginBottom: 8 }}>
+            <div><div className="muted small">Empties at the plant</div><strong>{pool.empties}</strong></div>
+            <div><div className="muted small">Full, in stock</div><strong>{pool.full}</strong></div>
+            <div><div className="muted small">Out with customers</div><strong>{pool.withCustomers}</strong></div>
+            <div><div className="muted small">Lost or scrapped</div><strong>{pool.lostOnRoad + pool.scrapped}</strong></div>
           </div>
-        ))}
+        )}
         <Link to="/bottle-pool">Open the bottle pool</Link>
       </div>
     </>

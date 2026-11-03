@@ -482,8 +482,8 @@ describe('Purchasing', () => {
     });
     assert.equal(po.subtotalCents, 1_100_000);
     assert.equal(po.gctCents, 150_000);
-    assert.equal(po.envTaxCents, 3_750);
-    assert.equal(po.grandTotalCents, 1_253_750);
+    assert.equal(po.envTaxCents, 6_375, '0.6375% of 10,000.00 (3 Nov 2026)');
+    assert.equal(po.grandTotalCents, 1_256_375);
     const pdf = await renderPoPdf(f.db, po.id);
     assert.ok(pdf.pdf.length > 1000);
 
@@ -495,7 +495,7 @@ describe('Purchasing', () => {
     await updatePurchaseOrder(f.db, f.office, po.id, { lines: [{ rawMaterialId: taxed, quantityOrdered: 500 }] });
     const edited = await getPurchaseOrder(f.db, po.id) as { grand_total_cents: number; lines: unknown[] };
     assert.equal(edited.lines.length, 1);
-    assert.equal(Number(edited.grand_total_cents), 500_000 + 75_000 + 1_875);
+    assert.equal(Number(edited.grand_total_cents), 500_000 + 75_000 + 3_188); // levy 0.6375% of 5,000.00 = 31.875, rounded
 
     await deletePurchaseOrder(f.db, f.office, po.id);
     // 7 Oct 2026 (point 14): deleting with nothing received keeps the PO,

@@ -12,7 +12,7 @@ import { setupFixture, stopsOf, type Fixture } from './helpers.ts';
 import { createOrder } from '../src/services/orders.ts';
 import { markStop } from '../src/services/delivery.ts';
 import {
-  listPools, customerHoldings, bottleAccount, uploadOpeningBottles, setOpeningBottles,
+  poolFigures, customerHoldings, bottleAccount, uploadOpeningBottles, setOpeningBottles,
 } from '../src/services/bottles.ts';
 import { describeAuditRows } from '../src/services/auditwords.ts';
 
@@ -66,8 +66,8 @@ describe('Uploading opening balances', () => {
     await assert.rejects(uploadOpeningBottles(f.db, f.admin, { asOf: '2999-01-01', rows: [{ customer: 'Portmore Pharmacy', quantity: 1 }] }), /future/);
   });
 
-  test('brought in: counts towards what they hold of ours, not as a delivery, and the pool is not moved', async () => {
-    const poolBefore = (await listPools(f.db))[0];
+  test('brought in: counts towards what they hold of ours, not as a delivery; empties and full stock do not move', async () => {
+    const poolBefore = await poolFigures(f.db);
     const r = await uploadOpeningBottles(f.db, f.admin, {
       asOf: AS_OF, dryRun: false,
       rows: [{ customer: 'Blue Mountain Offices', quantity: 5 }, { customer: 'Portmore Pharmacy', quantity: 2 }],
@@ -78,8 +78,10 @@ describe('Uploading opening balances', () => {
     assert.equal(Number(h?.opening), 5);
     assert.equal(Number(h?.delivered), 0, 'the opening balance is not a delivery');
     assert.equal(Number(h?.holding), 5);
-    const poolAfter = (await listPools(f.db))[0];
-    assert.deepEqual(poolAfter, poolBefore, 'the pool totals do not move');
+    const poolAfter = await poolFigures(f.db);
+    assert.equal(poolAfter.empties, poolBefore.empties, 'the empties do not move');
+    assert.equal(poolAfter.full, poolBefore.full, 'full stock does not move');
+    assert.equal(poolAfter.withCustomers, poolBefore.withCustomers + 7, 'out with customers lines up with the accounts');
   });
 
   test('later deliveries add to it, empties come off it', async () => {

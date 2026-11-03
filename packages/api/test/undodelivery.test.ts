@@ -31,8 +31,9 @@ const holding = async (id: string) => Number((await f.db.one<{ n: number }>(
      SELECT s.bottles_delivered_full - s.bottles_empties_picked_up AS d FROM delivery_stops s
      WHERE s.customer_id = $1 AND s.stop_outcome = 'Delivered'
      UNION ALL SELECT delivered - returned - sold FROM customer_bottle_moves WHERE customer_id = $1) x`, [id])).n);
-const pool = async () => f.db.one<{ clean_ready: number; filled_with_customer: number }>(
-  `SELECT clean_ready, filled_with_customer FROM five_gal_bottle_pool LIMIT 1`);
+// Jug cycle (3 Nov 2026): the empties at the plant are the jug material.
+const pool = async () => f.db.one<{ empties: number }>(
+  `SELECT quantity_on_hand AS empties FROM raw_materials WHERE id = $1`, [f.jugMaterialId]);
 
 describe('Undo a delivery recorded in error', () => {
   test('a delivery on an open round: invoice cancelled, cash removed, stock and bottles back, off the round', async () => {
@@ -67,7 +68,7 @@ describe('Undo a delivery recorded in error', () => {
     assert.equal(await stock(f.fiveGalProductId), stockBefore, 'stock back');
     assert.equal(await holding(f.customerId), 0, 'bottles off the customer');
     const p = await pool();
-    assert.equal(Number(p.clean_ready), Number(poolBefore.clean_ready));
+    assert.equal(Number(p.empties), Number(poolBefore.empties), 'the empty taken back comes off the empties again');
     assert.equal((await f.db.query(`SELECT 1 FROM delivery_stops WHERE order_id = $1`, [o.id])).length, 0, 'off the round');
     await assert.rejects(undoDelivery(f.db, f.admin, o.id, { reason: 'again' }), /already cancelled/);
     // The round can still be settled cleanly.

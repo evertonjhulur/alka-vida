@@ -205,7 +205,7 @@ async function recordStopOutcome(
       }
       await recomputeDelivered(t, stop.order_id);
 
-      await moveBottlePool(t, actor, input.stopId, stop.customer_id, input);
+      await moveBottlePool(t, actor, input.stopId, stop.customer_id, input, sheet.delivery_date);
       const ref = await t.one<{ order_number: string }>(
         `SELECT order_number FROM customer_orders WHERE id = $1`, [stop.order_id],
       );
@@ -473,10 +473,8 @@ async function invoiceFromDelivery(
 }
 
 /**
- * Move the 5-gallon bottle pool for this stop.
- *
- * Delegates to the pool service so the movement is recorded in the stock
- * ledger as well as in the running totals. A loss is a BUSINESS LOSS and
+ * The 5-gallon jugs at this stop: the empties the driver took back go into
+ * the empties at the plant (jug cycle, 3 Nov 2026), dated the round's day. A loss is a BUSINESS LOSS and
  * never produces an invoice line.
  */
 async function moveBottlePool(
@@ -485,6 +483,7 @@ async function moveBottlePool(
   stopId: string,
   customerId: string,
   input: MarkStopInput,
+  day?: string | null,
 ): Promise<void> {
   const customer = await t.maybeOne<{ name: string }>(
     `SELECT name FROM customers WHERE id = $1`, [customerId],
@@ -495,6 +494,7 @@ async function moveBottlePool(
     lostDamaged: input.bottlesLostDamaged,
     reference: `Stop ${stopId}`,
     customerName: customer?.name,
+    day: day ?? null,
   });
 }
 

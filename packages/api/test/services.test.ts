@@ -6,6 +6,7 @@
 
 import { test, describe, before, after } from 'node:test';
 import assert from 'node:assert/strict';
+import { poolFigures } from '../src/services/bottles.ts';
 import { setupFixture, stopsOf, type Fixture } from './helpers.ts';
 import { createOrder } from '../src/services/orders.ts';
 import { markStop, addOrderToSheet } from '../src/services/delivery.ts';
@@ -510,11 +511,8 @@ describe('Discount approval queue (Section 5)', () => {
 });
 
 describe('5-gallon bottle pool', () => {
-  test('a delivery, a pickup of empties and a loss move the right counters', async () => {
-    const before = await f.db.one<{
-      clean_ready: number; filled_with_customer: number;
-      returned_dirty: number; lost_damaged: number;
-    }>(`SELECT * FROM five_gal_bottle_pool LIMIT 1`);
+  test('a delivery, a pickup of empties and a loss move the right figures', async () => {
+    const before = await poolFigures(f.db);
 
     const order = await createOrder(f.db, f.office, {
       customerId: f.customerId, deliveryMode: 'Delivery',
@@ -527,14 +525,11 @@ describe('5-gallon bottle pool', () => {
       bottlesDeliveredFull: 10, bottlesEmptiesPickedUp: 6, bottlesLostDamaged: 2,
     });
 
-    const after = await f.db.one<{
-      clean_ready: number; filled_with_customer: number;
-      returned_dirty: number; lost_damaged: number;
-    }>(`SELECT * FROM five_gal_bottle_pool LIMIT 1`);
-
-    assert.equal(Number(after.clean_ready), Number(before.clean_ready) - 10);
-    assert.equal(Number(after.returned_dirty), Number(before.returned_dirty) + 6);
-    assert.equal(Number(after.lost_damaged), Number(before.lost_damaged) + 2);
+    const after = await poolFigures(f.db);
+    assert.equal(after.full, before.full - 10, 'full jugs off stock');
+    assert.equal(after.empties, before.empties + 6, 'empties into the empties at the plant');
+    assert.equal(after.lostOnRoad, before.lostOnRoad + 2);
+    assert.equal(after.withCustomers, before.withCustomers + 10 - 6 - 2);
   });
 
   test('a lost bottle is a business loss and is never charged to the customer', async () => {

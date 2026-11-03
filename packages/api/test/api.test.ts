@@ -347,7 +347,7 @@ describe('Customer portal is view-only, own records only', () => {
       method: 'POST', url: '/api/orders', headers: auth('portal'),
       payload: {
         customerId: other.id, // attempts to order on someone else's account
-        deliveryMode: 'Delivery', requestedDeliveryDate: '2026-11-02',
+        deliveryMode: 'Delivery', requestedDeliveryDate: '2027-11-02',
         lines: [{ productId: product.id, looseBottles: 3 }],
       },
     });
@@ -450,5 +450,28 @@ describe('A full delivery cycle over HTTP', () => {
     assert.equal(invoice.status, 'Paid');
     assert.equal(invoice.amountPaidCents, 1_104_000);
     assert.equal(invoice.gct_cents, 144_000, 'GCT on the post-discount subtotal');
+  });
+});
+
+describe('Environmental Levy setting (3 Nov 2026)', () => {
+  test('0.6375% to start; an admin can change it, office staff cannot', async () => {
+    const m = (await app.inject({ method: 'GET', url: '/api/settings/money', headers: auth('office') })).json();
+    assert.equal(m.envTaxRatePercent, 0.6375);
+    const denied = await app.inject({ method: 'PUT', url: '/api/settings/money', headers: auth('office'), payload: { envTaxRatePercent: 1 } });
+    assert.notEqual(denied.statusCode, 200);
+    const bad = await app.inject({ method: 'PUT', url: '/api/settings/money', headers: auth('admin'), payload: { envTaxRatePercent: 9 } });
+    assert.equal(bad.statusCode, 400);
+    const ok = (await app.inject({ method: 'PUT', url: '/api/settings/money', headers: auth('admin'), payload: { envTaxRatePercent: 0.85 } })).json();
+    assert.equal(ok.envTaxRatePercent, 0.85);
+    await app.inject({ method: 'PUT', url: '/api/settings/money', headers: auth('admin'), payload: { envTaxRatePercent: 0.6375 } });
+  });
+
+  test('the bottle pool screen gets its four figures; jugs bought by hand go into the empties', async () => {
+    const before = (await app.inject({ method: 'GET', url: '/api/bottle-pool', headers: auth('office') })).json();
+    assert.ok('empties' in before.figures && 'full' in before.figures && 'withCustomers' in before.figures);
+    if (!before.figures.jug) return; // the seed has no jug ticked
+    const r = await app.inject({ method: 'POST', url: '/api/bottle-pool/jugs-bought', headers: auth('office'), payload: { quantity: 3 } });
+    assert.equal(r.statusCode, 200);
+    assert.equal(r.json().empties, before.figures.empties + 3);
   });
 });

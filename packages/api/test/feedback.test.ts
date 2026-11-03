@@ -167,7 +167,8 @@ describe('Stock and bottles (points 12, 18, 19, 20)', () => {
 
   test('5-gallon bottles sold at the counter count against the customer and the pool', async () => {
     const before_ = await bottleAccount(f.db, f.otherCustomerId);
-    const pool0 = await f.db.one<{ clean: number }>(`SELECT clean_ready AS clean FROM five_gal_bottle_pool LIMIT 1`);
+    const full0 = await f.db.maybeOne<{ q: number }>(`SELECT quantity_on_hand q FROM finished_goods_stock WHERE product_id = $1`, [f.fiveGalProductId]);
+    const e0 = await f.db.one<{ q: number }>(`SELECT quantity_on_hand q FROM raw_materials WHERE id = $1`, [f.jugMaterialId]);
     await counterSale(f.db, f.office, {
       customerId: f.otherCustomerId, lines: [{ productId: f.fiveGalProductId, looseBottles: 3 }],
       emptiesReturned: 1,
@@ -179,8 +180,11 @@ describe('Stock and bottles (points 12, 18, 19, 20)', () => {
     // 2 more of ours on loan.)
     assert.equal(after_.closingHolding - before_.closingHolding, 0);
     assert.equal(after_.sold - before_.sold, 2);
-    const pool1 = await f.db.one<{ clean: number }>(`SELECT clean_ready AS clean FROM five_gal_bottle_pool LIMIT 1`);
-    assert.equal(Number(pool0.clean) - Number(pool1.clean), 3);
+    // Jug cycle (3 Nov 2026): 3 full off stock, the 1 empty into the empties.
+    const full1 = await f.db.maybeOne<{ q: number }>(`SELECT quantity_on_hand q FROM finished_goods_stock WHERE product_id = $1`, [f.fiveGalProductId]);
+    assert.equal(Number(full0?.q ?? 0) - Number(full1?.q ?? 0), 3);
+    const e1 = await f.db.one<{ q: number }>(`SELECT quantity_on_hand q FROM raw_materials WHERE id = $1`, [f.jugMaterialId]);
+    assert.equal(Number(e1.q) - Number(e0.q), 1);
     const holdings = await customerHoldings(f.db) as Array<{ customer_id: string; sold: number }>;
     assert.ok(holdings.some((h) => h.customer_id === f.otherCustomerId && h.sold >= 2));
   });
