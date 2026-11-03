@@ -750,7 +750,7 @@ export default function NewOrder() {
                 <div className="ns-chosen">
                   <Link to={`/customers/${customer.id}`} className="ns-name">{customer.name}</Link>
                   <span className="chip neutral">{history?.customer.price_tier_name ?? customer.price_tier ?? 'List prices'}</span>
-                  <span className="chip neutral">{onCycle ? `Invoiced ${customer.invoice_cycle!.toLowerCase()}` : customer.payment_terms ?? 'No terms set'}</span>
+                  <span className="chip neutral">{onCycle ? `Invoiced ${customer.invoice_cycle!.toLowerCase()}${customer.payment_terms ? `, ${customer.payment_terms}` : ''}` : customer.payment_terms ?? 'No terms set'}</span>
                   {customer.gct_exempt && <span className="chip neutral">GCT exempt</span>}
                   {balanceChip}
                   <button type="button" className="as-link" onClick={changeWho}>Change</button>

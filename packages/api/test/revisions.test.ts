@@ -14,7 +14,8 @@ import {
   createCustomer, updateCustomer, saveAddress, setSpecialPrice, customerPrices, billingAddress,
 } from '../src/services/customers.ts';
 import { createZone, listZones } from '../src/services/zones.ts';
-import { raiseCycleInvoices, pendingDeliveries, invoiceCustomerNow } from '../src/services/cycles.ts';
+import { raiseCycleInvoices, pendingDeliveries, invoiceCustomerNow, invoiceOrderNow } from '../src/services/cycles.ts';
+import { listOrders } from '../src/services/orders.ts';
 import {
   createQuotation, convertQuotation, quoteByToken, answerByToken, updateQuotation, deleteQuotation,
 } from '../src/services/quotations.ts';
@@ -239,7 +240,7 @@ describe('Credit notes', () => {
 
 describe('Weekly and monthly invoicing', () => {
   let cust: string;
-  test('deliveries for a monthly customer raise no invoice; the month closes into ONE, due on receipt', async () => {
+  test('deliveries for a monthly customer raise no invoice; the month closes into ONE, due by their terms', async () => {
     cust = (await createCustomer(f.db, f.office, {
       name: 'Monthly Ltd', phone: '1', email: 'ap@monthly.jm', deliveryZone: 'Kingston',
       invoiceCycle: 'Monthly', paymentTerms: 'Net 30',
@@ -289,9 +290,10 @@ describe('Weekly and monthly invoicing', () => {
 
     const inv = await f.db.one<Record<string, unknown>>(
       `SELECT invoice_date::text AS d, due_date::text AS due, cycle FROM invoices WHERE id = $1`, [mine[0].invoiceId]);
-    // Dated the month's last day (27 Oct 2026), due the day it was raised.
+    // Dated the month's last day (27 Oct 2026); due by their Net 30 terms
+    // from that date (3 Nov 2026).
     assert.equal(inv.d, '2026-08-31', 'dated the last day of the month');
-    assert.equal(inv.due, '2026-09-01', 'due on receipt: the day it was raised');
+    assert.equal(inv.due, '2026-09-30', 'Net 30 from the invoice date');
     assert.equal(inv.cycle, 'Monthly');
     const lines = await f.db.query<{ delivered_on: string; reference: string }>(
       `SELECT delivered_on::text AS delivered_on, reference FROM invoice_line_items
@@ -315,6 +317,53 @@ describe('Weekly and monthly invoicing', () => {
     const r = await invoiceCustomerNow(f.db, f.office, cust);
     assert.equal(r.deliveries, 1);
     await assert.rejects(invoiceCustomerNow(f.db, f.office, cust), /nothing is waiting/);
+  });
+
+  test('one delivered order can be invoiced now on its own; the rest keeps waiting (3 Nov 2026)', async () => {
+    const ids: string[] = [];
+    for (const d of ['2026-09-15', '2026-09-16']) {
+      const o = await createOrder(f.db, f.office, {
+        customerId: cust, deliveryMode: 'Delivery', requestedDeliveryDate: d,
+        lines: [{ productId: f.fiveGalProductId, looseBottles: 3 }],
+      });
+      await markStop(f.db, f.driver, { stopId: (await stopFor(o.id)).id, outcome: 'Delivered' });
+      ids.push(o.id);
+    }
+    const listed = await listOrders(f.db, { customerId: cust }) as Array<{ id: string; awaiting_invoice: boolean }>;
+    assert.equal(listed.find((o) => o.id === ids[0])?.awaiting_invoice, true, 'the Orders list knows it is not invoiced');
+
+    const r = await invoiceOrderNow(f.db, f.office, ids[0]);
+    assert.equal(r.deliveries, 1);
+    const inv = await f.db.one<{ d: string; due: string }>(
+      `SELECT invoice_date::text AS d, due_date::text AS due FROM invoices WHERE id = $1`, [r.invoiceId]);
+    const today = (await f.db.one<{ t: string }>(`SELECT business_today()::text AS t`)).t;
+    assert.equal(inv.d, today, 'dated the day it is raised');
+    const plus30 = new Date(Date.parse(today + 'T00:00:00Z') + 30 * 86_400_000).toISOString().slice(0, 10);
+    assert.equal(inv.due, plus30, 'due by their Net 30');
+
+    const after = await listOrders(f.db, { customerId: cust }) as Array<{ id: string; awaiting_invoice: boolean }>;
+    assert.equal(after.find((o) => o.id === ids[0])?.awaiting_invoice, false);
+    assert.equal(after.find((o) => o.id === ids[1])?.awaiting_invoice, true, 'the other order still waits');
+    assert.deepEqual((await pendingDeliveries(f.db, cust)).map((p) => p.orderId), [ids[1]]);
+    await assert.rejects(invoiceOrderNow(f.db, f.office, ids[0]), /nothing delivered that is waiting/);
+    await invoiceCustomerNow(f.db, f.office, cust);
+  });
+
+  test('a monthly customer on "Due on receipt" is due the day the invoice is raised', async () => {
+    const c = (await createCustomer(f.db, f.office, {
+      name: 'Receipt Monthly Ltd', phone: '1', email: 'ap@receipt.jm', deliveryZone: 'Kingston',
+      invoiceCycle: 'Monthly', paymentTerms: 'Due on receipt',
+    })).id;
+    const o = await createOrder(f.db, f.office, {
+      customerId: c, deliveryMode: 'Delivery', requestedDeliveryDate: '2026-08-12',
+      lines: [{ productId: f.fiveGalProductId, looseBottles: 1 }],
+    });
+    await markStop(f.db, f.driver, { stopId: (await stopFor(o.id)).id, outcome: 'Delivered' });
+    const r = (await raiseCycleInvoices(f.db, f.admin, { today: '2026-09-01', customerId: c }))[0];
+    const inv = await f.db.one<{ d: string; due: string }>(
+      `SELECT invoice_date::text AS d, due_date::text AS due FROM invoices WHERE id = $1`, [r.invoiceId]);
+    assert.equal(inv.d, '2026-08-31');
+    assert.equal(inv.due, '2026-09-01');
   });
 });
 

@@ -24,8 +24,8 @@ export const PARISHES = [
 const PAYMENT_TERMS = ['Due on receipt', 'Cash on delivery', 'Net 15', 'Net 30', 'Net 60', 'Net 90'] as const;
 const CYCLES: Array<[string, string, string]> = [
   ['PerDelivery', 'Every delivery', 'An invoice each time goods go out.'],
-  ['Weekly', 'Once a week', 'One invoice each Monday for the week before (Mon–Sun), listing every delivery. Due on receipt.'],
-  ['Monthly', 'Once a month', 'One invoice on the 1st for the month before, listing every delivery. Due on receipt.'],
+  ['Weekly', 'Once a week', 'One invoice each Monday for the week before (Mon–Sun), listing every delivery. Due by their payment terms.'],
+  ['Monthly', 'Once a month', 'One invoice on the 1st for the month before, listing every delivery. Due by their payment terms.'],
 ];
 
 interface Zone { id: string; name: string; retired_at: string | null; run_days: string[] | null }
@@ -103,7 +103,9 @@ export function formToPayload(f: CustomerFormValues) {
     deliveryDays: f.deliveryDays,
     routeSequence: Number(f.routeSequence) || 0,
     priceTierId: f.priceTierId || null,
-    paymentTerms: f.invoiceCycle !== 'PerDelivery' ? 'Due on receipt' : (f.paymentTerms || null),
+    // Weekly / monthly customers keep the terms the office sets (3 Nov 2026);
+    // left blank, their period invoice is due on receipt.
+    paymentTerms: f.paymentTerms || (f.invoiceCycle !== 'PerDelivery' ? 'Due on receipt' : null),
     invoiceCycle: f.invoiceCycle,
     gctExempt: f.gctExempt, gctExemptRef: f.gctExempt ? (f.gctExemptRef || null) : null,
     autoStatements: f.autoStatements, autoReminders: f.autoReminders,
@@ -336,10 +338,9 @@ export default function CustomerForm({
               </div>
               <div className="field">
                 <label htmlFor="cf-terms">Payment terms</label>
-                <select id="cf-terms" value={f.invoiceCycle !== 'PerDelivery' ? 'Due on receipt' : f.paymentTerms}
-                        disabled={f.invoiceCycle !== 'PerDelivery'}
+                <select id="cf-terms" value={f.paymentTerms || (f.invoiceCycle !== 'PerDelivery' ? 'Due on receipt' : '')}
                         onChange={(e) => set('paymentTerms', e.target.value)}>
-                  <option value="">Not set</option>
+                  {f.invoiceCycle === 'PerDelivery' && <option value="">Not set</option>}
                   {PAYMENT_TERMS.map((t) => <option key={t} value={t}>{t}</option>)}
                   {f.paymentTerms && !PAYMENT_TERMS.includes(f.paymentTerms as typeof PAYMENT_TERMS[number])
                     && <option value={f.paymentTerms}>{f.paymentTerms}</option>}

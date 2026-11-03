@@ -2634,3 +2634,32 @@ GOOGLE_MAPS_API_KEY is set (with "Geocoding API" enabled on it):
   chip on customer Map pins, and the driver's stop asks for "Save this
   location" (which replaces it, source 'Driver').
 - Migration 036_approximate_pins.sql. Tests: api/test/approxpins.test.ts (7).
+
+## Weekly/monthly customers: payment terms and invoicing one order now (3 Nov 2026)
+His report: could not raise Alka Lyfe Distribution ALD's invoice, and could
+not set payment terms once a customer was weekly or monthly.
+- Found: ALD is WEEKLY; SO-001090 (delivered 2 Nov) was correctly waiting for
+  its weekly invoice, but the Orders list said "invoiced" for every delivered
+  order, and the only "Invoice now" was on the customer page's Transactions
+  tab. Raised for him in the live app: ALD terms set to Net 30, INV-016557
+  (J$223,666.11) dated 3 Nov, due date edited to 3 Dec (audit-logged).
+- Terms ruling (3 Nov 2026): weekly/monthly customers can have any payment
+  terms; the period invoice is due by those terms counted FROM THE INVOICE
+  DATE (October's invoice dated 31 Oct, Net 30 -> due 30 Nov), never before
+  the day it is raised; blank / "Due on receipt" = due the day it is raised.
+  Supersedes "weekly/monthly are always due on receipt".
+- Customer form: Payment terms no longer locked for weekly/monthly (defaults
+  to Due on receipt). Customer upload keeps the file's terms for weekly /
+  monthly rows (blank -> Due on receipt). Invoice screen and PDF show the
+  terms and due date for a cycle invoice with day terms.
+- Orders list: a delivered order on no invoice yet (orders.awaiting_invoice,
+  same test as cycles.pendingDeliveries) shows "on weekly invoice · Invoice
+  now" instead of "invoiced". POST /api/orders/:id/invoice-now
+  (cycles.invoiceOrderNow) bills just that order today, by the customer's
+  terms; the rest keeps waiting. Customer page's waiting box gets an
+  "Invoice this order" link per row.
+- Tests: revisions.test.ts (terms due date, one-order invoice, due on
+  receipt), brands.test.ts upload terms updated. The portal test "a portal
+  order is forced onto the logged-in customer" was already failing before
+  this change.
+- Note: ALD has no delivery zone or delivery days set.

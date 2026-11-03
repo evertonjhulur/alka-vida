@@ -361,12 +361,15 @@ async function drawInvoice(doc: PDFKit.PDFDocument, db: Db, invoiceId: string) {
     [isCN ? 'Date' : 'Invoice date', dmy(ledger.invoiceDate)],
   ];
   if (!isCN) {
-    const onReceipt = !!ledger.cycle || (!!ledger.dueDate && dmy(ledger.dueDate) === dmy(ledger.invoiceDate));
+    // A weekly / monthly invoice is due on receipt unless the customer has
+    // day terms (3 Nov 2026: e.g. Net 30 from the invoice date).
+    const onReceipt = (!!ledger.cycle && /^\D*$/.test(customer.payment_terms ?? ''))
+      || (!!ledger.dueDate && dmy(ledger.dueDate) === dmy(ledger.invoiceDate));
     details.push(['Due date', onReceipt ? 'On receipt' : ledger.dueDate ? dmy(ledger.dueDate) : '-']);
   }
   const details2: Array<[string, string]> = [];
-  if (!isCN && customer.payment_terms && !ledger.cycle) details2.push(['Terms', customer.payment_terms]);
-  if (!isCN && ledger.cycle) details2.push(['Terms', 'Due on receipt']);
+  if (!isCN && customer.payment_terms) details2.push(['Terms', customer.payment_terms]);
+  else if (!isCN && ledger.cycle) details2.push(['Terms', 'Due on receipt']);
   if (!ledger.cycle && orders.length > 0) details2.push(['Order no.', orders.map((o) => o.order_number).join(', ')]);
   if (pos.length > 0) details2.push(['Your PO', pos.join(', ')]);
   if (ledger.period_from && ledger.period_to) details2.push(['Deliveries', `${dmy(ledger.period_from)} to ${dmy(ledger.period_to)}`]);

@@ -38,6 +38,8 @@ interface Order {
   /** Pending until the round's load is logged or it is marked ready (15 Oct 2026). */
   ready_at?: string | null; load_logged_at?: string | null; seen_at?: string | null;
   fulfilled_on?: string | null;
+  /** Delivered but on no invoice yet: a weekly / monthly customer's order (3 Nov 2026). */
+  awaiting_invoice?: boolean; customer_invoice_cycle?: string | null;
   /** For emailing the confirmation by hand (27 Oct 2026). */
   customer_email?: string | null;
   confirmation_email?: { at: string; to: string | null; ok: boolean; detail: string | null } | null;
@@ -314,6 +316,17 @@ export default function Orders() {
         : `${o.order_number} collected. It goes on their weekly/monthly invoice; `
           + `anything paid now is on their account.`;
     }, 'Could not record the collection');
+  }
+
+  /**
+   * A weekly / monthly customer's delivered order, billed today on its own
+   * invoice instead of waiting for the period to close (3 Nov 2026).
+   */
+  async function invoiceNow(o: Order) {
+    await act(async () => {
+      const r = await api.post<{ invoiceNumber: string; totalCents: number }>(`/api/orders/${o.id}/invoice-now`, {});
+      return `${o.order_number} invoiced: ${r.invoiceNumber}, ${money(r.totalCents)}.`;
+    }, 'Could not invoice the order');
   }
 
   /**
@@ -940,7 +953,14 @@ export default function Orders() {
                         </>
                       ) : (
                         <span className="muted small">
-                          {o.status === 'Cancelled' ? '' : 'invoiced'}
+                          {o.status === 'Cancelled' ? '' : o.awaiting_invoice ? (
+                            <>
+                              {`on ${(o.customer_invoice_cycle ?? '').toLowerCase() || 'period'} invoice · `}
+                              <button type="button" className="as-link small" disabled={busy}
+                                      title="Raise its invoice today instead of waiting for the period to close"
+                                      onClick={() => invoiceNow(o)}>Invoice now</button>
+                            </>
+                          ) : 'invoiced'}
                           {isAdmin && (o.status === 'Delivered' || o.status === 'Partially Delivered') && (
                             <>{' · '}<button type="button" className="as-link small" disabled={busy}
                                              title="Delivered in error: cancel it and put everything back"

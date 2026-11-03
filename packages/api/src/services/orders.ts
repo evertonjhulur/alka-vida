@@ -982,7 +982,17 @@ export async function listOrders(
    */
   return db.query(
     `SELECT o.*, c.name AS customer_name, c.delivery_zone AS customer_zone, c.email AS customer_email,
+            c.invoice_cycle AS customer_invoice_cycle,
             business_today() AS today,
+            -- Delivered or collected but on no invoice yet: a weekly / monthly
+            -- customer's order waiting for its period invoice (3 Nov 2026).
+            -- The same test cycles.pendingDeliveries uses.
+            (EXISTS (SELECT 1 FROM delivery_stops sx
+                      WHERE sx.order_id = o.id AND sx.stop_outcome = 'Delivered' AND sx.invoice_id IS NULL)
+             OR ((o.delivery_mode = 'Pickup' OR o.recorded_late)
+                 AND o.status IN ('Delivered','Partially Delivered')
+                 AND NOT EXISTS (SELECT 1 FROM invoice_orders io WHERE io.order_id = o.id))
+            ) AS awaiting_invoice,
             -- The last order-confirmation email, sent or tried (27 Oct 2026).
             (SELECT json_build_object('at', ae.created_at, 'to', ae.sent_to, 'ok', ae.ok, 'detail', ae.detail)
                FROM auto_emails ae WHERE ae.kind = 'OrderPlaced' AND ae.period_key = o.order_number

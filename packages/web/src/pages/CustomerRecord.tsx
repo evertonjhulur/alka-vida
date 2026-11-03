@@ -28,7 +28,7 @@ interface Address {
   city: string | null; parish: string | null; is_billing: boolean; is_delivery: boolean; active?: boolean;
 }
 interface Waiting {
-  kind: string; orderNumber: string; date: string; subtotalCents: number;
+  kind: string; orderNumber: string; date: string; subtotalCents: number; orderId: string;
 }
 interface Order {
   id: string; order_number: string; order_date: string; status: string;
@@ -517,6 +517,13 @@ export default function CustomerRecord({ session }: { session: Session }) {
     setMsg(`Invoice ${r.invoiceNumber} raised for ${r.deliveries} ${r.deliveries === 1 ? 'delivery' : 'deliveries'}, ${money(r.totalCents)}.`);
   }, 'Could not raise the invoice');
 
+  // Just one delivered order, today, on its own invoice (3 Nov 2026).
+  const invoiceOneNow = (w: Waiting) => run(async () => {
+    const r = await api.post<{ invoiceNumber: string; totalCents: number }>(
+      `/api/orders/${w.orderId}/invoice-now`, {});
+    setMsg(`Invoice ${r.invoiceNumber} raised for ${w.orderNumber}, ${money(r.totalCents)}.`);
+  }, 'Could not raise the invoice');
+
   const pauseSchedule = (s: Schedule) => run(async () => {
     await api.post(`/api/recurring/${s.id}/pause`, { paused: !s.paused });
     setMsg(s.paused ? 'Standing order resumed.' : 'Standing order paused. It raises nothing until resumed.');
@@ -658,9 +665,9 @@ export default function CustomerRecord({ session }: { session: Session }) {
                     : c.account_type ? `${c.account_type} account` : null,
                   c.delivery_zone ? `${c.delivery_zone} zone` : 'No delivery zone',
                   c.price_tier_name ? `${c.price_tier_name} price list` : 'List price',
-                  c.invoice_cycle === 'Weekly' ? 'Invoiced weekly'
-                    : c.invoice_cycle === 'Monthly' ? 'Invoiced monthly'
-                      : c.payment_terms ? `Terms: ${c.payment_terms}` : null,
+                  c.invoice_cycle === 'Weekly' || c.invoice_cycle === 'Monthly'
+                    ? `Invoiced ${c.invoice_cycle.toLowerCase()}${c.payment_terms ? `, ${c.payment_terms}` : ''}`
+                    : c.payment_terms ? `Terms: ${c.payment_terms}` : null,
                   c.delivery_days?.length ? `Delivers ${c.delivery_days.join(', ')}` : null,
                   c.gct_exempt ? 'GCT exempt' : null,
                   c.active ? null : 'Closed account',
@@ -1132,20 +1139,25 @@ export default function CustomerRecord({ session }: { session: Session }) {
               ) : (
                 <>
                   <table>
-                    <thead><tr><th>Date</th><th>Order</th><th>How</th><th className="num">Before GCT</th></tr></thead>
+                    <thead><tr><th>Date</th><th>Order</th><th>How</th><th className="num">Before GCT</th><th /></tr></thead>
                     <tbody>
                       {waiting.map((w) => (
                         <tr key={`${w.orderNumber}-${w.date}`}>
                           <td>{when(w.date)}</td><td>{w.orderNumber}</td><td className="small">{w.kind}</td>
                           <td className="num">{money(w.subtotalCents)}</td>
+                          <td className="num">
+                            {/* Several deliveries can come from one order; one click bills them all. */}
+                            <button type="button" className="as-link small" disabled={busy}
+                                    onClick={() => invoiceOneNow(w)}>Invoice this order</button>
+                          </td>
                         </tr>
                       ))}
                     </tbody>
                   </table>
                   <p className="muted small" style={{ marginBottom: 0 }}>
-                    Raised automatically when the {c.invoice_cycle === 'Weekly' ? 'week' : 'month'} closes, due on
-                    receipt. Money they pay in the meantime is applied to it straight away.
-                    "Invoice now" raises it today for everything listed.
+                    Raised automatically when the {c.invoice_cycle === 'Weekly' ? 'week' : 'month'} closes, due
+                    {c.payment_terms && /\d/.test(c.payment_terms) ? ` ${c.payment_terms} from the invoice date` : ' on receipt'}. Money they pay in the meantime is applied to it straight away.
+                    "Invoice now" raises it today for everything listed; "Invoice this order" bills just that order today.
                   </p>
                 </>
               )}

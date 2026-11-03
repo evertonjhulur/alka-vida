@@ -688,8 +688,9 @@ export default function InvoiceDetail({ session }: { session: Session }) {
             </div>
             <div>
               <div className="paper-label">Terms</div>
-              {i.cycle ? `${i.cycle} invoice, due on receipt` : (i.customer?.payment_terms ?? 'Not set')}
-              {!i.cycle && i.due_date && <div>Due {day(i.due_date)} {date(i.due_date).slice(0, 4)}</div>}
+              {i.cycle ? `${i.cycle} invoice, ${i.customer?.payment_terms && /\d/.test(i.customer.payment_terms) ? i.customer.payment_terms : 'due on receipt'}`
+                : (i.customer?.payment_terms ?? 'Not set')}
+              {(!i.cycle || /\d/.test(i.customer?.payment_terms ?? '')) && i.due_date && <div>Due {day(i.due_date)} {date(i.due_date).slice(0, 4)}</div>}
               {i.period_from && i.period_to && (
                 <div>Deliveries {day(i.period_from)} to {day(i.period_to)}</div>
               )}

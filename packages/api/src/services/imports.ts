@@ -343,11 +343,12 @@ async function plan(t: Queryable, input: ImportInput) {
     else if (cycle === 'monthly' || cycle === 'endofmonth' || cycle === 'eom') r.invoiceCycle = 'Monthly';
     else r.errors.push(`Invoice Cycle "${clean(src.invoiceCycle)}" should be Every delivery, Weekly or Monthly`);
     const terms = clean(src.paymentTerms);
-    if (r.invoiceCycle !== 'PerDelivery') r.paymentTerms = 'Due on receipt';
-    else if (terms) {
+    if (terms) {
       r.paymentTerms = STANDARD_TERMS.find((x) => x.toLowerCase() === terms.toLowerCase()) ?? terms;
       if (!STANDARD_TERMS.includes(r.paymentTerms)) r.warnings.push(`payment terms "${terms}" are not one of the usual ones - kept as written`);
     }
+    // Weekly / monthly keep the terms given (3 Nov 2026); blank = due on receipt.
+    if (r.invoiceCycle !== 'PerDelivery' && !r.paymentTerms) r.paymentTerms = 'Due on receipt';
 
     // Opening balance
     const bal = Math.round(Number(src.openingBalanceCents ?? 0)) || 0;

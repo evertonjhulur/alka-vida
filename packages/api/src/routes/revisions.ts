@@ -146,6 +146,8 @@ export function registerRevisionRoutes(
     cycles.raiseCycleInvoices(db, actorOf(req as Req), { mode: 'closed' }));
   app.post('/api/customers/:id/invoice-now', office, async (req) =>
     cycles.invoiceCustomerNow(db, actorOf(req as Req), id(req as Req)));
+  app.post('/api/orders/:id/invoice-now', office, async (req) =>
+    cycles.invoiceOrderNow(db, actorOf(req as Req), id(req as Req)));
 
   /* ---------------- receipts ---------------- */
 

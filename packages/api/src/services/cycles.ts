@@ -10,8 +10,10 @@
  * When the week (Monday to Sunday) or the calendar month has closed, one real
  * invoice is raised for everything delivered in it, each line carrying the
  * date and order it came from. It is dated the last day of the week or month
- * (27 Oct 2026) and due ON RECEIPT (Everton's ruling): due the day it is
- * raised. Money the driver collected in the
+ * (27 Oct 2026). It falls due by the customer's payment terms counted from
+ * the invoice date (3 Nov 2026: Net 30 on October's invoice = due 30 Nov);
+ * with no terms, or "Due on receipt", it is due the day it is raised, never
+ * before. Money the driver collected in the
  * meantime is already on the account as an unattached payment, and is
  * applied to the new invoice straight away.
  *
@@ -22,7 +24,7 @@
 
 import type { Db, Queryable } from '../db/index.ts';
 import type { Actor } from './core.ts';
-import { audit, businessToday, num, requireRole } from './core.ts';
+import { audit, businessToday, num, requireRole, termsDays } from './core.ts';
 import { RuleViolation, cyclePeriod, computeLineTotal } from '@alka/shared';
 import { createInvoice, type InvoiceLineInput } from './invoices.ts';
 import { applyToInvoice } from './payments.ts';
@@ -163,13 +165,18 @@ export interface RaisedCycleInvoice {
 export async function raiseCycleInvoices(
   db: Db,
   actor: Actor,
-  opts: { today?: string; customerId?: string | null; mode?: 'closed' | 'now' } = {},
+  opts: {
+    today?: string; customerId?: string | null; mode?: 'closed' | 'now';
+    /** 'now' on ONE delivered order only (3 Nov 2026), not all that is waiting. */
+    orderId?: string | null;
+  } = {},
 ): Promise<RaisedCycleInvoice[]> {
   requireRole(actor, 'admin', 'user');
   const today = opts.today ?? await businessToday(db);
   const mode = opts.mode ?? 'closed';
 
-  const pending = await pendingDeliveries(db, opts.customerId ?? null);
+  const pending = (await pendingDeliveries(db, opts.customerId ?? null))
+    .filter((p) => !opts.orderId || p.orderId === opts.orderId);
   // Group: customer -> period key -> deliveries.
   const groups = new Map<string, { from: string; to: string; items: PendingDelivery[]; cycle: string | null }>();
   for (const p of pending) {
@@ -211,8 +218,8 @@ export async function raiseCycleInvoices(
           ? Math.min(it.discountFixedCents, it.subtotalCents)
           : Math.round(it.subtotalCents * (it.discountPercent / 100));
       }
-      const cust = await t.one<{ gct_exempt: boolean }>(
-        `SELECT gct_exempt FROM customers WHERE id = $1`, [first.customerId],
+      const cust = await t.one<{ gct_exempt: boolean; payment_terms: string | null }>(
+        `SELECT gct_exempt, payment_terms FROM customers WHERE id = $1`, [first.customerId],
       );
       const gctExempt = cust.gct_exempt || items.every((it) => it.gctExempt);
 
@@ -220,6 +227,11 @@ export async function raiseCycleInvoices(
       // ahead of the day it was booked for.
       const latest = items.reduce((m, it) => (it.date > m ? it.date : m), today);
       const periodTo = mode === 'now' || g.cycle === null ? latest : g.to;
+      const invoiceDate = mode === 'closed' && g.cycle !== null ? g.to : today;
+      // Due by their terms from the invoice date, but never before the day it
+      // is raised, so it is not overdue the moment it exists.
+      const byTerms = addDays(invoiceDate, termsDays(cust.payment_terms));
+      const dueDate = byTerms > today ? byTerms : today;
       const invoice = await createInvoice(t, actor, {
         customerId: first.customerId,
         orderIds: [...new Set(items.map((it) => it.orderId))],
@@ -228,11 +240,9 @@ export async function raiseCycleInvoices(
         gctExempt,
         // A closed week or month is dated its LAST day (Everton, 27 Oct 2026),
         // so October's deliveries are October's sales even though the invoice
-        // is raised on 1 November. Still due on receipt: due the day it is
-        // raised, so it is never overdue the moment it exists. "Invoice now"
-        // is dated the day it is raised.
-        invoiceDate: mode === 'closed' && g.cycle !== null ? g.to : today,
-        dueDate: today,
+        // is raised on 1 November. "Invoice now" is dated the day it is raised.
+        invoiceDate,
+        dueDate,
         cycle: (g.cycle as 'Weekly' | 'Monthly' | null) ?? null,
         periodFrom: g.from,
         periodTo,
@@ -276,6 +286,11 @@ export async function raiseCycleInvoices(
   return raised;
 }
 
+function addDays(day: string, n: number): string {
+  const [y, m, d] = day.slice(0, 10).split('-').map(Number);
+  return new Date(Date.UTC(y, m - 1, d + n)).toISOString().slice(0, 10);
+}
+
 /** For the Invoices screen: who has deliveries waiting, and how much. */
 export async function waitingSummary(db: Db) {
   const pending = await pendingDeliveries(db);
@@ -310,5 +325,22 @@ export async function waitingSummary(db: Db) {
 export async function invoiceCustomerNow(db: Db, actor: Actor, customerId: string) {
   const r = await raiseCycleInvoices(db, actor, { customerId, mode: 'now' });
   if (r.length === 0) throw new RuleViolation('nothing is waiting to be invoiced for this customer');
+  return r[0];
+}
+
+/**
+ * "Invoice now" on one delivered order (3 Nov 2026): a weekly / monthly
+ * customer's order is billed today on its own invoice, by their terms,
+ * instead of waiting for the period to close. The rest still waits.
+ */
+export async function invoiceOrderNow(db: Db, actor: Actor, orderId: string) {
+  const o = await db.maybeOne<{ customer_id: string; order_number: string }>(
+    `SELECT customer_id, order_number FROM customer_orders WHERE id = $1`, [orderId],
+  );
+  if (!o) throw new RuleViolation('that order no longer exists');
+  const r = await raiseCycleInvoices(db, actor, { customerId: o.customer_id, orderId, mode: 'now' });
+  if (r.length === 0) {
+    throw new RuleViolation(`${o.order_number} has nothing delivered that is waiting to be invoiced`);
+  }
   return r[0];
 }

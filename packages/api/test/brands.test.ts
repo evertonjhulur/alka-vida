@@ -237,7 +237,8 @@ describe('Customer upload: terms, invoice cycle and notes (16 Oct 2026)', () => 
       { name: 'Bad Cycle', customerType: 'Individual', invoiceCycle: 'Fortnightly' },
     ], dryRun: true });
     assert.equal(r.rows[0].invoiceCycle, 'Monthly');
-    assert.equal(r.rows[0].paymentTerms, 'Due on receipt');
+    // Weekly / monthly keep the terms given (3 Nov 2026); blank = due on receipt.
+    assert.equal(r.rows[0].paymentTerms, 'Net 30');
     assert.equal(r.rows[1].paymentTerms, 'Net 15');
     assert.equal(r.rows[2].action, 'error');
 

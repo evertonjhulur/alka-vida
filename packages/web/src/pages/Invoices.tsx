@@ -156,7 +156,7 @@ export default function Invoices() {
             </tbody>
           </table>
           <p className="muted small" style={{ marginBottom: 0 }}>
-            Raised automatically once the week (Mon–Sun) or month closes, due on receipt. A customer's
+            Raised automatically once the week (Mon–Sun) or month closes, due by the customer's payment terms. A customer's
             own page has "Invoice now" to bill everything early.
           </p>
         </div>
