@@ -2716,3 +2716,31 @@ the current code (migrations 037 and 038).
 - Tests: bottles.test.ts rewritten for the cycle; api.test.ts adds the levy
   setting and bottle-pool route; fixture has a jug material (100 empties).
   The portal-order test's date moved to 2027 (it had gone into the past).
+
+## Sell jugs from the customer's Bottles tab (3 Nov 2026)
+His question: why wasn't the bottle charge added to Andrew Warwar's order
+(2 Nov, no empties back)? Because the app never adds it by itself: it goes on
+only when the order has "empties expected", when the driver ticks "Add the
+bottle charge" (offered only when the order had empties expected), or on a
+counter / earlier-day sale with empties handed in. Otherwise the jugs show as
+ours on loan. "5-gallon bottle" is hidden from New sale's product list, so
+there was no way to sell jugs on their own. He chose a dedicated action.
+- Customer page > Bottles: **Sell jugs** (office and admin; not the walk-in
+  record). How many (shows how many of ours they hold), day (blank = today;
+  office staff `backdate_days` back, admins any day - New sale's rule), price
+  from their "5-gallon bottle" price + GCT, paying now (method, amount,
+  reference) or on account, note.
+- POST /api/customers/:id/sell-jugs -> jugsales.sellJugs, built on
+  counter.recordPastDelivery (how = Collected, line = the bottle product):
+  invoice dated the day, or the weekly/monthly invoice; payment as usual;
+  goodsLeave records the jugs as sold (theirs). A sale for today is not
+  flagged recorded_late. customer_bottle_moves rows are dated the sale day.
+- Jugs up to what they hold of ours change hands (off "out with customers").
+  Any beyond come from the plant: off the empties (ledger type 'Sale', the
+  order number as reference) and a `delivered` move on the customer, so what
+  they hold of ours never goes below zero. Undo (undodelivery) puts those
+  back into the empties (jugsales.returnJugsHandedOver).
+- Tests: jugsales.test.ts (4).
+- Not done (offered, not yet agreed): offer the bottle charge on the driver's
+  screen / paper sheet whenever fewer empties come back than full jugs go out,
+  even when "empties expected" was left blank.

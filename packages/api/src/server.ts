@@ -37,6 +37,7 @@ import * as quotations from './services/quotations.ts';
 import * as catalog from './services/catalog.ts';
 import * as audits from './services/audits.ts';
 import * as bottles from './services/bottles.ts';
+import * as jugsales from './services/jugsales.ts';
 import * as pricing from './services/pricing.ts';
 import * as recurring from './services/recurring.ts';
 import * as users from './services/users.ts';
@@ -1669,6 +1670,10 @@ export async function buildServer(db: Db) {
     async (req) => bottles.uploadOpeningBottles(db, actorOf(req), req.body as never));
 
   /** One customer's opening balance of our bottles, from their Bottles tab. */
+  /** Sell jugs outright from the customer's Bottles tab (3 Nov 2026). */
+  app.post('/api/customers/:id/sell-jugs', { preHandler: allow('admin', 'user') },
+    async (req) => jugsales.sellJugs(db, actorOf(req), (req.params as { id: string }).id, req.body as never));
+
   app.put('/api/customers/:id/opening-bottles', { preHandler: allow('admin') },
     async (req) => bottles.setOpeningBottles(db, actorOf(req), (req.params as { id: string }).id, req.body as never));
 

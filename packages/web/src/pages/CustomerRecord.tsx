@@ -21,6 +21,7 @@ interface Customer {
   account_type: string | null; price_tier_name: string | null;
   portal_email: string | null; notes: string | null; active: boolean;
   invoice_cycle?: string | null; gct_exempt?: boolean; delivery_days?: string[] | null;
+  is_walk_in?: boolean;
   whatsapp?: string | null;
 }
 interface Address {
@@ -1322,6 +1323,14 @@ export default function CustomerRecord({ session }: { session: Session }) {
               </p>
             </>
           ) : <p className="muted" style={{ margin: 0 }}>They have never had any of our 5-gallon bottles.</p>}
+          {(session.role === 'admin' || session.role === 'user') && !c.is_walk_in && (
+            <SellJugsForm customerId={c.id} held={Math.max(0, bottles?.closingHolding ?? 0)} isAdmin={session.role === 'admin'}
+                          takeCard={takeCard} gctExempt={!!c.gct_exempt}
+                          onSaved={() => {
+                            api.get<Bottles>(`/api/customers/${customerId}/bottles`).then(setBottles).catch(() => undefined);
+                            load().catch(() => undefined);
+                          }} />
+          )}
           {session.role === 'admin' && (
             <OpeningBottlesForm customerId={c.id} current={bottles?.openingEntered ?? null}
                                 onSaved={() => api.get<Bottles>(`/api/customers/${customerId}/bottles`).then(setBottles).catch(() => undefined)} />
@@ -1363,6 +1372,143 @@ export default function CustomerRecord({ session }: { session: Session }) {
         </>
       )}
     </>
+  );
+}
+
+/*
+ * Sell jugs outright (Everton, 3 Nov 2026). Billed like any sale: an invoice
+ * dated the day (or the weekly / monthly invoice), money now or on account.
+ * Jugs of ours they already hold change hands; any beyond that are handed
+ * over from the plant's empties. Theirs from then on.
+ */
+function SellJugsForm({ customerId, held, isAdmin, takeCard, gctExempt, onSaved }: {
+  customerId: string; held: number; isAdmin: boolean; takeCard: boolean; gctExempt: boolean; onSaved: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [qty, setQty] = useState('');
+  const [soldOn, setSoldOn] = useState('');
+  const [paying, setPaying] = useState(false);
+  const [method, setMethod] = useState<string>('Cash');
+  const [amount, setAmount] = useState('');
+  const [reference, setReference] = useState('');
+  const [note, setNote] = useState('');
+  const [price, setPrice] = useState<{ name: string; cents: number } | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState<string | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!open || price) return;
+    api.get<Array<{ name: string; is_bottle_charge?: boolean; price_per_bottle_cents: number }>>(`/api/customers/${customerId}/prices`)
+      .then((ps) => {
+        const b = ps.find((p) => p.is_bottle_charge);
+        setPrice(b ? { name: b.name, cents: Number(b.price_per_bottle_cents) } : null);
+      }).catch(() => setPrice(null));
+  }, [open, price, customerId]);
+
+  const n = Math.max(0, Math.round(Number(qty) || 0));
+  const fromHolding = Math.min(n, held);
+  const fromPlant = n - fromHolding;
+  const subtotal = price ? n * price.cents : 0;
+  const total = subtotal + (gctExempt ? 0 : Math.round(subtotal * 0.15));
+
+  function start() {
+    setQty(held > 0 ? String(held) : '1'); setSoldOn(''); setPaying(false); setMethod('Cash');
+    setAmount(''); setReference(''); setNote(''); setErr(null); setMsg(null); setOpen(true);
+  }
+
+  async function save(e: React.FormEvent) {
+    e.preventDefault();
+    setBusy(true); setErr(null);
+    try {
+      const r = await api.post<{
+        invoiceNumber: string | null; onCycle: boolean; quantity: number; fromHolding: number; fromPlant: number;
+        grandTotalCents: number; amountPaidCents: number;
+      }>(`/api/customers/${customerId}/sell-jugs`, {
+        quantity: n, soldOn: soldOn || null,
+        amountPaidCents: paying ? toCents(amount || '0') : 0,
+        method, reference: reference || null, notes: note || null,
+      });
+      setMsg(`${r.quantity} jug${r.quantity === 1 ? '' : 's'} sold - theirs now`
+        + (r.fromPlant > 0 ? ` (${r.fromHolding} they had of ours, ${r.fromPlant} from the plant's empties)` : '')
+        + (r.onCycle ? '. It goes on their weekly / monthly invoice.' : `. Invoice ${r.invoiceNumber}, ${money(r.grandTotalCents)}`)
+        + (r.amountPaidCents > 0 ? `, ${money(r.amountPaidCents)} paid.` : r.onCycle ? '' : '.'));
+      setOpen(false); onSaved();
+    } catch (e2) {
+      setErr(e2 instanceof Error ? e2.message : 'Could not record the sale');
+    } finally { setBusy(false); }
+  }
+
+  return (
+    <div style={{ marginTop: 12 }}>
+      {msg && <div className="notice ok">{msg}</div>}
+      {!open ? (
+        <button type="button" className="secondary" onClick={start}>Sell jugs</button>
+      ) : (
+        <form onSubmit={save} className="panel" style={{ marginTop: 8 }}>
+          <h3 style={{ marginTop: 0 }}>Sell jugs</h3>
+          <p className="muted small" style={{ marginTop: 0 }}>
+            The jugs are theirs from then on. They hold <strong>{held}</strong> of ours now.
+          </p>
+          <div className="row">
+            <div className="field">
+              <label htmlFor="sj-q">Jugs they are buying</label>
+              <input id="sj-q" type="number" min="1" step="1" style={{ width: 110 }} value={qty}
+                     onChange={(e) => setQty(e.target.value)} required />
+            </div>
+            <div className="field">
+              <label htmlFor="sj-d">Day of the sale</label>
+              <input id="sj-d" type="date" value={soldOn} max={todayInJamaica()} onChange={(e) => setSoldOn(e.target.value)} />
+              <div className="muted small">Blank means today.{isAdmin ? '' : ' Office staff can go 3 days back.'}</div>
+            </div>
+          </div>
+          {n > 0 && (
+            <p className="small">
+              {fromHolding > 0 && <>{fromHolding} of ours they already have{fromPlant > 0 ? ', ' : '. '}</>}
+              {fromPlant > 0 && <><strong>{fromPlant} handed over from the plant</strong> (off the empties). </>}
+              {price
+                ? <>{n} × {money(price.cents)} = {money(subtotal)}{gctExempt ? ' (GCT exempt)' : ` + GCT = ${money(total)}`}.</>
+                : <span className="muted">Price: the "5-gallon bottle" product on the Products screen.</span>}
+            </p>
+          )}
+          <label className="check">
+            <input type="checkbox" checked={paying}
+                   onChange={(e) => { setPaying(e.target.checked); if (e.target.checked && !amount && total) setAmount((total / 100).toFixed(2)); }} />
+            They are paying now
+          </label>
+          {paying && (
+            <div className="row">
+              <div className="field">
+                <label htmlFor="sj-m">How</label>
+                <select id="sj-m" value={method} onChange={(e) => setMethod(e.target.value)}>
+                  {payMethods(METHODS, takeCard, method).map((m) => <option key={m} value={m}>{m}</option>)}
+                </select>
+              </div>
+              <div className="field">
+                <label htmlFor="sj-a">Amount (J$)</label>
+                <input id="sj-a" inputMode="decimal" style={{ width: 130 }} value={amount} onChange={(e) => setAmount(e.target.value)} />
+              </div>
+              {method !== 'Cash' && (
+                <div className="field">
+                  <label htmlFor="sj-r">Reference</label>
+                  <input id="sj-r" value={reference} onChange={(e) => setReference(e.target.value)} />
+                </div>
+              )}
+            </div>
+          )}
+          {!paying && <p className="muted small">Not paying now: it goes on their account.</p>}
+          <div className="field">
+            <label htmlFor="sj-n">Note</label>
+            <input id="sj-n" style={{ width: '100%', maxWidth: 480 }} value={note} onChange={(e) => setNote(e.target.value)} />
+          </div>
+          {err && <div className="notice error">{err}</div>}
+          <div className="row" style={{ gap: 8 }}>
+            <button className="go" disabled={busy || n <= 0}>{busy ? 'Recording…' : `Sell ${n || ''} jug${n === 1 ? '' : 's'}`}</button>
+            <button type="button" className="secondary" disabled={busy} onClick={() => setOpen(false)}>Cancel</button>
+          </div>
+        </form>
+      )}
+    </div>
   );
 }
 

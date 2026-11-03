@@ -45,7 +45,7 @@ export async function jugMaterial(t: Queryable): Promise<JugMaterial | null> {
 }
 
 export type EmptiesMove = 'BottleReturn' | 'ProductionBatch' | 'JugsBought' | 'JugsScrapped'
-  | 'PurchaseOrder' | 'Adjustment';
+  | 'PurchaseOrder' | 'Adjustment' | 'Sale';
 
 /**
  * Move the empties at the plant by `quantity` (positive in, negative out) and

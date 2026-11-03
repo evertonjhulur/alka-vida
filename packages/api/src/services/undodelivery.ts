@@ -31,6 +31,7 @@ import { RuleViolation } from '@alka/shared';
 import { deliveredBottles, stopBottles } from './stockmoves.ts';
 import { deliversFromTruck } from './trucks.ts';
 import { reverseDeliveryMovement } from './bottles.ts';
+import { returnJugsHandedOver } from './jugsales.ts';
 
 export interface UndoPlan {
   orderId: string;
@@ -223,6 +224,8 @@ export async function undoDelivery(
       delivered: b.delivered, emptiesPickedUp: b.empties, lostDamaged: b.lost, sold: b.sold, reference: order.order_number,
     });
     await t.query(`DELETE FROM customer_bottle_moves WHERE order_id = $1`, [orderId]);
+    // Jugs sold from the plant (Sell jugs, 3 Nov 2026) go back into the empties.
+    await returnJugsHandedOver(t, order.order_number);
 
     // Off the round (and any payment-after-delivery stops with it).
     if (stops.length) {
