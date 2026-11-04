@@ -13,6 +13,7 @@ import { ORDER_STAGES, orderStage } from '../lib/orderStatus';
 import { STATE_TONE, invoiceMatches, invoiceState } from '../lib/invoiceState';
 import { downloadCsv, dollars } from '../lib/csv';
 import { buildTransactions, type Tx } from '../lib/transactions';
+import { PaymentFixPanel, PaymentMenu, usePaymentFix, viewPaymentReceipt } from '../components/PaymentMenu';
 
 interface Customer {
   id: string; name: string; phone: string; email: string;
@@ -184,6 +185,8 @@ type Part = (typeof PARTS)[number][0];
  */
 export default function CustomerRecord({ session }: { session: Session }) {
   const takeCard = useTakeCard();
+  /** The payment ⋯ menu (4 Nov 2026). */
+  const payFix = usePaymentFix();
   const { customerId } = useParams();
   const [params, setParams] = useSearchParams();
   const rawTab = params.get('tab');
@@ -1125,6 +1128,12 @@ export default function CustomerRecord({ session }: { session: Session }) {
 
       {tab === 'transactions' && (
         <>
+          {payFix.panel && (
+            <PaymentFixPanel paymentId={payFix.panel.id} action={payFix.panel.action}
+                             onClose={payFix.close}
+                             onSwitch={(a) => payFix.pick(payFix.panel!.id, a)}
+                             onDone={(m) => { payFix.close(); setMsg(m); load().catch(() => {}); }} />
+          )}
           {(waiting.length > 0 || (c.invoice_cycle && c.invoice_cycle !== 'PerDelivery')) && (
             <div className="panel">
               <div className="panel-head">
@@ -1264,14 +1273,18 @@ export default function CustomerRecord({ session }: { session: Session }) {
                         {t.kind === 'invoice' && t.openCents > 0 && (
                           <button type="button" className="as-link small" disabled={busy} onClick={() => payInvoices([t])}>Receive payment</button>
                         )}
-                        {t.kind === 'payment' && (
-                          <>
+                        {t.kind === 'payment' && (() => {
+                          // The payment ⋯ menu acts on the whole payment from any line still standing.
+                          const live = (t.rows ?? []).find((r) => !r.reversed && !r.is_reversal && Number(r.amount_cents) > 0);
+                          return live && (session.role === 'admin' || session.role === 'user') ? (
+                            <PaymentMenu paymentId={live.id} receipt={t.number || null}
+                                         open={payFix.menuFor === t.key} onToggle={() => payFix.toggle(t.key)}
+                                         onPick={(a) => payFix.pick(live.id, a)}
+                                         onReceipt={() => { void viewPaymentReceipt(live.id, t.number || null); }} />
+                          ) : (
                             <button type="button" className="as-link small" disabled={busy} onClick={() => receiptFor(t)}>Receipt</button>
-                            {t.reversed !== 'all' && (
-                              <button type="button" className="as-link small" disabled={busy} onClick={() => changeTx(t)}>Change</button>
-                            )}
-                          </>
-                        )}
+                          );
+                        })()}
                         {t.invoice && (
                           <Link className="small" to={`/invoices/${t.invoice.invoice_id}`}>View</Link>
                         )}

@@ -59,6 +59,8 @@ const METHOD_OK = (v: unknown) => String(v);
 /** A payment change, in words: "amount 450.00, dated 2026-09-30, to another customer". */
 function describeChange(p: Record<string, unknown> | null): string {
   if (!p) return '';
+  // The payment ⋯ menu (4 Nov 2026) says what will happen in words.
+  if (typeof p.summary === 'string') return p.summary;
   const bits: string[] = [];
   if (p.amountCents !== undefined) bits.push(`amount ${money(Number(p.amountCents))}`);
   if (p.paymentDate) bits.push(`dated ${when(String(p.paymentDate))}`);
@@ -267,7 +269,7 @@ export default function Decisions({ session }: { session: Session }) {
           <div className="small">Change to: {describe(r.payload)}</div>
         )}
         {r.requestType === 'PaymentChange' && (
-          <div className="small">Change to: {describeChange(r.payload)}</div>
+          <div className="small">{(r.payload as { summary?: string } | null)?.summary ? '' : 'Change to: '}{describeChange(r.payload)}</div>
         )}
         {r.requestType === 'SameDayOrder' && (
           <div className="small">Deliver today puts it on today's round; Next delivery day moves it there. Or choose another date, or cancel it.</div>

@@ -19,6 +19,7 @@ import type { Cents } from '@alka/shared';
 import { computeTotals, RuleViolation } from '@alka/shared';
 import { applyStopCorrection, type StopCorrection } from './settlement.ts';
 import { applyPaymentChange, type PaymentChange } from './payments.ts';
+import { applyApprovedPaymentFix, type PaymentFix } from './paymentfix.ts';
 import { placeOnDeliverySheet, sameDayCheck } from './orders.ts';
 import { businessToday } from './core.ts';
 
@@ -214,7 +215,11 @@ export async function reviewApproval(
           req.request_type === 'SpecialDayOrder');
       }
     } else if (req.request_type === 'PaymentChange') {
-      if (decision === 'Approved') {
+      const fix = (req.payload as unknown as { fix?: PaymentFix } | null)?.fix;
+      if (decision === 'Approved' && fix) {
+        // The payment ⋯ menu (4 Nov 2026): edit, move, reverse or delete.
+        await applyApprovedPaymentFix(t, actor, req.entity_id, fix, req.reason ?? null);
+      } else if (decision === 'Approved') {
         await applyPaymentChange(t, actor, req.entity_id,
           (req.payload ?? {}) as unknown as PaymentChange, req.reason ?? 'approved change');
       }

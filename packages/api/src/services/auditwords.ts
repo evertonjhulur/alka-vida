@@ -135,6 +135,9 @@ function sentence(r: Row, L: Lookups): string {
 
   switch (r.entity_type) {
     case 'Payment': {
+      // The payment ⋯ menu (4 Nov 2026) writes its own sentence: a deleted
+      // payment cannot be looked up afterwards.
+      if (d.paymentFix && typeof d.summary === 'string') return `${d.summary}${why}`;
       if (r.action === 'pay') {
         const to = pay?.invoice ? `against invoice ${pay.invoice}` : 'on account (not against an invoice)';
         const from = pay?.round ? ` from the ${pay.round} settlement` : '';

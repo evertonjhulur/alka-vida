@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { api, openPdfPost, idempotencyKey } from '../lib/api';
+import { api, getSession, openPdfPost, idempotencyKey } from '../lib/api';
 import { openBatchSend, openSend } from '../lib/send';
 import { BatchBar, SortTh, MultiStatusSelect, passes, TickAllTh, TickTd, useSort, useTicks } from '../components/ListTools';
 import { downloadCsv, dollars } from '../lib/csv';
@@ -8,6 +8,7 @@ import { payMethods, useTakeCard } from '../lib/payments';
 import { money, toCents, day } from '../lib/format';
 import { todayInJamaica as todayJa } from '../lib/format';
 import CustomerPicker, { type PickerCustomer } from '../components/CustomerPicker';
+import { PaymentFixPanel, PaymentMenu, usePaymentFix } from '../components/PaymentMenu';
 
 /**
  * Payments: money received outside a round (approved mockup, 29 Sep 2026).
@@ -319,7 +320,7 @@ export default function Payments() {
           </div>
         )}
       </div>
-      <Received stamp={stamp} />
+      <Received stamp={stamp} onChanged={() => { load().catch(() => {}); }} />
     </>
   );
 }
@@ -341,7 +342,7 @@ const PAID_FILTERS = [
 
 const startOfMonth = () => `${todayJa().slice(0, 8)}01`;
 
-function Received({ stamp }: { stamp: number }) {
+function Received({ stamp, onChanged }: { stamp: number; onChanged: () => void }) {
   const [rows, setRows] = useState<Paid[]>([]);
   const [from, setFrom] = useState(startOfMonth());
   const [to, setTo] = useState('');
@@ -351,13 +352,17 @@ function Received({ stamp }: { stamp: number }) {
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  /** The payment ⋯ menu (4 Nov 2026), for the office. */
+  const payFix = usePaymentFix();
+  const office = ['admin', 'user'].includes(getSession()?.role ?? '');
+  const [again, setAgain] = useState(0);
 
   useEffect(() => {
     const q = new URLSearchParams();
     if (from) q.set('from', from);
     if (to) q.set('to', to);
     api.get<Paid[]>(`/api/payments?${q}`).then(setRows).catch((e) => setError(e.message));
-  }, [from, to, stamp]);
+  }, [from, to, stamp, again]);
 
   const needle = find.trim().toLowerCase();
   const filtered = rows.filter((p) => passes(state, (v) => (v === 'invoice' ? !!p.invoice_id && !p.is_reversal
@@ -403,6 +408,14 @@ function Received({ stamp }: { stamp: number }) {
       </div>
       {error && <div className="notice error" style={{ margin: '0 16px 10px' }}>{error}</div>}
       {msg && <div className="notice ok" style={{ margin: '0 16px 10px' }}>{msg}</div>}
+      {payFix.panel && (
+        <div style={{ margin: '0 16px 10px' }}>
+          <PaymentFixPanel paymentId={payFix.panel.id} action={payFix.panel.action}
+                           onClose={payFix.close}
+                           onSwitch={(a) => payFix.pick(payFix.panel!.id, a)}
+                           onDone={(m) => { payFix.close(); setMsg(m); setAgain((n) => n + 1); onChanged(); }} />
+        </div>
+      )}
       <div className="list-filters">
         <div className="field">
           <label htmlFor="pr-find">Find</label>
@@ -449,6 +462,7 @@ function Received({ stamp }: { stamp: number }) {
             <SortTh label="How" k="how" sort={sort} onSort={onSort} />
             <SortTh label="Reference" k="reference" sort={sort} onSort={onSort} />
             <SortTh label="Amount" k="amount" sort={sort} onSort={onSort} className="num" />
+            <th />
           </tr>
         </thead>
         <tbody>
@@ -473,11 +487,19 @@ function Received({ stamp }: { stamp: number }) {
                 <td data-label="Reference" className="small muted">
                   {p.reference ?? '—'}{p.receipt_number ? ` · ${p.receipt_number}` : ''}
                   {tickable && (
-                    <> · <button type="button" className="as-link small" disabled={busy} onClick={() => viewReceipt(p)}>Receipt</button>
-                      {' · '}<button type="button" className="as-link small" onClick={() => openSend({ kind: 'receipt', ids: [p.id] })}>Email…</button></>
+                    <> · <button type="button" className="as-link small" onClick={() => openSend({ kind: 'receipt', ids: [p.id] })}>Email…</button></>
                   )}
                 </td>
                 <td data-label="Amount" className="num">{money(Number(p.amount_cents))}</td>
+                <td className="num">
+                  {tickable && !p.reversed && office ? (
+                    <PaymentMenu paymentId={p.id} receipt={p.receipt_number}
+                                 open={payFix.menuFor === p.id} onToggle={() => payFix.toggle(p.id)}
+                                 onPick={(a) => payFix.pick(p.id, a)} onReceipt={() => { void viewReceipt(p); }} />
+                  ) : tickable ? (
+                    <button type="button" className="as-link small" disabled={busy} onClick={() => viewReceipt(p)}>Receipt</button>
+                  ) : null}
+                </td>
               </tr>
             );
           })}

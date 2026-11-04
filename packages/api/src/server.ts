@@ -58,6 +58,7 @@ import { registerBrandRoutes } from './routes/brands.ts';
 import { registerWebsiteRoutes } from './routes/website.ts';
 import { registerLocationRoutes } from './routes/locations.ts';
 import { registerGoLiveRoutes } from './routes/golive.ts';
+import { registerPaymentFixRoutes } from './routes/paymentfix.ts';
 import { registerSendScreenRoutes } from './routes/sendscreen.ts';
 import { productAvailableSql, ownProductSql } from './services/brands.ts';
 import * as messaging from './services/messaging.ts';
@@ -1833,6 +1834,7 @@ export async function buildServer(db: Db) {
   registerWebsiteRoutes(app as never, db, { allow: allow as never, actorOf });
   registerLocationRoutes(app as never, db, { allow: allow as never, actorOf });
   registerGoLiveRoutes(app as never, db, { allow: allow as never, actorOf });
+  registerPaymentFixRoutes(app as never, db, { allow: allow as never, actorOf });
   registerSendScreenRoutes(app as never, db, { allow: allow as never, actorOf });
 
   return app;

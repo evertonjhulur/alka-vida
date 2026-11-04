@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
-import { api, type Session } from '../lib/api';
+import { api, setSession, type Session } from '../lib/api';
 import Logo from '../components/Logo';
 import GoogleButton, { useGoogleEnabled } from '../components/GoogleButton';
 import { takeIdleSignedOut } from '../lib/idle';
@@ -24,6 +24,9 @@ export const EyeIcon = ({ off }: { off?: boolean }) => (
 
 /** Signed in some other way than api.login: start the idle clock the same way. */
 export function startedSession(s: Session, onSignedIn: (s: Session) => void) {
+  // Remember who signed in, as api.login does (4 Nov 2026): screens that ask
+  // getSession() for the role (admin-only buttons) found nobody without it.
+  setSession(s);
   try { localStorage.setItem('alkavida.lastActive', String(Date.now())); } catch { /* ignore */ }
   onSignedIn(s);
 }

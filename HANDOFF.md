@@ -2744,3 +2744,44 @@ there was no way to sell jugs on their own. He chose a dedicated action.
 - Not done (offered, not yet agreed): offer the bottle charge on the driver's
   screen / paper sheet whenever fewer empties come back than full jugs go out,
   even when "empties expected" was left blank.
+
+## The payment ⋯ menu: edit, move, reverse, delete (4 Nov 2026)
+His rulings: payments made in error can be reversed whether against an
+invoice or left as credit, deleted (cleaner, for a true error nobody knows
+happened), edited, and moved to another customer. Office staff can do all of
+it with an administrator's approval; an admin's own action applies at once.
+A moved payment goes to the invoices picked, else the oldest open invoices
+first, the rest as credit, and keeps its RCT number. Edit, Move and Delete
+leave no note on either account: the audit log is the only record.
+- One ⋯ menu per payment on Payments > Payments received and on the customer
+  page Transactions tab (replaces the old "Change" link and the Receipt link
+  there): View receipt, Edit payment, Move to another customer, Reverse,
+  Delete (red). components/PaymentMenu.tsx (menu + panel + usePaymentFix).
+- It acts on the WHOLE payment: every confirmed, unreversed line of the same
+  customer with the same receipt_number.
+- API: GET /api/payments/:id/fix (lines, settled round, receipt emailed,
+  waiting), POST /api/payments/:id/fix {fix: {action: edit|move|reverse|
+  delete, ...}, reason}. routes/paymentfix.ts, services/paymentfix.ts.
+- Edit: date/method/reference only = updated in place. Amount or invoices
+  changed = the lines are rewritten (same ids reused, extra lines added with
+  the same RCT number and original created_at, spare lines deleted). Picked
+  invoices fill oldest first, so a smaller amount comes off the newest; the
+  rest stays as credit. The screen refills the invoices when the amount
+  changes. Move with nothing picked = oldest open invoices first.
+- Delete: DELETE of the lines; the number is never reused. The panel warns
+  (does not block) if the receipt was emailed (audit_log receiptEmailedTo) or
+  the money is in a settled (Completed) round, with "Reverse it instead".
+- Reason required for Reverse and Delete, optional for Edit and Move.
+- Office requests: approval_requests type 'PaymentChange' with payload
+  {fix, summary}; approvals.ts applies payload.fix via
+  paymentfix.applyApprovedPaymentFix (older payloads still go through
+  payments.applyPaymentChange). Decisions shows payload.summary.
+- Audit: details.paymentFix + a ready-made `summary` sentence (a deleted
+  payment cannot be looked up later); auditwords.ts uses it.
+- Also fixed: the sign-in page (pages/Login.tsx startedSession, 31 Oct
+  redesign) never saved the session to localStorage, so getSession() was
+  empty after signing in and role checks that use it (admin-only items on
+  Orders, New sale, Truck, Driver stop) saw nobody. It now calls setSession.
+- Tests: test/paymentfix.test.ts (10). Shared 74, API 625, web 16 passing.
+  Walked in a browser as admin (Payments: menu, move, delete) and as office
+  (customer page: edit sent for approval, admin's Needs a decision).
