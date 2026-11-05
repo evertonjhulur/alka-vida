@@ -22,6 +22,7 @@ import { applyPaymentChange, type PaymentChange } from './payments.ts';
 import { applyApprovedPaymentFix, type PaymentFix } from './paymentfix.ts';
 import { placeOnDeliverySheet, sameDayCheck } from './orders.ts';
 import { businessToday } from './core.ts';
+import { autoApplyLinked } from './creditapply.ts';
 
 export interface PendingApproval {
   /** For a StopCorrection, the proposed changes awaiting approval. */
@@ -118,8 +119,12 @@ async function applyDiscountToInvoice(
   discountPercent: number,
   discountFixedCents = 0,
 ): Promise<void> {
-  const lines = await t.query<{ line_total_cents: number }>(
-    `SELECT line_total_cents FROM invoice_line_items WHERE invoice_id = $1`, [invoiceId],
+  const lines = await t.query<{
+    line_total_cents: number; cases: number; loose_bottles: number;
+    price_per_case_cents: number; price_per_bottle_cents: number;
+  }>(
+    `SELECT line_total_cents, cases, loose_bottles, price_per_case_cents, price_per_bottle_cents
+     FROM invoice_line_items WHERE invoice_id = $1`, [invoiceId],
   );
   const inv = await t.one<{ gct_exempt: boolean }>(
     `SELECT gct_exempt FROM invoices WHERE id = $1`, [invoiceId],
@@ -127,7 +132,10 @@ async function applyDiscountToInvoice(
   const fixed = Math.max(0, num(discountFixedCents));
   const pct = fixed > 0 ? 0 : discountPercent;
   const totals = computeTotals(
-    lines.map((l) => ({ lineTotal: num(l.line_total_cents) })), pct, !inv.gct_exempt, fixed,
+    lines.map((l) => ({
+      lineTotal: num(l.line_total_cents), cases: num(l.cases), looseBottles: num(l.loose_bottles),
+      pricePerCaseCents: num(l.price_per_case_cents), pricePerBottleCents: num(l.price_per_bottle_cents),
+    })), pct, !inv.gct_exempt, fixed,
   );
   await t.query(
     `UPDATE invoices
@@ -247,6 +255,8 @@ export async function reviewApproval(
            WHERE id = $1`,
           [req.entity_id, subtotal, gct, total],
         );
+        // Raised against an invoice: it settles that invoice (4 Nov 2026).
+        await autoApplyLinked(t, actor, req.entity_id);
       }
     } else if (req.request_type === 'StopCorrection') {
       // Rejected: the stop keeps exactly what the driver recorded.

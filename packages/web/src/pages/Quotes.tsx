@@ -7,6 +7,7 @@ import { downloadCsv, dollars } from '../lib/csv';
 import { money, statusTone, todayInJamaica, when } from '../lib/format';
 import CustomerPicker, { type PickerCustomer } from '../components/CustomerPicker';
 import { ask, askText } from '../components/Dialog';
+import { gctTotal } from '../lib/gct';
 
 /**
  * Quotations (Everton's revisions, 30 Sep 2026, point 1).
@@ -253,12 +254,13 @@ function QuoteEditor({ quoteId }: { quoteId?: string }) {
     return Math.max(0, Math.round(Number(l.price) * 100) || 0);
   };
   const totals = useMemo(() => {
-    const subtotal = lines.reduce((a, l) => a + l.qty * unitOf(l), 0);
+    const items = lines.map((l) => [l.qty, unitOf(l)] as const);
+    const subtotal = items.reduce((a, [q, p]) => a + q * p, 0);
     const fixed = discountAs === '$' ? Math.max(0, Math.round((Number(discount) || 0) * 100)) : 0;
     const pct = discountAs === '%' ? Math.min(Math.max(Number(discount) || 0, 0), 100) : 0;
     const discountAmount = fixed > 0 ? Math.min(fixed, subtotal) : Math.round(subtotal * pct / 100);
-    const gct = chargeGct ? Math.round((subtotal - discountAmount) * 0.15) : 0;
-    return { subtotal, discountAmount, gct, total: subtotal - discountAmount + gct, fixed, pct };
+    const { gct, grandTotal } = gctTotal(items, discountAmount, chargeGct);
+    return { subtotal, discountAmount, gct, total: grandTotal, fixed, pct };
   }, [lines, discount, discountAs, chargeGct, prices]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const notYet = prices.filter((p) => !lines.some((l) => l.productId === p.product_id));

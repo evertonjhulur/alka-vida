@@ -593,6 +593,8 @@ export async function remainingValue(t: Queryable, orderId: string): Promise<Cen
       bottlesPerCase: num(l.bpc), cases: num(l.bpc) > 0 ? num(l.cases) : 0,
       looseBottles: num(l.bpc) > 0 ? 0 : num(l.loose), pricePerCase: num(l.ppc), pricePerBottle: num(l.ppb),
     }),
+    units: num(l.bpc) > 0 ? num(l.cases) : num(l.loose),
+    unitPrice: num(l.bpc) > 0 ? num(l.ppc) : num(l.ppb),
   }));
   // A fixed discount went on the first part's invoice; a percentage applies again.
   return computeTotals(priced, num(o.discount_percent), !o.gct_exempt, 0).grandTotal;

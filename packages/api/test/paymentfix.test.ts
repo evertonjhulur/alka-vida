@@ -97,7 +97,9 @@ describe('payment ⋯ menu', () => {
       action: 'move', customerId: f.otherCustomerId, allocations: [{ invoiceId: x, amountCents: 2_000 }],
     });
     const lines = await linesOf(rct);
-    assert.deepEqual(lines.map((l) => [l.invoice_id, l.amount_cents]), [[x, '2000'], [null, '1000']]);
+    // Both lines keep the payment's created_at, so their order is not fixed: compare as a set.
+    const got = lines.map((l) => [l.invoice_id, l.amount_cents]).sort((a, b) => String(a[1]).localeCompare(String(b[1])));
+    assert.deepEqual(got, [[null, '1000'], [x, '2000']]);
   });
 
   test('a picked invoice of the wrong customer is refused', async () => {

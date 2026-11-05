@@ -16,7 +16,7 @@ import CustomerPicker, { type PickerCustomer } from './CustomerPicker';
 
 export type PaymentAction = 'edit' | 'move' | 'reverse' | 'delete';
 
-const METHODS = ['Cash', 'Cheque', 'Bank Transfer', 'Card'] as const;
+const METHODS = ['Cash', 'Cheque', 'Bank Transfer', 'Card', 'Other'] as const;
 
 /** The ⋯ button and its menu, for one payment row. */
 export function PaymentMenu({

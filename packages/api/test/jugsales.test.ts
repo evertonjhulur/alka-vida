@@ -42,7 +42,8 @@ describe('Sell jugs', () => {
     assert.equal(r.fromPlant, 0);
     assert.ok(r.invoiceId, 'invoiced now');
     const inv = await getInvoiceLedger(f.db, r.invoiceId!);
-    assert.equal(inv!.grandTotalCents, Math.round(2 * 130435 * 1.15));
+    // GCT per unit (4 Nov 2026): J$1,304.35 + GCT is J$1,500.00 a jug, so two are J$3,000.00.
+    assert.equal(inv!.grandTotalCents, 2 * Math.round(130435 * 1.15));
     const acc = await bottleAccount(f.db, f.customerId);
     assert.equal(acc.closingHolding, 0, 'none of ours with them now');
     assert.equal(acc.sold, 2, 'shown as bought (theirs)');

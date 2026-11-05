@@ -90,7 +90,7 @@ type Mode = 'Counter' | 'Pickup' | 'Delivery';
 type PayWhen = 'Now' | 'On delivery' | 'On account';
 type Pattern = 'Weekly' | 'Biweekly' | 'Monthly';
 
-const GCT_RATE = 0.15;
+import { gctTotal } from '../lib/gct';
 /** Recording an earlier day (23 Oct 2026): it was delivered, or they took it. */
 const PAST_MODES: Array<[Mode, string]> = [
   ['Delivery', 'We delivered it'],
@@ -365,19 +365,19 @@ export default function NewOrder() {
     ? Math.max(0, fullFives - emptiesN) : 0;
 
   const totals = useMemo(() => {
-    let subtotal = 0;
+    const items: Array<readonly [number, number]> = [];
     for (const l of lines) {
       const p = productOf(l.productId);
       if (!p || qtyOf(l) <= 0) continue;
-      subtotal += qtyOf(l) * priceOf(p, l);
+      items.push([qtyOf(l), priceOf(p, l)]);
     }
-    if (shortfall > 0 && bottleProduct) subtotal += shortfall * priceOf(bottleProduct);
+    if (shortfall > 0 && bottleProduct) items.push([shortfall, priceOf(bottleProduct)]);
+    const subtotal = items.reduce((a, [q, p]) => a + q * p, 0);
     const fixed = discountAs === '$' ? centsOf(discount) : 0;
     const pct = discountAs === '%' ? Math.min(Math.max(Number(discount) || 0, 0), 100) : 0;
     const discountAmount = fixed > 0 ? Math.min(fixed, subtotal) : Math.round(subtotal * (pct / 100));
-    const net = subtotal - discountAmount;
-    const gct = chargeGct ? Math.round(net * GCT_RATE) : 0;
-    return { subtotal, discountAmount, gct, grandTotal: net + gct, fixed, pct };
+    const { gct, grandTotal } = gctTotal(items, discountAmount, chargeGct);
+    return { subtotal, discountAmount, gct, grandTotal, fixed, pct };
   }, [lines, discount, discountAs, chargeGct, products, shortfall]); // eslint-disable-line react-hooks/exhaustive-deps
 
   /* ---------------- payment ---------------- */

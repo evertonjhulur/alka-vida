@@ -771,10 +771,13 @@ export async function editOrder(
 
     // Recalculate from whatever the lines now are, using the same shared
     // calculation as invoicing.
-    const current = await t.query<{ line_total: number }>(
+    const current = await t.query<{ line_total: number; units: number; unit_price: number }>(
       `SELECT CASE WHEN p.bottles_per_case > 0
                    THEN oli.cases * oli.price_per_case_cents
-                   ELSE oli.loose_bottles * oli.price_per_bottle_cents END AS line_total
+                   ELSE oli.loose_bottles * oli.price_per_bottle_cents END AS line_total,
+              CASE WHEN p.bottles_per_case > 0 THEN oli.cases ELSE oli.loose_bottles END AS units,
+              CASE WHEN p.bottles_per_case > 0 THEN oli.price_per_case_cents
+                   ELSE oli.price_per_bottle_cents END AS unit_price
        FROM order_line_items oli JOIN products p ON p.id = oli.product_id
        WHERE oli.order_id = $1`,
       [orderId],
@@ -785,7 +788,7 @@ export async function editOrder(
     const discountPercent = fixed > 0 ? 0 : (changes.discountPercent ?? num(order.discount_percent));
     const gctExempt = changes.gctExempt ?? order.gct_exempt;
     const totals = computeTotals(
-      current.map((l) => ({ lineTotal: num(l.line_total) })), discountPercent, !gctExempt, fixed,
+      current.map((l) => ({ lineTotal: num(l.line_total), units: num(l.units), unitPrice: num(l.unit_price) })), discountPercent, !gctExempt, fixed,
     );
 
     await t.query(
@@ -1138,15 +1141,18 @@ export async function recomputeOrderTotals(t: Queryable, orderId: string): Promi
   const o = await t.one<{ discount_percent: number; discount_fixed_cents: number; gct_exempt: boolean }>(
     `SELECT discount_percent, discount_fixed_cents, gct_exempt FROM customer_orders WHERE id = $1`, [orderId],
   );
-  const current = await t.query<{ line_total: number }>(
+  const current = await t.query<{ line_total: number; units: number; unit_price: number }>(
     `SELECT CASE WHEN p.bottles_per_case > 0
                  THEN oli.cases * oli.price_per_case_cents
-                 ELSE oli.loose_bottles * oli.price_per_bottle_cents END AS line_total
+                 ELSE oli.loose_bottles * oli.price_per_bottle_cents END AS line_total,
+            CASE WHEN p.bottles_per_case > 0 THEN oli.cases ELSE oli.loose_bottles END AS units,
+            CASE WHEN p.bottles_per_case > 0 THEN oli.price_per_case_cents
+                 ELSE oli.price_per_bottle_cents END AS unit_price
      FROM order_line_items oli JOIN products p ON p.id = oli.product_id
      WHERE oli.order_id = $1`, [orderId],
   );
   const fixed = num(o.discount_fixed_cents);
-  const totals = computeTotals(current.map((l) => ({ lineTotal: num(l.line_total) })),
+  const totals = computeTotals(current.map((l) => ({ lineTotal: num(l.line_total), units: num(l.units), unitPrice: num(l.unit_price) })),
     fixed > 0 ? 0 : num(o.discount_percent), !o.gct_exempt, fixed);
   await t.query(
     `UPDATE customer_orders SET subtotal_cents = $2, discount_amount_cents = $3,

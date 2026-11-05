@@ -77,7 +77,7 @@ interface UndoPlan {
   roundsLeft: Array<{ zone: string; date: string }>;
 }
 
-const GCT_RATE = 0.15;
+import { gctTotal } from '../lib/gct';
 
 const STAGE_TONE: Record<OrderStage, string> = {
   pending: 'warn', ready: 'info', out: 'info', part: 'warn', delivered: 'ok', cancelled: 'muted',
@@ -250,17 +250,13 @@ export default function Orders() {
   };
 
   const totals = (() => {
-    let subtotal = 0;
-    for (const l of lines) {
-      const qty = Math.max(Math.round(Number(l.qty) || 0), 0);
-      subtotal += qty * unitOf(l);
-    }
+    const items = lines.map((l) => [Math.max(Math.round(Number(l.qty) || 0), 0), unitOf(l)] as const);
+    const subtotal = items.reduce((a, [q, p]) => a + q * p, 0);
     const fixed = discountAs === '$' ? Math.max(0, Math.round((Number(discount) || 0) * 100)) : 0;
     const pct = discountAs === '%' ? Math.min(Math.max(Number(discount) || 0, 0), 100) : 0;
     const discountAmount = fixed > 0 ? Math.min(fixed, subtotal) : Math.round(subtotal * (pct / 100));
-    const net = subtotal - discountAmount;
-    const gct = chargeGct ? Math.round(net * GCT_RATE) : 0;
-    return { subtotal, discountAmount, gct, grandTotal: net + gct, fixed, pct };
+    const { gct, grandTotal } = gctTotal(items, discountAmount, chargeGct);
+    return { subtotal, discountAmount, gct, grandTotal, fixed, pct };
   })();
 
   async function saveEdit(e: React.FormEvent) {

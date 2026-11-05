@@ -33,6 +33,7 @@ import { RuleViolation } from '@alka/shared';
 /** Tables emptied outright. Every table that references one is in the list too. */
 const EMPTIED = [
   'approval_requests', 'audit_log', 'auto_emails', 'bom_line_items', 'broadcast_recipients', 'broadcasts',
+  'credit_applications',
   'customer_applications', 'customer_bottle_moves', 'customer_lists', 'customer_orders', 'customer_prices',
   'delivery_sheets', 'delivery_stop_allocations', 'delivery_stop_lines', 'delivery_stops', 'delivery_zones',
   'employees', 'finished_goods_stock', 'idempotency_keys', 'inventory_audits', 'inventory_transactions',

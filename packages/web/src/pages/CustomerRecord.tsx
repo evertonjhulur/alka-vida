@@ -14,6 +14,7 @@ import { STATE_TONE, invoiceMatches, invoiceState } from '../lib/invoiceState';
 import { downloadCsv, dollars } from '../lib/csv';
 import { buildTransactions, type Tx } from '../lib/transactions';
 import { PaymentFixPanel, PaymentMenu, usePaymentFix, viewPaymentReceipt } from '../components/PaymentMenu';
+import { gctTotal } from '../lib/gct';
 
 interface Customer {
   id: string; name: string; phone: string; email: string;
@@ -109,6 +110,7 @@ function txStatusWords(t: Tx): string {
   if (t.kind === 'invoice' || t.kind === 'credit') {
     if (t.kind === 'credit' && t.invoice?.credit_status === 'Pending') return 'Waiting for approval';
     if (t.kind === 'credit' && t.invoice?.credit_status === 'Rejected') return 'Rejected';
+    if (t.kind === 'credit' && t.counts) return t.openCents > 0 ? 'Credit unused' : 'Credit applied';
     return invoiceState(t.invoice!);
   }
   if (t.kind === 'reversal') return 'Reversal';
@@ -119,6 +121,8 @@ function txStatusWords(t: Tx): string {
 function txTone(t: Tx): string {
   const w = txStatusWords(t);
   if (t.kind === 'invoice' || (t.kind === 'credit' && w === 'Credit note')) return STATE_TONE[invoiceState(t.invoice!)];
+  if (w === 'Credit unused') return 'info';
+  if (w === 'Credit applied') return 'ok';
   return w === 'Applied' ? 'ok' : w === 'On account' ? 'info'
     : w === 'Waiting for approval' || w === 'Part reversed' ? 'warn' : w === 'Rejected' ? 'muted' : 'bad';
 }
@@ -138,7 +142,7 @@ function txDue(t: Tx): string | null {
   if (t.kind !== 'invoice' || t.openCents <= 0 || !t.invoice?.due_date) return null;
   return invoiceState(t.invoice) === 'Overdue' ? `was due ${when(t.invoice.due_date)}` : `due ${when(t.invoice.due_date)}`;
 }
-const METHODS = ['Cash', 'Cheque', 'Bank Transfer', 'Card'] as const;
+const METHODS = ['Cash', 'Cheque', 'Bank Transfer', 'Card', 'Other'] as const;
 const PATTERN_WORDS: Record<Schedule['pattern'], string> = {
   Weekly: 'every week', Biweekly: 'every 2 weeks', Monthly: 'every month',
 };
@@ -356,6 +360,14 @@ export default function CustomerRecord({ session }: { session: Session }) {
       setFormLoaded(true);
     }).catch((e) => setError(e instanceof Error ? e.message : 'Could not load the details'));
   }, [tab, customerId]);
+
+  /** A credit note's unused credit put on one of their open invoices (4 Nov 2026). */
+  const [creditFor, setCreditFor] = useState<{ key: string; invoiceId: string } | null>(null);
+  const applyCreditNote = (creditNoteId: string, invoiceId: string) => run(async () => {
+    const r = await api.post<{ appliedCents: number }>(`/api/invoices/${invoiceId}/apply-credit`, { creditNoteId });
+    setCreditFor(null);
+    setMsg(`${money(r.appliedCents)} of credit applied. Their balance is unchanged; the invoice no longer shows that much owed.`);
+  }, 'Could not apply the credit');
 
   async function run(what: () => Promise<void>, fallback: string) {
     setBusy(true); setError(null); setMsg(null);
@@ -1273,6 +1285,25 @@ export default function CustomerRecord({ session }: { session: Session }) {
                         {t.kind === 'invoice' && t.openCents > 0 && (
                           <button type="button" className="as-link small" disabled={busy} onClick={() => payInvoices([t])}>Receive payment</button>
                         )}
+                        {t.kind === 'credit' && t.openCents > 0 && (session.role === 'admin' || session.role === 'user') && (() => {
+                          const owed = allTx.filter((x) => x.kind === 'invoice' && x.openCents > 0);
+                          if (!owed.length) return null;
+                          if (creditFor?.key !== t.key) {
+                            return <button type="button" className="as-link small" disabled={busy}
+                                           onClick={() => setCreditFor({ key: t.key, invoiceId: owed[0].invoice!.invoice_id })}>Apply to an invoice</button>;
+                          }
+                          return (
+                            <span className="row" style={{ gap: 6, justifyContent: 'flex-end' }}>
+                              <select aria-label="Invoice to apply the credit to" value={creditFor.invoiceId}
+                                      onChange={(e) => setCreditFor({ key: t.key, invoiceId: e.target.value })}>
+                                {owed.map((x) => <option key={x.key} value={x.invoice!.invoice_id}>{x.number} · {money(x.openCents)} owed</option>)}
+                              </select>
+                              <button type="button" className="small" disabled={busy}
+                                      onClick={() => applyCreditNote(t.invoice!.invoice_id, creditFor.invoiceId)}>Apply</button>
+                              <button type="button" className="as-link small" onClick={() => setCreditFor(null)}>Cancel</button>
+                            </span>
+                          );
+                        })()}
                         {t.kind === 'payment' && (() => {
                           // The payment ⋯ menu acts on the whole payment from any line still standing.
                           const live = (t.rows ?? []).find((r) => !r.reversed && !r.is_reversal && Number(r.amount_cents) > 0);
@@ -1423,7 +1454,7 @@ function SellJugsForm({ customerId, held, isAdmin, takeCard, gctExempt, onSaved 
   const fromHolding = Math.min(n, held);
   const fromPlant = n - fromHolding;
   const subtotal = price ? n * price.cents : 0;
-  const total = subtotal + (gctExempt ? 0 : Math.round(subtotal * 0.15));
+  const total = price ? gctTotal([[n, price.cents]], 0, !gctExempt).grandTotal : 0;
 
   function start() {
     setQty(held > 0 ? String(held) : '1'); setSoldOn(''); setPaying(false); setMethod('Cash');

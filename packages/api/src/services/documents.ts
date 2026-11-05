@@ -1009,7 +1009,15 @@ export async function invoiceEmailFigures(db: Queryable, invoiceId: string): Pro
   totals.push([h.gct_exempt ? 'GCT (exempt)' : 'GCT 15%', cash(Math.abs(num(h.gct_cents)))]);
   totals.push([h.is_credit_note ? 'Credit' : 'Total', cash(Math.abs(num(h.grand_total_cents))), true]);
   if (!h.is_credit_note && num(bal.amount_paid_cents) > 0) {
-    totals.push(['Paid', cash(num(bal.amount_paid_cents))]);
+    // "Settled" in the ledger is payments plus credit notes applied (4 Nov
+    // 2026); the document says which is which.
+    const credited = num((await db.one<{ c: string }>(
+      `SELECT COALESCE(SUM(a.amount_cents), 0)::text AS c FROM credit_applications a
+       JOIN invoices cn ON cn.id = a.credit_note_id AND cn.lifecycle <> 'Cancelled'
+       WHERE a.invoice_id = $1`, [invoiceId])).c);
+    const paid = num(bal.amount_paid_cents) - credited;
+    if (paid > 0) totals.push(['Paid', cash(paid)]);
+    if (credited > 0) totals.push(['Credit applied', cash(credited)]);
     totals.push(['Balance due', cash(num(bal.balance_cents)), true]);
   }
   return {

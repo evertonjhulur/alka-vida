@@ -58,7 +58,7 @@ interface MyQuote {
   status: string; grand_total_cents: number; lines_summary: string | null; expired: boolean;
 }
 
-const GCT_RATE = 0.15;
+import { gctTotal } from '../lib/gct';
 const TABS = ['home', 'order', 'orders', 'repeats', 'account', 'quotes', 'profile'] as const;
 type Tab = (typeof TABS)[number];
 
@@ -224,14 +224,13 @@ export default function Portal({ session }: { session: Session }) {
     .reduce((n, p) => n + (qty[p.product_id] ?? 0) * (p.bottles_per_case > 0 ? p.bottles_per_case : 1), 0);
   const shortfall = fullFives > 0 && empties !== '' ? Math.max(0, fullFives - (Math.round(Number(empties)) || 0)) : 0;
   const totals = useMemo(() => {
-    let subtotal = 0;
+    const items: Array<readonly [number, number]> = [];
     for (const p of prices) {
       const n = qty[p.product_id] ?? 0;
-      if (n > 0) subtotal += n * rateOf(p);
+      if (n > 0) items.push([n, rateOf(p)]);
     }
-    if (bottle && shortfall > 0) subtotal += shortfall * Number(bottle.price_per_bottle_cents);
-    const gct = exempt ? 0 : Math.round(subtotal * GCT_RATE);
-    return { subtotal, gct, grandTotal: subtotal + gct };
+    if (bottle && shortfall > 0) items.push([shortfall, Number(bottle.price_per_bottle_cents)]);
+    return gctTotal(items, 0, !exempt);
   }, [qty, prices, exempt, bottle, shortfall]);
 
   const bump = (id: string, by: number) =>

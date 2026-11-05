@@ -56,6 +56,33 @@ export function formatAmount(c: Cents): string {
 export interface LineForTotals {
   /** Already-computed line total in cents. */
   lineTotal: Cents;
+  /** How many units the line is (cases, or bottles for the 5-gallon) and the
+   *  price of one before GCT. Optional: when every line says (or carries
+   *  cases / looseBottles with their prices, which says the same), GCT is
+   *  worked out per unit - see computeTotals. */
+  units?: number;
+  unitPrice?: Cents;
+  cases?: number;
+  looseBottles?: number;
+  pricePerCaseCents?: Cents;
+  pricePerBottleCents?: Cents;
+}
+
+/** The units a line is made of, if it says: [count, price of one]. */
+function unitsOf(l: LineForTotals): [number, Cents] | null {
+  if (l.lineTotal === 0) return [0, 0];
+  if (l.units != null && l.unitPrice != null && l.units * l.unitPrice === l.lineTotal) return [l.units, l.unitPrice];
+  const c = Number(l.cases ?? 0); const b = Number(l.looseBottles ?? 0);
+  if (c > 0 && l.pricePerCaseCents != null && c * Number(l.pricePerCaseCents) === l.lineTotal) return [c, Number(l.pricePerCaseCents)];
+  if (b > 0 && l.pricePerBottleCents != null && b * Number(l.pricePerBottleCents) === l.lineTotal) return [b, Number(l.pricePerBottleCents)];
+  return null;
+}
+
+/** A unit's price with GCT, rounded to the cent: J$434.78 -> J$500.00. */
+export function unitPriceWithGct(unitPrice: Cents): Cents {
+  // In whole hundredths so a price ending in .5 of a cent rounds up, as
+  // half-up should (10 * 1.15 is 11.499999... in floating point).
+  return roundCents((unitPrice * Math.round((1 + GCT_RATE) * 100)) / 100);
 }
 
 export interface DocumentTotals {
@@ -99,7 +126,22 @@ export function computeTotals(
     ? Math.min(discountFixedCents, subtotal)
     : roundCents(subtotal * (discountPercent / 100));
   const net = subtotal - discountAmount;
-  const gct = applyGct ? roundCents(net * GCT_RATE) : 0;
+  if (!applyGct) return { subtotal, discountAmount, gct: 0, grandTotal: net };
+  // GCT per unit (Everton, 4 Nov 2026): a 5-gallon at J$434.78 is J$500.00
+  // with GCT, so three must be J$1,500.00 - not J$1,499.99, which is what
+  // 15% of the whole J$1,304.34 gives. When every line says what it is made
+  // of, the total is each unit's price with GCT (rounded to the cent) times
+  // the quantity; a discount takes the same share off that as it takes off
+  // the subtotal; GCT is whatever makes up the difference. It can be a cent
+  // or so off an exact 15% of the net - the price with GCT is what is kept
+  // whole. Lines that do not say (a bare amount) keep the old sum.
+  const units = lines.map(unitsOf);
+  if (subtotal > 0 && units.every((u) => u !== null)) {
+    const withGct = units.reduce((acc, u) => acc + u![0] * unitPriceWithGct(u![1]), 0);
+    const grandTotal = discountAmount === 0 ? withGct : roundCents((withGct * net) / subtotal);
+    return { subtotal, discountAmount, gct: grandTotal - net, grandTotal };
+  }
+  const gct = roundCents(net * GCT_RATE);
   return { subtotal, discountAmount, gct, grandTotal: net + gct };
 }
 

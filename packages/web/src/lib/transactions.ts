@@ -80,7 +80,10 @@ export function buildTransactions(
       const approved = !i.credit_status || i.credit_status === 'Approved';
       out.push({
         key: `i:${i.invoice_id}`, kind: 'credit', date: day(i.invoice_date), number: i.invoice_number,
-        effectCents: total, amountCents: Math.abs(total), openCents: 0,
+        // Credit not yet applied to an invoice (4 Nov 2026): the ledger's
+        // balance on a credit note is minus what is still unused.
+        effectCents: total, amountCents: Math.abs(total),
+        openCents: !cancelled && approved ? Math.max(-cents(i.balance_cents), 0) : 0,
         counts: !cancelled && approved, balanceCents: null, invoice: i,
       });
     } else {

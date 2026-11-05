@@ -5,6 +5,7 @@ import { openSend, useSentRefresh } from '../lib/send';
 import { payMethods, useTakeCard } from '../lib/payments';
 import { money, toCents, date, day, time, statusTone } from '../lib/format';
 import Logo from '../components/Logo';
+import { gctTotal } from '../lib/gct';
 
 /**
  * One invoice, laid out the way the customer receives it, with what can be
@@ -71,6 +72,11 @@ interface Invoice {
   customer?: CustomerRef; orders?: OrderRef[];
   delivery?: Delivery | null; creditNotes?: CreditNote[]; history?: HistoryRow[];
   onAccountCents?: number;
+  /** Credit notes applied to this invoice, the customer's unused credit, and
+   *  (on a credit note) the invoices it was applied to. 4 Nov 2026. */
+  creditApplied?: Array<{ id: string; credit_note_id: string; invoice_number: string; amount_cents: string; created_at: string }>;
+  creditUnused?: Array<{ id: string; invoice_number: string; invoice_date: string; unused_cents: number }>;
+  appliedFrom?: Array<{ id: string; invoice_id: string; invoice_number: string; amount_cents: string }>;
   /** A balance brought across from QuickBooks (16 Oct 2026): no lines of its own. */
   is_opening_balance?: boolean; opening_reference?: string | null; notes?: string | null;
 }
@@ -205,6 +211,17 @@ export default function InvoiceDetail({ session }: { session: Session }) {
     return `${money(r.appliedCents)} from their account put against ${i.invoiceNumber}.`;
   }, 'Could not apply the money');
 
+  const applyCreditHere = (creditNoteId?: string) => act(async () => {
+    const r = await api.post<{ appliedCents: number; creditNotes: string[] }>(
+      `/api/invoices/${i.invoiceId}/apply-credit`, creditNoteId ? { creditNoteId } : {});
+    return `${money(r.appliedCents)} of credit (${r.creditNotes.join(', ')}) applied to ${i.invoiceNumber}.`;
+  }, 'Could not apply the credit');
+
+  const takeCreditOff = (applicationId: string) => act(async () => {
+    await api.del(`/api/credit-applications/${applicationId}`);
+    return 'The credit was taken back off this invoice. It is unused again.';
+  }, 'Could not take the credit off');
+
   const requestDiscount = () => act(async () => {
     const fixed = disc.as === '$' ? toCents(disc.percent) : 0;
     const r = await api.post<{ appliedImmediately?: boolean }>(`/api/invoices/${i.invoiceId}/discount`, {
@@ -322,6 +339,9 @@ export default function InvoiceDetail({ session }: { session: Session }) {
   const onAccount = Number(i.onAccountCents ?? 0);
   const canApply = !i.is_credit_note && i.balanceCents > 0 && onAccount > 0 && i.status !== 'Cancelled';
   const applyCents = Math.min(onAccount, i.balanceCents);
+  const unused = (i.creditUnused ?? []).reduce((a, c) => a + Number(c.unused_cents), 0);
+  const canApplyCredit = !i.is_credit_note && i.balanceCents > 0 && unused > 0 && i.status !== 'Cancelled';
+  const creditCents = Math.min(unused, i.balanceCents);
 
   type Step = { tone: 'done' | 'todo' | 'warn' | 'bad'; title: ReactNode; meta?: ReactNode; extra?: ReactNode };
   const steps: Step[] = [];
@@ -335,6 +355,13 @@ export default function InvoiceDetail({ session }: { session: Session }) {
   for (const h of i.history ?? []) {
     if (h.action === 'create') continue;
     const d = h.details ?? {};
+    // Credit applied / taken off: its own line below (applied) or its sentence.
+    if (d.creditApplied) continue;
+    if (d.creditUnapplied) {
+      steps.push({ tone: 'done', title: String(d.summary ?? 'Credit taken back off'),
+        meta: <>{day(h.ts)}, {time(h.ts)}{h.user_name ? ` · ${h.user_name}` : ''}</> });
+      continue;
+    }
     let title = '';
     if (d.emailedTo) title = `Emailed to ${String(d.emailedTo)}`;
     else if (d.lifecycle === 'Sent') title = 'Marked as sent';
@@ -358,6 +385,16 @@ export default function InvoiceDetail({ session }: { session: Session }) {
       tone: c.credit_status === 'Pending' ? 'warn' : c.credit_status === 'Rejected' ? 'bad' : 'done',
       title: <>Credit note {c.invoice_number} for {money(Math.abs(Number(c.grand_total_cents)))}</>,
       meta: <>{day(c.created_at)} · {c.credit_status === 'Pending' ? 'waiting for a decision' : c.credit_status.toLowerCase()}</>,
+    });
+  }
+  for (const a of i.creditApplied ?? []) {
+    steps.push({
+      tone: 'done',
+      title: <>Credit note {a.invoice_number} applied: {money(Number(a.amount_cents))}</>,
+      meta: day(a.created_at),
+      extra: isAdmin ? (
+        <button type="button" className="link-button" onClick={() => takeCreditOff(a.id)}>Take it off…</button>
+      ) : null,
     });
   }
   for (const p of i.payments ?? []) {
@@ -388,7 +425,7 @@ export default function InvoiceDetail({ session }: { session: Session }) {
     } else {
       steps.push({
         tone: i.status === 'Overdue' ? 'bad' : 'todo',
-        title: (i.payments ?? []).length ? `${money(i.balanceCents)} still owed` : 'No payments against it',
+        title: (i.payments ?? []).length || (i.creditApplied ?? []).length ? `${money(i.balanceCents)} still owed` : 'No payments against it',
         meta: dueIn === null ? undefined : dueIn > 1 ? `Due in ${dueIn} days` : dueIn === 1 ? 'Due tomorrow'
           : dueIn === 0 ? 'Due today' : `${-dueIn} ${dueIn === -1 ? 'day' : 'days'} late`,
       });
@@ -471,10 +508,10 @@ export default function InvoiceDetail({ session }: { session: Session }) {
       );
     }
     if (panel === 'edit') {
-      const sub = edit.rows.reduce((a, r) => a + Math.max(0, Math.round(Number(r.qty) || 0)) * Math.max(0, toCents(r.price)), 0);
+      const items = edit.rows.map((r) => [Math.max(0, Math.round(Number(r.qty) || 0)), Math.max(0, toCents(r.price))] as const);
+      const sub = items.reduce((a, [q, p]) => a + q * p, 0);
       const off = edit.as === '$' ? Math.min(sub, toCents(edit.discount)) : Math.round(sub * (Number(edit.discount) || 0) / 100);
-      const gct = edit.gct ? Math.round((sub - off) * 0.15) : 0;
-      const newTotal = sub - off + gct;
+      const { gct, grandTotal: newTotal } = gctTotal(items, off, edit.gct);
       const toAdd = prices.filter((p) => !edit.rows.some((r) => r.productId === p.product_id));
       return (
         <>
@@ -743,7 +780,15 @@ export default function InvoiceDetail({ session }: { session: Session }) {
             )}
             {!i.is_credit_note && i.status !== 'Cancelled' && (
               <>
-                <div className="total-line"><span>Paid</span><span>{money(i.amountPaidCents)}</span></div>
+                {(() => {
+                  // "Settled" is payments plus credit notes applied (4 Nov 2026): show which.
+                  const credited = (i.creditApplied ?? []).reduce((a, c) => a + Number(c.amount_cents), 0);
+                  const paid = i.amountPaidCents - credited;
+                  return (<>
+                    {(paid !== 0 || credited === 0) && <div className="total-line"><span>Paid</span><span>{money(paid)}</span></div>}
+                    {credited > 0 && <div className="total-line"><span>Credit applied</span><span>{money(credited)}</span></div>}
+                  </>);
+                })()}
                 <div className={`total-line grand${i.balanceCents > 0 ? ' due' : ''}`}>
                   <span>Balance due</span><span>{money(i.balanceCents)}</span>
                 </div>
@@ -769,6 +814,29 @@ export default function InvoiceDetail({ session }: { session: Session }) {
                 {applyCents >= i.balanceCents ? ' to clear it' : ''}.
               </div>
               <button disabled={busy} onClick={() => applyHere(applyCents)}>Apply {money(applyCents)} here</button>
+            </section>
+          )}
+
+          {canApplyCredit && (
+            <section className="panel on-account">
+              <strong>{money(unused)} of credit note credit is unused
+                ({(i.creditUnused ?? []).map((c) => c.invoice_number).join(', ')}).</strong>
+              <div className="small" style={{ margin: '4px 0 10px' }}>
+                Apply {money(creditCents)} of it to this invoice{creditCents >= i.balanceCents ? ' to clear it' : ''}.
+                Their balance does not change; the invoice stops showing as owed.
+              </div>
+              <button disabled={busy} onClick={() => applyCreditHere()}>Apply {money(creditCents)} credit here</button>
+            </section>
+          )}
+          {i.is_credit_note && (i.appliedFrom ?? []).length > 0 && (
+            <section className="panel">
+              <h2 className="side-h">Applied to</h2>
+              <ul className="small" style={{ listStyle: 'none', padding: 0, margin: '4px 0' }}>
+                {(i.appliedFrom ?? []).map((a) => (
+                  <li key={a.id}><Link to={`/invoices/${a.invoice_id}`}>{a.invoice_number}</Link>: {money(Number(a.amount_cents))}</li>
+                ))}
+              </ul>
+              {i.balanceCents < 0 && <div className="muted small">{money(-i.balanceCents)} still unused.</div>}
             </section>
           )}
 

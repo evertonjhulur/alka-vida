@@ -9,6 +9,7 @@ import { money, toCents, day } from '../lib/format';
 import { todayInJamaica as todayJa } from '../lib/format';
 import CustomerPicker, { type PickerCustomer } from '../components/CustomerPicker';
 import { PaymentFixPanel, PaymentMenu, usePaymentFix } from '../components/PaymentMenu';
+import SplitTransfer from '../components/SplitTransfer';
 
 /**
  * Payments: money received outside a round (approved mockup, 29 Sep 2026).
@@ -24,7 +25,7 @@ import { PaymentFixPanel, PaymentMenu, usePaymentFix } from '../components/Payme
 interface Invoice {
   invoice_id: string; invoice_number: string; invoice_date: string; customer_id: string;
   grand_total_cents: number | string; balance_cents: number | string; status: string;
-  is_credit_note?: boolean;
+  is_credit_note?: boolean; customer_name?: string;
 }
 
 interface Unapplied {
@@ -56,6 +57,8 @@ export default function Payments() {
   const [busy, setBusy] = useState(false);
   /** Bumped after anything changes, so the list of payments received reloads. */
   const [stamp, setStamp] = useState(0);
+  /** "Split a bank transfer across customers" open (4 Nov 2026). */
+  const [splitting, setSplitting] = useState(false);
 
   const load = useCallback(async () => {
     const [c, u, inv] = await Promise.all([
@@ -177,8 +180,18 @@ export default function Payments() {
       {error && <div className="notice error">{error}</div>}
       {msg && <div className="notice ok">{msg}</div>}
 
-      <form className="panel" onSubmit={receive}>
-        <h2 style={{ marginTop: 0 }}>Record money received</h2>
+      {splitting && (
+        <SplitTransfer invoices={open} customers={customers} takeCard={takeCard}
+                       onCancel={() => setSplitting(false)}
+                       onDone={(m) => { setSplitting(false); setError(null); setMsg(m); load().catch(() => {}); setStamp((n) => n + 1); }} />
+      )}
+
+      {!splitting && <form className="panel" onSubmit={receive}>
+        <div className="row" style={{ justifyContent: 'space-between', alignItems: 'baseline', flexWrap: 'wrap', gap: 8 }}>
+          <h2 style={{ marginTop: 0 }}>Record money received</h2>
+          <button type="button" className="secondary" onClick={() => { setSplitting(true); setMsg(null); }}>
+            Split a bank transfer across customers…</button>
+        </div>
         <div className="pay-fields">
           <div className="field">
             <label htmlFor="pcust">From</label>
@@ -251,7 +264,7 @@ export default function Payments() {
             {busy ? 'Recording…' : `Record ${money(received)}`}
           </button>
         </div>
-      </form>
+      </form>}
 
       <div className="panel" style={{ padding: 0 }}>
         <div className="panel-pad">

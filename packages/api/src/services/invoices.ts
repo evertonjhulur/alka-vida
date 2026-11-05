@@ -17,6 +17,7 @@ import type { Actor } from './core.ts';
 import { audit, businessToday, nextNumber, requireRole, num, termsDays } from './core.ts';
 import type { Cents, InvoiceStatus } from '@alka/shared';
 import { computeTotals, computeLineTotal, RuleViolation, GCT_RATE } from '@alka/shared';
+import { autoApplyLinked, creditAppliedTo, unusedCredit } from './creditapply.ts';
 
 export interface InvoiceLineInput {
   productId: string;
@@ -608,6 +609,8 @@ export async function createCreditNote(
       isCreditNote: true, creditStatus, linkedInvoiceId: args.invoiceId ?? null,
       amountCents: -total, gctCents: -gct, byProduct: byLines, reason,
     });
+    // An admin's counts at once; raised against an invoice, it settles it.
+    if (isAdmin && args.invoiceId) await autoApplyLinked(t, actor, cn.id);
 
     return { id: cn.id, invoiceNumber: number, approvalRequestId, totalCents: total };
   });
@@ -700,8 +703,19 @@ export async function getInvoiceDetail(db: Db, invoiceId: string) {
        AND NOT q.is_reversal AND q.amount_cents > 0
        AND NOT EXISTS (SELECT 1 FROM payments r WHERE r.reverses_payment_id = q.id)`, [ledger.customerId],
   );
+  // Credit applied to this invoice, and the customer's credit notes with
+  // credit still unused (4 Nov 2026) - or, on a credit note, where it went.
+  const creditApplied = ledger.isCreditNote ? [] : await creditAppliedTo(db, invoiceId);
+  const creditUnused = ledger.isCreditNote ? [] : await unusedCredit(db, ledger.customerId);
+  const appliedFrom = ledger.isCreditNote
+    ? await db.query(
+      `SELECT a.id, a.invoice_id, inv.invoice_number, a.amount_cents::text AS amount_cents
+       FROM credit_applications a JOIN invoices inv ON inv.id = a.invoice_id
+       WHERE a.credit_note_id = $1 AND inv.lifecycle <> 'Cancelled' ORDER BY a.created_at`, [invoiceId])
+    : [];
   return {
     ...header, ...ledger, lines, payments, customer, orders,
     delivery, creditNotes, history, onAccountCents: Number(onAccount.cents),
+    creditApplied, creditUnused, appliedFrom,
   };
 }

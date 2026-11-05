@@ -2785,3 +2785,67 @@ leave no note on either account: the audit log is the only record.
 - Tests: test/paymentfix.test.ts (10). Shared 74, API 625, web 16 passing.
   Walked in a browser as admin (Payments: menu, move, delete) and as office
   (customer page: edit sent for approval, admin's Needs a decision).
+
+## GCT per unit, credit notes applied, split bank transfers, "Other" (4 Nov 2026)
+His points (from Luckie's testing): a 3 x 5-gallon customer pays J$1,500 but
+the invoice said J$1,499.99; how to apply a credit note to an open invoice;
+"Other" as a way to pay on the customer screen. (Deleting a payment was
+already in the payment ⋯ menu above.)
+- **GCT per unit** (his choice): `computeTotals` (shared/money.ts) works
+  out each unit's price WITH GCT, rounded to the cent (J$434.78 -> J$500.00),
+  times the quantity; a discount takes the same share off that total as off
+  the subtotal; GCT = total - net. So the GCT line can be a cent or so off an
+  exact 15% of the net (3 x 5-gal: 195.66, not 195.65). Used only when every
+  line says what it is made of (`units`/`unitPrice`, or cases/looseBottles
+  with their prices); a bare amount (opening balances) keeps the old sum.
+  Every caller now passes the units (approvals' discount recompute, order
+  edit/recompute, delivery's remaining-order total). The web screens use
+  `web/src/lib/gct.ts` (same rule): Orders, New sale, Portal, Quotes, invoice
+  edit, Sell jugs. New invoices only; an old invoice changes by a cent only
+  if it is edited. Reports' "not yet invoiced" estimate still uses 15% of net.
+- **Credit applied to invoices** (migration 039, services/creditapply.ts):
+  `credit_applications` (credit note, invoice, amount). Not money: no
+  payment, customer balance and statement unchanged. `invoice_ledger`
+  amount_paid_cents is now "settled" = Confirmed payments + credit applied TO
+  it; on a credit note it is minus what was applied FROM it, so a credit
+  note's balance_cents is the credit still unused. Applications on a
+  cancelled document are ignored by the view. Invariant 1 still holds (no
+  stored paid amount); invariant 6 is unchanged (credit notes, not payments).
+  - Automatic: a credit note raised AGAINST an invoice applies to it when it
+    counts (an admin's at once in createCreditNote; office's when approved,
+    approvals.ts). The migration applies existing approved linked credit
+    notes the same way (oldest first, never past what the invoice owed).
+  - By hand: invoice page "Apply $X credit here" (oldest unused first), and
+    Transactions tab "Apply to an invoice" on a credit note row (pick the
+    invoice). POST /api/invoices/:id/apply-credit {creditNoteId?, amountCents?}
+    (office or admin). An admin can "Take it off…" from the invoice timeline:
+    DELETE /api/credit-applications/:id.
+  - Shown: invoice page and PDF split "Paid" and "Credit applied"; credit note
+    page lists "Applied to"; Transactions shows a credit note as "Credit
+    unused" (still-open column) or "Credit applied". Audit: Invoice rows with
+    details.creditApplied / creditUnapplied and a `summary` sentence.
+  - Start fresh empties credit_applications.
+- "Other" added to the customer page's payment methods (Receive payment,
+  change, Sell jugs) and the payment ⋯ menu.
+- **Split a bank transfer across customers** (Luckie; QuickBooks' "Find
+  other matches"). Payments > "Split a bank transfer across customers…"
+  (components/SplitTransfer.tsx): amount, how (Bank transfer), date, bank
+  ref; every open invoice of every customer with search, from/to dates, tick
+  (fills what is owed, or what is left of the transfer) and a Payment box;
+  "received · on N invoices (M customers) · left". His rulings: the rest
+  stays as CREDIT on one customer picked (required when anything is left);
+  one payment + RCT number per customer, all with the bank reference, note
+  "Part of a J$X bank transfer paid for N customers (ref ...)"; receipts
+  emailed per customer, ticked by default; separate rows on Payments received
+  (no grouping); QuickBooks stays the bank reconciliation for now.
+  POST /api/payments/split -> services/splittransfer.ts (one transaction:
+  any refusal records nothing; insertPayment + planPayments per customer;
+  idempotency key, and a repeat press returns replayed). Office or admin.
+- Tests: shared money.test.ts (GCT per unit, 6), api creditapply.test.ts (5),
+  splittransfer.test.ts (4);
+  jugsales expectation now J$3,000.00 for two jugs; paymentfix "move" test
+  no longer depends on row order. Shared 80, API 634, web 16 passing.
+  Walked in a browser: 3 x 5-gal at J$434.78 = J$1,500.00; account-only
+  credit note applied from the invoice page; Transactions shows it applied;
+  a J$3,000 transfer split over two customers' invoices with J$861 left as
+  credit on a third (three RCT numbers, same reference).

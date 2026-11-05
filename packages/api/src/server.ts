@@ -28,6 +28,8 @@ import * as settlement from './services/settlement.ts';
 import * as invoices from './services/invoices.ts';
 import * as documents from './services/documents.ts';
 import * as payments from './services/payments.ts';
+import * as creditapply from './services/creditapply.ts';
+import * as splittransfer from './services/splittransfer.ts';
 import * as ledger from './services/ledger.ts';
 import * as customers from './services/customers.ts';
 import * as approvals from './services/approvals.ts';
@@ -1357,6 +1359,23 @@ export async function buildServer(db: Db) {
       return { ...r, ...(await maybeReceipt(req, r.paymentIds, body)) };
     });
 
+  // One bank transfer across several customers' invoices (4 Nov 2026): one
+  // payment and receipt per customer, the rest as credit on one customer.
+  app.post('/api/payments/split', { preHandler: allow('admin', 'user') },
+    async (req) => {
+      const body = req.body as { sendReceipt?: boolean };
+      const r = await splittransfer.splitTransfer(db, actorOf(req), req.body as never);
+      const receipts: Array<{ customerName: string; sentTo?: string; receiptNumber?: string; error?: string }> = [];
+      if (!r.replayed) {
+        for (const part of r.parts) {
+          const out = await maybeReceipt(req, part.paymentIds, { sendReceipt: body.sendReceipt });
+          if (out.receipt) receipts.push({ customerName: part.customerName, ...out.receipt });
+          else if (out.receiptError) receipts.push({ customerName: part.customerName, error: out.receiptError });
+        }
+      }
+      return { ...r, receipts };
+    });
+
   /**
    * "Send the customer a receipt" (Everton, 30 Sep 2026, point 18). The
    * payment is already recorded when this runs, so a receipt that cannot go
@@ -1382,6 +1401,23 @@ export async function buildServer(db: Db) {
       return payments.applyToInvoice(db, actorOf(req), {
         invoiceId: (req.params as { id: string }).id, amountCents: body.amountCents ?? null,
       });
+    });
+
+  // Unused credit-note credit put against one invoice (4 Nov 2026): one
+  // credit note, or the oldest first. Not money - see services/creditapply.ts.
+  app.post('/api/invoices/:id/apply-credit', { preHandler: allow('admin', 'user') },
+    async (req) => {
+      const body = (req.body ?? {}) as { creditNoteId?: string; amountCents?: number };
+      return creditapply.applyCredit(db, actorOf(req), {
+        invoiceId: (req.params as { id: string }).id,
+        creditNoteId: body.creditNoteId ?? null, amountCents: body.amountCents ?? null,
+      });
+    });
+  // Take applied credit back off an invoice (admin).
+  app.delete('/api/credit-applications/:id', { preHandler: allow('admin') },
+    async (req) => {
+      await creditapply.unapplyCredit(db, actorOf(req), (req.params as { id: string }).id);
+      return { ok: true };
     });
 
   // One unattached payment put against one invoice of the same customer.

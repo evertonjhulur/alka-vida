@@ -2,7 +2,7 @@ import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   computeTotals, computeLineTotal, assertQuantityShape, totalBottles,
-  parseAmount, formatAmount, roundCents, GCT_RATE,
+  parseAmount, formatAmount, roundCents, GCT_RATE, unitPriceWithGct,
 } from '../src/money.ts';
 
 describe('GCT calculation (Section 3, Step 5)', () => {
@@ -113,5 +113,35 @@ describe('amount parsing and formatting', () => {
   test('rounds half away from zero symmetrically', () => {
     assert.equal(roundCents(2.5), 3);
     assert.equal(roundCents(-2.5), -3);
+  });
+});
+
+describe('GCT per unit (4 Nov 2026)', () => {
+  const fiveGal = (n: number) => ({ lineTotal: n * 43_478, looseBottles: n, pricePerBottleCents: 43_478 });
+  test('three 5-gallons at J$434.78 come to J$1,500.00, not J$1,499.99', () => {
+    const t = computeTotals([fiveGal(3)]);
+    assert.equal(t.subtotal, 130_434);
+    assert.equal(t.grandTotal, 150_000);
+    assert.equal(t.gct, 19_566);
+  });
+  test('one, two and five are whole too; mixed with cases', () => {
+    for (const n of [1, 2, 4, 5, 12]) assert.equal(computeTotals([fiveGal(n)]).grandTotal, n * 50_000);
+    const t = computeTotals([fiveGal(2), { lineTotal: 2 * 86_956, cases: 2, pricePerCaseCents: 86_956 }]);
+    assert.equal(t.grandTotal, 100_000 + 2 * unitPriceWithGct(86_956));
+  });
+  test('a discount takes the same share off the total with GCT', () => {
+    const t = computeTotals([fiveGal(3)], 10);
+    assert.equal(t.grandTotal, 135_000);
+    assert.equal(t.subtotal - t.discountAmount + t.gct, t.grandTotal);
+  });
+  test('explicit units work the same; a bare amount keeps the old sum', () => {
+    assert.equal(computeTotals([{ lineTotal: 130_434, units: 3, unitPrice: 43_478 }]).grandTotal, 150_000);
+    assert.equal(computeTotals([{ lineTotal: 130_434 }]).grandTotal, 149_999);
+  });
+  test('no GCT means no change', () => {
+    assert.equal(computeTotals([fiveGal(3)], 0, false).grandTotal, 130_434);
+  });
+  test('half a cent rounds up', () => {
+    assert.equal(unitPriceWithGct(10), 12);
   });
 });
