@@ -516,6 +516,8 @@ export async function createCreditNote(
     amountCents?: Cents | null;
     lines?: readonly InvoiceLineInput[] | null;
     reason: string;
+    /** Put the credit on their open invoices now, oldest first (11 Nov 2026). */
+    applyToOpenInvoices?: boolean;
   },
 ): Promise<{ id: string; invoiceNumber: string; approvalRequestId: string | null; totalCents: Cents }> {
   requireRole(actor, 'admin', 'user');
@@ -598,7 +600,7 @@ export async function createCreditNote(
          RETURNING id`,
         [cn.id, number, customerId, -total, reason, actor.id,
          JSON.stringify({ subtotalCents: -subtotal, gctCents: -gct, totalCents: -total,
-           linkedInvoiceNumber: linkedNumber })],
+           linkedInvoiceNumber: linkedNumber, applyToOpenInvoices: !!args.applyToOpenInvoices })],
       );
       approvalRequestId = req.id;
       await t.query(`UPDATE invoices SET approval_request_id = $2 WHERE id = $1`,
@@ -610,7 +612,9 @@ export async function createCreditNote(
       amountCents: -total, gctCents: -gct, byProduct: byLines, reason,
     });
     // An admin's counts at once; raised against an invoice, it settles it.
-    if (isAdmin && args.invoiceId) await autoApplyLinked(t, actor, cn.id);
+    if (isAdmin && (args.invoiceId || args.applyToOpenInvoices)) {
+      await autoApplyLinked(t, actor, cn.id, { toOpenInvoices: !!args.applyToOpenInvoices });
+    }
 
     return { id: cn.id, invoiceNumber: number, approvalRequestId, totalCents: total };
   });

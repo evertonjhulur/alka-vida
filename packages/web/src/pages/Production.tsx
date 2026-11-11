@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react';
-import { api } from '../lib/api';
+import { Fragment, useEffect, useState } from 'react';
+import { api, getSession } from '../lib/api';
 import { money, date, when, todayInJamaica } from '../lib/format';
 
 interface Product { id: string; name: string; bottles_per_case: number; is_bottle_charge?: boolean; is_returnable?: boolean }
@@ -19,6 +19,8 @@ interface Run {
   id: string; batch_date: string; operator: string | null; product_name: string | null;
   cases: number; loose_bottles: number; total_bottles: number;
   material_cost_cents: number; status: string; jugs_scrapped?: number;
+  /** For the Edit panel (11 Nov 2026). */
+  bottles_per_case?: number; is_returnable?: boolean;
 }
 
 export default function Production() {
@@ -36,6 +38,45 @@ export default function Production() {
   const [error, setError] = useState<string | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  /** Delete… or Edit… open on a run (admins; 11 Nov 2026). */
+  const [fixing, setFixing] = useState<{
+    id: string; mode: 'delete' | 'edit'; reason: string;
+    date: string; operator: string; cases: string; loose: string; scrapped: string;
+  } | null>(null);
+  const isAdmin = getSession()?.role === 'admin';
+
+  function openFix(r: Run, mode: 'delete' | 'edit') {
+    setError(null); setMsg(null);
+    setFixing({ id: r.id, mode, reason: '', date: String(r.batch_date).slice(0, 10), operator: r.operator ?? '',
+      cases: String(Number(r.cases) || 0), loose: String(Number(r.loose_bottles) || 0), scrapped: String(Number(r.jugs_scrapped) || 0) });
+  }
+
+  async function saveFix() {
+    if (!fixing) return;
+    setBusy(true); setError(null); setMsg(null);
+    try {
+      if (fixing.mode === 'delete') {
+        const r = await api.post<{ bottles: number; productName: string }>(
+          `/api/production/${fixing.id}/delete`, { reason: fixing.reason.trim() });
+        setMsg(`Run deleted: ${r.bottles} ${r.productName} taken back off stock, and the materials (and any empties) put back.`);
+      } else {
+        const r = await api.post<{ bottles: number; productName: string; redone: boolean }>(
+          `/api/production/${fixing.id}/edit`, {
+            productionDate: fixing.date || null, operator: fixing.operator,
+            cases: Math.max(0, Math.round(Number(fixing.cases) || 0)),
+            looseBottles: Math.max(0, Math.round(Number(fixing.loose) || 0)),
+            jugsScrapped: Math.max(0, Math.round(Number(fixing.scrapped) || 0)),
+            reason: fixing.reason.trim() || null,
+          });
+        setMsg(r.redone ? `Run changed to ${r.bottles} ${r.productName}; stock and materials adjusted to match.` : 'Run changed.');
+      }
+      setFixing(null);
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not change the run');
+    } finally { setBusy(false); }
+  }
+
 
   const product = products.find((p) => p.id === productId);
   const bpc = product ? Number(product.bottles_per_case) : 0;
@@ -238,11 +279,13 @@ export default function Production() {
             <tr>
               <th>Date</th><th>Product</th><th>Operator</th>
               <th className="num">Output</th><th className="num">Material cost</th><th>Status</th>
+              {isAdmin && <th aria-label="Actions" />}
             </tr>
           </thead>
           <tbody>
             {runs.map((r) => (
-              <tr key={r.id}>
+              <Fragment key={r.id}>
+              <tr>
                 <td>{when(r.batch_date)}</td>
                 <td>{r.product_name ?? '—'}</td>
                 <td className="muted">{r.operator ?? '—'}</td>
@@ -257,7 +300,75 @@ export default function Production() {
                 </td>
                 <td className="num">{money(Number(r.material_cost_cents))}</td>
                 <td><span className="chip ok">{r.status}</span></td>
+                {isAdmin && (
+                  <td className="num tx-nowrap">
+                    {r.status === 'Completed' && fixing?.id !== r.id && (
+                      <>
+                        <button type="button" className="as-link small" onClick={() => openFix(r, 'edit')}>Edit…</button>{' '}
+                        <button type="button" className="link-button bad-text" onClick={() => openFix(r, 'delete')}>Delete…</button>
+                      </>
+                    )}
+                  </td>
+                )}
               </tr>
+              {fixing?.id === r.id && (
+                <tr>
+                  <td colSpan={isAdmin ? 7 : 6}>
+                    <div className="panel" style={{ margin: '4px 0 8px', background: 'var(--surface-2, #f7f9fc)' }}>
+                      {fixing.mode === 'delete' ? (
+                        <>
+                          <strong>Delete this run?</strong>
+                          <p className="small" style={{ margin: '4px 0 8px' }}>
+                            {Number(r.total_bottles)} {r.product_name} come back off stock and the materials{r.is_returnable ? ' and empties' : ''} go
+                            back. Use it for a run entered twice or by mistake.
+                          </p>
+                        </>
+                      ) : (
+                        <>
+                          <strong>Change this run</strong>
+                          <div className="row" style={{ gap: 8, flexWrap: 'wrap', marginTop: 6 }}>
+                            <div className="field"><label htmlFor="fx-date">Production date</label>
+                              <input id="fx-date" type="date" max={todayInJamaica()} value={fixing.date}
+                                     onChange={(e) => setFixing({ ...fixing, date: e.target.value })} /></div>
+                            {Number(r.bottles_per_case) > 0 && (
+                              <div className="field"><label htmlFor="fx-cases">Cases</label>
+                                <input id="fx-cases" inputMode="numeric" style={{ width: 90 }} value={fixing.cases}
+                                       onChange={(e) => setFixing({ ...fixing, cases: e.target.value })} /></div>
+                            )}
+                            <div className="field"><label htmlFor="fx-loose">{Number(r.bottles_per_case) > 0 ? 'Loose bottles' : 'Bottles'}</label>
+                              <input id="fx-loose" inputMode="numeric" style={{ width: 90 }} value={fixing.loose}
+                                     onChange={(e) => setFixing({ ...fixing, loose: e.target.value })} /></div>
+                            {r.is_returnable && (
+                              <div className="field"><label htmlFor="fx-scr">Jugs scrapped</label>
+                                <input id="fx-scr" inputMode="numeric" style={{ width: 90 }} value={fixing.scrapped}
+                                       onChange={(e) => setFixing({ ...fixing, scrapped: e.target.value })} /></div>
+                            )}
+                            <div className="field"><label htmlFor="fx-op">Operator</label>
+                              <input id="fx-op" value={fixing.operator}
+                                     onChange={(e) => setFixing({ ...fixing, operator: e.target.value })} /></div>
+                          </div>
+                          <p className="muted small" style={{ margin: '2px 0 6px' }}>
+                            A new quantity adjusts stock and materials to match, as if it had been entered that way.
+                            To change the product, delete the run and enter it again.
+                          </p>
+                        </>
+                      )}
+                      <div className="row" style={{ gap: 8, flexWrap: 'wrap', alignItems: 'flex-end' }}>
+                        <div className="field" style={{ flex: '1 1 260px' }}>
+                          <label htmlFor="fx-why">{fixing.mode === 'delete' ? 'Why (required)' : 'Why (optional)'}</label>
+                          <input id="fx-why" placeholder={fixing.mode === 'delete' ? 'e.g. entered twice' : 'e.g. wrong date'}
+                                 value={fixing.reason} onChange={(e) => setFixing({ ...fixing, reason: e.target.value })} />
+                        </div>
+                        <button type="button" className={fixing.mode === 'delete' ? 'danger-soft' : undefined}
+                                disabled={busy || (fixing.mode === 'delete' && !fixing.reason.trim())} onClick={saveFix}>
+                          {fixing.mode === 'delete' ? 'Delete run' : 'Save changes'}</button>
+                        <button type="button" className="secondary" onClick={() => setFixing(null)}>Cancel</button>
+                      </div>
+                    </div>
+                  </td>
+                </tr>
+              )}
+              </Fragment>
             ))}
           </tbody>
         </table>

@@ -109,7 +109,7 @@ export default function InvoiceDetail({ session }: { session: Session }) {
   const [moreOpen, setMoreOpen] = useState(false);
   const [pay, setPay] = useState({ amount: '', method: 'Cash', reference: '', receipt: true });
   const [disc, setDisc] = useState({ percent: '', reason: '', as: '%' as '%' | '$' });
-  const [credit, setCredit] = useState({ amount: '', reason: '' });
+  const [credit, setCredit] = useState({ amount: '', reason: '', applyOpen: true });
   const [edit, setEdit] = useState<{
     discount: string; as: '%' | '$'; gct: boolean; reason: string; rows: EditRow[];
     invoiceDate: string; dueDate: string; add: string;
@@ -154,7 +154,7 @@ export default function InvoiceDetail({ session }: { session: Session }) {
     if (p === panel) { setPanel(null); return; }
     if (p === 'pay') setPay({ amount: (i.balanceCents / 100).toFixed(2), method: 'Cash', reference: '', receipt: true });
     if (p === 'discount') setDisc({ percent: '', reason: '', as: '%' });
-    if (p === 'credit') setCredit({ amount: '', reason: '' });
+    if (p === 'credit') setCredit({ amount: '', reason: '', applyOpen: true });
     if (p === 'edit') {
       const fixed = Number(i.discount_fixed_cents) || 0;
       setEdit({
@@ -237,7 +237,7 @@ export default function InvoiceDetail({ session }: { session: Session }) {
   const raiseCredit = () => act(async () => {
     const r = await api.post<{ invoiceNumber?: string; approvalRequestId?: string | null }>(
       `/api/invoices/${i.invoiceId}/credit-note`,
-      { amountCents: toCents(credit.amount), reason: credit.reason.trim() });
+      { amountCents: toCents(credit.amount), reason: credit.reason.trim(), applyToOpenInvoices: credit.applyOpen });
     return r.approvalRequestId
       ? `Credit note for ${money(toCents(credit.amount))} raised and waiting in Needs a decision.`
       : `Credit note ${r.invoiceNumber ?? ''} for ${money(toCents(credit.amount))} raised.`;
@@ -393,7 +393,7 @@ export default function InvoiceDetail({ session }: { session: Session }) {
       title: <>Credit note {a.invoice_number} applied: {money(Number(a.amount_cents))}</>,
       meta: day(a.created_at),
       extra: isAdmin ? (
-        <button type="button" className="link-button" onClick={() => takeCreditOff(a.id)}>Take it off…</button>
+        <button type="button" className="as-link small" onClick={() => takeCreditOff(a.id)}>Take it off…</button>
       ) : null,
     });
   }
@@ -504,6 +504,10 @@ export default function InvoiceDetail({ session }: { session: Session }) {
                     disabled={busy || toCents(credit.amount) <= 0 || !credit.reason.trim()} onClick={raiseCredit}>
               Raise credit note</button></div>
           </div>
+          <label className="check">
+            <input type="checkbox" checked={credit.applyOpen} onChange={(e) => setCredit({ ...credit, applyOpen: e.target.checked })} />
+            Apply any credit this invoice does not need to their other open invoices, oldest first
+          </label>
         </>
       );
     }

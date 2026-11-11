@@ -302,6 +302,10 @@ function sentence(r: Row, L: Lookups): string {
     case 'Settings':
       if (d.emailWording) return d.reset ? `Wording of the ${String(d.emailWording).toLowerCase()} email put back to the standard.` : `Wording of the ${String(d.emailWording).toLowerCase()} email changed.`;
       break;
+    case 'ProductionBatch':
+      // A run deleted or edited (11 Nov 2026) writes its own sentence.
+      if ((d.deleted || d.edited) && typeof d.summary === 'string') return `${d.summary}${why}`;
+      break;
     default: break;
   }
   return '';

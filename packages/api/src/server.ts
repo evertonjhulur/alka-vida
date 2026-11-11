@@ -1413,6 +1413,15 @@ export async function buildServer(db: Db) {
         creditNoteId: body.creditNoteId ?? null, amountCents: body.amountCents ?? null,
       });
     });
+  // Unused credit over several invoices of one customer, oldest first (9 Nov 2026).
+  app.post('/api/customers/:id/apply-credit', { preHandler: allow('admin', 'user') },
+    async (req) => {
+      const body = (req.body ?? {}) as { creditNoteId?: string; invoiceIds?: string[] };
+      return creditapply.applyCreditAcross(db, actorOf(req), {
+        customerId: (req.params as { id: string }).id,
+        creditNoteId: body.creditNoteId ?? null, invoiceIds: body.invoiceIds ?? null,
+      });
+    });
   // Take applied credit back off an invoice (admin).
   app.delete('/api/credit-applications/:id', { preHandler: allow('admin') },
     async (req) => {
@@ -1577,6 +1586,10 @@ export async function buildServer(db: Db) {
 
   app.get('/api/raw-materials/:id/batches', { preHandler: allow('admin', 'user') },
     async (req) => catalog.materialBatches(db, (req.params as { id: string }).id));
+  // Correct a batch's cost each (admins; 11 Nov 2026) - opening stock counted at J$0.
+  app.post('/api/material-batches/:id/cost', { preHandler: allow('admin') },
+    async (req) => inventory.setBatchCost(db, actorOf(req), (req.params as { id: string }).id,
+      Number((req.body as { unitCostCents?: number } | null)?.unitCostCents)));
 
   // Material used outside a production run - 5gal labels applied to rotated
   // bottles being the case that requires it.
@@ -1632,6 +1645,13 @@ export async function buildServer(db: Db) {
 
   app.post('/api/production', { preHandler: allow('admin', 'user') },
     async (req) => inventory.completeProduction(db, actorOf(req), req.body as never));
+
+  // Delete or edit a run entered wrongly (11 Nov 2026). Admin only.
+  app.post('/api/production/:id/delete', { preHandler: allow('admin') },
+    async (req) => inventory.deleteProduction(db, actorOf(req), (req.params as { id: string }).id,
+      String((req.body as { reason?: string } | null)?.reason ?? '')));
+  app.post('/api/production/:id/edit', { preHandler: allow('admin') },
+    async (req) => inventory.editProduction(db, actorOf(req), (req.params as { id: string }).id, req.body as never));
 
   /* ---------------- stock ---------------- */
 

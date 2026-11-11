@@ -52,6 +52,8 @@ export async function lookupSupplierPrice(
 }
 
 export interface PoLineInput {
+  /** An existing line being changed (edit); left out for a new line. */
+  id?: string | null;
   rawMaterialId: string;
   quantityOrdered: number;
   unitCostCents?: Cents;
@@ -75,7 +77,8 @@ export async function envTaxRate(t: Queryable): Promise<number> {
  * GCT (15%) and the Environmental Levy (0.6375% from 3 Nov 2026) are worked out PER LINE, from
  * how the product is tagged for that supplier (Everton, 30 Sep 2026): a line
  * tagged GCT-exempt carries no GCT, one tagged Env-exempt no levy. Each is
- * worked out on the line's own amount, then summed.
+ * worked out on the line's own amount, then summed. GCT is charged on the
+ * levy too (Everton, 11 Nov 2026): GCT = 15% of (line + levy).
  */
 async function pricePoLines(t: Queryable, supplierId: string, lines: readonly PoLineInput[]) {
   if (lines.length === 0) throw new RuleViolation('a purchase order needs at least one line');
@@ -95,10 +98,11 @@ async function pricePoLines(t: Queryable, supplierId: string, lines: readonly Po
     const gctExempt = l.gctExempt ?? tag?.gct_exempt ?? false;
     const envExempt = l.envExempt ?? tag?.env_exempt ?? false;
     const lineTotal = Math.round(unitCost * qty);
+    const envTax = envExempt ? 0 : Math.round(lineTotal * env);
     out.push({
-      rawMaterialId: l.rawMaterialId, qty, unitCost, gctExempt, envExempt, lineTotal,
-      gct: gctExempt ? 0 : Math.round(lineTotal * GCT_RATE),
-      envTax: envExempt ? 0 : Math.round(lineTotal * env),
+      id: l.id ?? null, rawMaterialId: l.rawMaterialId, qty, unitCost, gctExempt, envExempt, lineTotal,
+      gct: gctExempt ? 0 : Math.round((lineTotal + envTax) * GCT_RATE),
+      envTax,
     });
   }
   return out;
@@ -167,34 +171,178 @@ export async function createPurchaseOrder(
  * POs must be editable). Once goods have come in, the lines are history -
  * they made FIFO batches at their cost - so it can no longer change.
  */
+/**
+ * Change a purchase order (Everton, 11 Nov 2026: "I'm not seeing an ability
+ * to edit POs" - it was refused once anything had been received).
+ *
+ * Nothing received yet (Draft or Sent): anyone in the office changes anything.
+ * Goods received against it: an administrator can still
+ *   - change the expected date and notes;
+ *   - change a line's quantity ordered, never below what has come in (if it
+ *     now equals what came in, the line is complete);
+ *   - correct a line's cost each - the stock already received from that line
+ *     is re-costed too (its batches), so what is still on the shelf costs
+ *     the right amount from now on (what production already used keeps the
+ *     cost it was charged);
+ *   - add lines, and remove or change lines nothing has been received on.
+ * A line with goods received keeps its material and supplier. The status is
+ * worked out again (Received when every line is in). Cancelled POs are final.
+ */
 export async function updatePurchaseOrder(
   db: Db, actor: Actor, poId: string,
   input: { supplierId?: string; lines: PoLineInput[]; expectedDeliveryDate?: string | null; notes?: string | null },
-): Promise<{ grandTotalCents: Cents }> {
+): Promise<{ grandTotalCents: Cents; status: string }> {
   requireRole(actor, 'admin', 'user');
   return db.tx(async (t) => {
     const po = await t.maybeOne<{ status: string; po_number: string; supplier_id: string }>(
       `SELECT status, po_number, supplier_id FROM purchase_orders WHERE id = $1 FOR UPDATE`, [poId],
     );
     if (!po) throw new RuleViolation('that purchase order no longer exists');
-    const received = await t.one<{ n: number }>(
-      `SELECT COALESCE(SUM(quantity_received),0)::float AS n FROM po_line_items WHERE po_id = $1`, [poId],
-    );
     if (po.status === 'Cancelled') throw new RuleViolation(`${po.po_number} was cancelled, so it can no longer be changed`);
-    if (num(received.n) > 0 || !['Draft', 'Sent'].includes(po.status)) {
-      throw new RuleViolation(`${po.po_number} has goods received against it, so it can no longer be changed`);
-    }
-    const supplierId = input.supplierId || po.supplier_id;
-    const priced = await pricePoLines(t, supplierId, input.lines ?? []);
-    await t.query(`DELETE FROM po_line_items WHERE po_id = $1`, [poId]);
-    await t.query(
-      `UPDATE purchase_orders SET supplier_id = $2, expected_delivery_date = $3, notes = $4 WHERE id = $1`,
-      [poId, supplierId, input.expectedDeliveryDate || null, input.notes ?? null],
+    const existing = await t.query<{ id: string; raw_material_id: string; quantity_received: string; unit_cost_cents: string; name: string }>(
+      `SELECT l.id, l.raw_material_id, l.quantity_received::text AS quantity_received, l.unit_cost_cents::text AS unit_cost_cents,
+              rm.name
+       FROM po_line_items l JOIN raw_materials rm ON rm.id = l.raw_material_id WHERE l.po_id = $1 FOR UPDATE OF l`, [poId],
     );
-    const totals = await writePoLines(t, poId, priced);
+    const anyReceived = existing.some((l) => Number(l.quantity_received) > 0);
+    if (anyReceived) requireRole(actor, 'admin');
+    const supplierId = input.supplierId || po.supplier_id;
+    if (anyReceived && supplierId !== po.supplier_id) {
+      throw new RuleViolation(`${po.po_number} has goods received from its supplier, so the supplier cannot change`);
+    }
+    const byId = new Map(existing.map((l) => [l.id, l]));
+    for (const l of input.lines ?? []) {
+      if (l.id && !byId.has(l.id)) throw new RuleViolation('one of those lines is not on this purchase order');
+    }
+    const priced = await pricePoLines(t, supplierId, input.lines ?? []);
+    const kept = new Set(priced.map((l) => l.id).filter(Boolean) as string[]);
+
+    // Lines taken off: only if nothing came in on them.
+    for (const l of existing) {
+      if (kept.has(l.id)) continue;
+      if (Number(l.quantity_received) > 0) {
+        throw new RuleViolation(`${l.name} has been received on this order, so it cannot be taken off; lower its quantity to what came in instead`);
+      }
+      await t.query(`DELETE FROM po_line_items WHERE id = $1`, [l.id]);
+    }
+
+    let subtotal = 0; let gct = 0; let envTax = 0;
+    for (const l of priced) {
+      const was = l.id ? byId.get(l.id)! : null;
+      const received = was ? Number(was.quantity_received) : 0;
+      if (was && received > 0) {
+        if (l.rawMaterialId !== was.raw_material_id) {
+          throw new RuleViolation(`${was.name} has been received on this order, so its material cannot change`);
+        }
+        if (l.qty < received - 1e-9) {
+          throw new RuleViolation(`${received} of ${was.name} have already come in, so the quantity ordered cannot be less than that`);
+        }
+        if (l.unitCost !== Number(was.unit_cost_cents)) {
+          // Re-cost what came in on this line, and what production already drew from it.
+          const bs = await t.query<{ id: string }>(`SELECT id FROM material_batches WHERE po_line_item_id = $1`, [l.id]);
+          for (const b of bs) await recostBatchTx(t, b.id, l.unitCost);
+        }
+      }
+      if (was) {
+        await t.query(
+          `UPDATE po_line_items SET raw_material_id = $2, quantity_ordered = $3, unit_cost_cents = $4,
+                  gct_exempt = $5, env_exempt = $6, line_total_cents = $7, gct_cents = $8, env_tax_cents = $9
+           WHERE id = $1`,
+          [l.id, l.rawMaterialId, l.qty, l.unitCost, l.gctExempt, l.envExempt, l.lineTotal, l.gct, l.envTax]);
+      } else {
+        await t.query(
+          `INSERT INTO po_line_items
+             (po_id, raw_material_id, quantity_ordered, unit_cost_cents,
+              gct_exempt, env_exempt, line_total_cents, gct_cents, env_tax_cents)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+          [poId, l.rawMaterialId, l.qty, l.unitCost, l.gctExempt, l.envExempt, l.lineTotal, l.gct, l.envTax]);
+      }
+      subtotal += l.lineTotal; gct += l.gct; envTax += l.envTax;
+    }
+
+    // Status again, now the quantities may have moved.
+    let status = po.status;
+    if (anyReceived) {
+      const out = await t.one<{ c: number }>(
+        `SELECT COUNT(*)::int AS c FROM po_line_items WHERE po_id = $1 AND quantity_received < quantity_ordered`, [poId]);
+      status = num(out.c) === 0 ? 'Received' : po.status === PO_CLOSED ? PO_CLOSED : 'Partially Received';
+    }
+    await t.query(
+      `UPDATE purchase_orders
+       SET supplier_id = $2, expected_delivery_date = $3, notes = $4, status = $5,
+           subtotal_cents = $6, gct_cents = $7, env_tax_cents = $8, grand_total_cents = $9, updated_at = now()
+       WHERE id = $1`,
+      [poId, supplierId, input.expectedDeliveryDate || null, input.notes ?? null, status,
+       subtotal, gct, envTax, subtotal + gct + envTax],
+    );
     await audit(t, actor, 'update', 'PurchaseOrder', poId, po.po_number,
-      { grandTotalCents: totals.grandTotal, lines: priced.length });
-    return { grandTotalCents: totals.grandTotal };
+      { grandTotalCents: subtotal + gct + envTax, lines: priced.length, afterReceiving: anyReceived || undefined, status });
+    return { grandTotalCents: subtotal + gct + envTax, status };
+  });
+}
+
+/**
+ * Correct what one stock batch cost (Everton, 11 Nov 2026: 55mm caps - and
+ * the labels, caps and handles counted on 3 Nov - went into production at
+ * J$0 because the 3 Nov count had no earlier cost to value them by, and PO-
+ * 001011 was received at J$0). Inside the caller's transaction:
+ *   - the batch's cost each, so what is left on the shelf costs that from now on;
+ *   - the ledger row that brought it in (count or PO receipt);
+ *   - every draw that took from this batch alone (production, issues): its
+ *     cost is worked out again, and so is the production run's cost (the
+ *     finished goods it made) - a run's cost on the Production screen is the
+ *     sum of its draws, so it follows.
+ * A draw that took from this batch AND others is left as it was (how much
+ * came from each was not recorded); the count of those is returned.
+ */
+export async function recostBatchTx(
+  t: Queryable, batchId: string, unitCostCents: Cents,
+): Promise<{ drawsRecosted: number; drawsLeft: number }> {
+  const cost = Math.round(Number(unitCostCents));
+  if (!(cost >= 0)) throw new RuleViolation('a cost cannot be negative');
+  await t.query(`UPDATE material_batches SET unit_cost_cents = $2 WHERE id = $1`, [batchId, cost]);
+  await t.query(
+    `UPDATE inventory_transactions SET unit_cost_cents = $2::bigint, total_cost_cents = ROUND($2::bigint * quantity)
+     WHERE direction = 'in' AND batch_ids = ARRAY[$1::uuid] AND item_type = 'RawMaterial'`, [batchId, cost]);
+  const draws = await t.query<{ id: string; reference: string | null }>(
+    `UPDATE inventory_transactions SET unit_cost_cents = $2::bigint, total_cost_cents = ROUND($2::bigint * quantity)
+     WHERE direction = 'out' AND batch_ids = ARRAY[$1::uuid] AND item_type = 'RawMaterial'
+     RETURNING id, reference`, [batchId, cost]);
+  const left = await t.one<{ n: number }>(
+    `SELECT COUNT(*)::int AS n FROM inventory_transactions
+     WHERE direction = 'out' AND item_type = 'RawMaterial' AND $1::uuid = ANY(batch_ids) AND cardinality(batch_ids) > 1`, [batchId]);
+  // The production runs those draws belong to: their finished-goods row carries the run's cost.
+  const runs = [...new Set(draws.map((d) => d.reference).filter((r): r is string => !!r && r.startsWith('Production ')))];
+  for (const ref of runs) {
+    await t.query(
+      `UPDATE inventory_transactions fg SET total_cost_cents = (
+         SELECT COALESCE(SUM(total_cost_cents), 0) FROM inventory_transactions r
+         WHERE r.reference = $1 AND r.item_type = 'RawMaterial' AND r.direction = 'out')
+       WHERE fg.reference = $1 AND fg.item_type = 'FinishedGoods' AND fg.direction = 'in'`, [ref]);
+  }
+  return { drawsRecosted: draws.length, drawsLeft: num(left.n) };
+}
+
+/** Correct a batch's cost from Raw materials › Batches (admins; 11 Nov 2026). */
+export async function setBatchCost(
+  db: Db, actor: Actor, batchId: string, unitCostCents: Cents,
+): Promise<{ drawsRecosted: number; drawsLeft: number; materialName: string }> {
+  requireRole(actor, 'admin');
+  return db.tx(async (t) => {
+    const b = await t.maybeOne<{ unit_cost_cents: string; name: string; po_line_item_id: string | null; po_number: string | null }>(
+      `SELECT mb.unit_cost_cents::text AS unit_cost_cents, rm.name, mb.po_line_item_id, po.po_number
+       FROM material_batches mb JOIN raw_materials rm ON rm.id = mb.raw_material_id
+       LEFT JOIN purchase_orders po ON po.id = mb.po_id
+       WHERE mb.id = $1 FOR UPDATE OF mb`, [batchId]);
+    if (!b) throw new RuleViolation('that batch no longer exists');
+    if (b.po_line_item_id) {
+      throw new RuleViolation(`this batch came in on ${b.po_number ?? 'a purchase order'}: correct the cost each on the purchase order (Edit), so the order and its stock agree`);
+    }
+    const r = await recostBatchTx(t, batchId, unitCostCents);
+    await audit(t, actor, 'update', 'RawMaterial', batchId, b.name, {
+      batchCost: { from: num(b.unit_cost_cents), to: Math.round(Number(unitCostCents)) }, ...r,
+    });
+    return { ...r, materialName: b.name };
   });
 }
 
@@ -503,28 +651,13 @@ export async function completeProduction(
   empties?: { drawn: number; scrapped: number; left: number } | null;
 }> {
   requireRole(actor, 'admin', 'user');
-  const day = input.productionDate ? String(input.productionDate).slice(0, 10) : null;
-  if (day && !/^\d{4}-\d{2}-\d{2}$/.test(day)) throw new RuleViolation('the production date is not a date');
-  if (day && day > businessToday()) throw new RuleViolation('a run cannot be recorded for a day still to come');
+  const day = checkRunDay(input.productionDate);
 
   return db.tx(async (t) => {
     const product = await t.one<{ name: string; bottles_per_case: number; is_returnable: boolean }>(
       `SELECT name, bottles_per_case, is_returnable FROM products WHERE id = $1`, [input.productId],
     );
-    const scrapped = Math.round(Number(input.jugsScrapped ?? 0) || 0);
-    if (scrapped < 0) throw new RuleViolation('jugs scrapped cannot be negative');
-    if (scrapped > 0 && !product.is_returnable) {
-      throw new RuleViolation('jugs scrapped only apply to a 5-gallon run');
-    }
-    const bpc = num(product.bottles_per_case);
-    const cases = input.cases ?? 0;
-    const loose = input.looseBottles ?? 0;
-    // Production counts BOTH, unlike the sales-side case-vs-bottle rule: a run
-    // can legitimately finish with a partial case, and those bottles are real
-    // stock. The restriction on selling loose bottles of a cased product is a
-    // sales rule and has no bearing on what the line actually produced.
-    const bottles = bpc > 0 ? cases * bpc + loose : loose;
-    if (bottles <= 0) throw new RuleViolation('a production run must produce at least one bottle');
+    const { cases, loose, bottles, scrapped } = runSize(product, input);
 
     const batch = await t.one<{ id: string }>(
       `INSERT INTO production_batches (operator, status, notes, batch_date, jugs_scrapped)
@@ -538,66 +671,311 @@ export async function completeProduction(
       [batch.id, input.productId, cases, loose, bottles],
     );
 
-    // The jug itself is never a recipe line: a 5-gallon run draws on the
-    // empties below instead, at no cost (jug cycle, 3 Nov 2026).
-    const bom = await t.query<{ raw_material_id: string; quantity: number }>(
-      `SELECT b.raw_material_id, b.quantity FROM bom_line_items b
-       JOIN raw_materials rm ON rm.id = b.raw_material_id
-       WHERE b.product_id = $1 AND NOT rm.is_returnable_jug`,
-      [input.productId],
-    );
-
-    let materialCost = 0;
-    for (const component of bom) {
-      const needed = num(component.quantity) * bottles;
-      const used = await consumeMaterial(t, actor, {
-        rawMaterialId: component.raw_material_id,
-        quantity: needed,
-        reference: `Production ${batch.id}`,
-        referenceType: 'ProductionBatch',
-      });
-      materialCost += used.totalCostCents;
-    }
-
-    await t.query(
-      `INSERT INTO finished_goods_stock (product_id, quantity_on_hand)
-       VALUES ($1,$2)
-       ON CONFLICT (product_id) DO UPDATE
-         SET quantity_on_hand = finished_goods_stock.quantity_on_hand + EXCLUDED.quantity_on_hand`,
-      [input.productId, bottles],
-    );
-    await t.query(
-      `INSERT INTO inventory_transactions
-         (item_type, item_id, item_name, quantity, direction, reference,
-          reference_type, total_cost_cents)
-       VALUES ('FinishedGoods',$1,$2,$3,'in',$4,'ProductionBatch',$5)`,
-      [input.productId, product.name, bottles, `Production ${batch.id}`, materialCost],
-      // (dated now: a backdated run still entered stock today, which is what
-      // a later stock count compares against)
-    );
-
-    // A 5-gallon run washes and fills jugs from the empties: one empty per
-    // jug filled, plus any found unusable. Allowed to go below zero - the
-    // plant may fill from empties a driver brought back mid-round before the
-    // round is settled - and the screen flags it.
-    let empties: { drawn: number; scrapped: number; left: number } | null = null;
-    if (product.is_returnable) {
-      const ref = `Production ${batch.id}`;
-      const moved = await moveEmpties(t, -bottles, 'ProductionBatch', ref,
-        `${bottles} jug${bottles === 1 ? '' : 's'} washed and filled: ${product.name}`, { day });
-      if (scrapped > 0) {
-        await moveEmpties(t, -scrapped, 'JugsScrapped', ref,
-          `${scrapped} jug${scrapped === 1 ? '' : 's'} scrapped on the run - business loss`, { day });
-      }
-      const jug = moved || scrapped > 0 ? await jugMaterial(t) : null;
-      if (jug) empties = { drawn: bottles + scrapped, scrapped, left: jug.onHand };
-    }
+    const made = await runMovements(t, actor, batch.id, input.productId, product, bottles, scrapped, day);
 
     await audit(t, actor, 'create', 'ProductionBatch', batch.id, product.name,
-      { bottlesProduced: bottles, materialCostCents: materialCost, jugsScrapped: scrapped || undefined,
-        emptiesLeft: empties?.left });
+      { bottlesProduced: bottles, materialCostCents: made.materialCost, jugsScrapped: scrapped || undefined,
+        emptiesLeft: made.empties?.left });
 
-    return { batchId: batch.id, bottlesProduced: bottles, materialCostCents: materialCost, empties };
+    return { batchId: batch.id, bottlesProduced: bottles, materialCostCents: made.materialCost, empties: made.empties };
+  });
+}
+
+/** The production date given, checked; null = today. */
+function checkRunDay(input: string | null | undefined): string | null {
+  const day = input ? String(input).slice(0, 10) : null;
+  if (day && !/^\d{4}-\d{2}-\d{2}$/.test(day)) throw new RuleViolation('the production date is not a date');
+  if (day && day > businessToday()) throw new RuleViolation('a run cannot be recorded for a day still to come');
+  return day;
+}
+
+/** Bottles a run made from its cases and loose bottles, and its scrapped jugs, checked. */
+function runSize(
+  product: { bottles_per_case: number; is_returnable: boolean },
+  input: { cases?: number; looseBottles?: number; jugsScrapped?: number | null },
+) {
+  const scrapped = Math.round(Number(input.jugsScrapped ?? 0) || 0);
+  if (scrapped < 0) throw new RuleViolation('jugs scrapped cannot be negative');
+  if (scrapped > 0 && !product.is_returnable) {
+    throw new RuleViolation('jugs scrapped only apply to a 5-gallon run');
+  }
+  const bpc = num(product.bottles_per_case);
+  const cases = Math.round(Number(input.cases ?? 0) || 0);
+  const loose = Math.round(Number(input.looseBottles ?? 0) || 0);
+  if (cases < 0 || loose < 0) throw new RuleViolation('cases and bottles cannot be negative');
+  // Production counts BOTH, unlike the sales-side case-vs-bottle rule: a run
+  // can legitimately finish with a partial case, and those bottles are real
+  // stock. The restriction on selling loose bottles of a cased product is a
+  // sales rule and has no bearing on what the line actually produced.
+  const bottles = bpc > 0 ? cases * bpc + loose : loose;
+  if (bottles <= 0) throw new RuleViolation('a production run must produce at least one bottle');
+  return { cases: bpc > 0 ? cases : 0, loose, bottles, scrapped };
+}
+
+/**
+ * What a run does to stock: materials drawn FIFO, finished bottles in, and
+ * for a 5-gallon run the empties drawn. Every row carries the reference
+ * "Production <id>", which is how the run's cost and an edit or delete find
+ * them again.
+ */
+async function runMovements(
+  t: Queryable, actor: Actor, batchId: string, productId: string,
+  product: { name: string; is_returnable: boolean }, bottles: number, scrapped: number, day: string | null,
+): Promise<{ materialCost: Cents; empties: { drawn: number; scrapped: number; left: number } | null }> {
+  // The jug itself is never a recipe line: a 5-gallon run draws on the
+  // empties below instead, at no cost (jug cycle, 3 Nov 2026).
+  const bom = await t.query<{ raw_material_id: string; quantity: number }>(
+    `SELECT b.raw_material_id, b.quantity FROM bom_line_items b
+     JOIN raw_materials rm ON rm.id = b.raw_material_id
+     WHERE b.product_id = $1 AND NOT rm.is_returnable_jug`,
+    [productId],
+  );
+
+  let materialCost = 0;
+  for (const component of bom) {
+    const needed = num(component.quantity) * bottles;
+    const used = await consumeMaterial(t, actor, {
+      rawMaterialId: component.raw_material_id,
+      quantity: needed,
+      reference: `Production ${batchId}`,
+      referenceType: 'ProductionBatch',
+    });
+    materialCost += used.totalCostCents;
+  }
+
+  await t.query(
+    `INSERT INTO finished_goods_stock (product_id, quantity_on_hand)
+     VALUES ($1,$2)
+     ON CONFLICT (product_id) DO UPDATE
+       SET quantity_on_hand = finished_goods_stock.quantity_on_hand + EXCLUDED.quantity_on_hand`,
+    [productId, bottles],
+  );
+  await t.query(
+    `INSERT INTO inventory_transactions
+       (item_type, item_id, item_name, quantity, direction, reference,
+        reference_type, total_cost_cents)
+     VALUES ('FinishedGoods',$1,$2,$3,'in',$4,'ProductionBatch',$5)`,
+    [productId, product.name, bottles, `Production ${batchId}`, materialCost],
+    // (dated now: a backdated run still entered stock today, which is what
+    // a later stock count compares against)
+  );
+
+  // A 5-gallon run washes and fills jugs from the empties: one empty per
+  // jug filled, plus any found unusable. Allowed to go below zero - the
+  // plant may fill from empties a driver brought back mid-round before the
+  // round is settled - and the screen flags it.
+  let empties: { drawn: number; scrapped: number; left: number } | null = null;
+  if (product.is_returnable) {
+    const ref = `Production ${batchId}`;
+    const moved = await moveEmpties(t, -bottles, 'ProductionBatch', ref,
+      `${bottles} jug${bottles === 1 ? '' : 's'} washed and filled: ${product.name}`, { day });
+    if (scrapped > 0) {
+      await moveEmpties(t, -scrapped, 'JugsScrapped', ref,
+        `${scrapped} jug${scrapped === 1 ? '' : 's'} scrapped on the run - business loss`, { day });
+    }
+    const jug = moved || scrapped > 0 ? await jugMaterial(t) : null;
+    if (jug) empties = { drawn: bottles + scrapped, scrapped, left: jug.onHand };
+  }
+  return { materialCost, empties };
+}
+
+interface RunRow {
+  status: string; batch_date: string; jugs_scrapped: number; operator: string | null;
+  product_id: string; product_name: string; bottles_per_case: number; is_returnable: boolean;
+  cases: number; loose_bottles: number; total_bottles: number;
+}
+
+async function lockRun(t: Queryable, batchId: string): Promise<RunRow> {
+  const run = await t.maybeOne<RunRow>(
+    `SELECT pb.status, pb.batch_date::text AS batch_date, pb.jugs_scrapped, pb.operator,
+            li.product_id, p.name AS product_name, p.bottles_per_case, p.is_returnable,
+            li.cases, li.loose_bottles, li.total_bottles
+     FROM production_batches pb
+     JOIN production_batch_line_items li ON li.batch_id = pb.id
+     JOIN products p ON p.id = li.product_id
+     WHERE pb.id = $1 FOR UPDATE OF pb`, [batchId],
+  );
+  if (!run) throw new RuleViolation('that production run no longer exists');
+  if (run.status === 'Reversed') throw new RuleViolation('that run has been deleted');
+  if (run.status !== 'Completed') throw new RuleViolation('only a completed run can be changed');
+  return run;
+}
+
+/**
+ * Put back everything a run did to stock, and retire its rows so they are
+ * not counted again (an edit records the run afresh under the same name):
+ *   - the finished bottles come back off stock (they must still be there,
+ *     less any the edited run will add back - `comingBack`);
+ *   - each material goes back into the FIFO layers it was drawn from, the
+ *     newest first, never above what a layer received (invariant 9);
+ *   - a 5-gallon run's empties go back to the plant, scrapped jugs included.
+ * The ledger keeps every row: the originals are relabelled "(deleted)" or
+ * "(before edit)" and the put-backs are recorded beside them.
+ */
+async function takeRunBack(
+  t: Queryable, batchId: string, run: RunRow, why: string, mode: 'delete' | 'edit', comingBack = 0,
+): Promise<{ hadEmpties: boolean }> {
+  const bottles = num(run.total_bottles);
+  const ref = `Production ${batchId}`;
+  const backRef = mode === 'delete' ? `Deleted production ${batchId}` : `Edit of production ${batchId}`;
+  const retired = mode === 'delete' ? `${ref} (deleted)` : `${ref} (before edit)`;
+  const note = mode === 'delete' ? `Run deleted: ${why}` : `Run edited: ${why}`;
+
+  const fg = await t.maybeOne<{ q: number }>(
+    `SELECT quantity_on_hand AS q FROM finished_goods_stock WHERE product_id = $1 FOR UPDATE`, [run.product_id]);
+  const onHand = num(fg?.q ?? 0);
+  if (onHand + comingBack < bottles) {
+    throw new RuleViolation(`only ${onHand} ${run.product_name} bottles are in stock, and this would take off ${bottles - comingBack}. `
+      + `Some have gone out already, so the run cannot be ${mode === 'delete' ? 'deleted' : 'made smaller'}; correct the stock with a count instead`);
+  }
+  await t.query(`UPDATE finished_goods_stock SET quantity_on_hand = quantity_on_hand - $2 WHERE product_id = $1`,
+    [run.product_id, bottles]);
+  await t.query(
+    `INSERT INTO inventory_transactions
+       (item_type, item_id, item_name, quantity, direction, reference, reference_type, notes)
+     VALUES ('FinishedGoods',$1,$2,$3,'out',$4,'Adjustment',$5)`,
+    [run.product_id, run.product_name, bottles, backRef, note],
+  );
+
+  const jug = await jugMaterial(t);
+  const outs = await t.query<{ item_id: string; item_name: string; quantity: string; total_cost_cents: string | null;
+    batch_ids: string[]; reference_type: string }>(
+    `SELECT item_id, item_name, quantity::text AS quantity, total_cost_cents::text AS total_cost_cents,
+            batch_ids, reference_type
+     FROM inventory_transactions
+     WHERE reference = $1 AND item_type = 'RawMaterial' AND direction = 'out'`, [ref],
+  );
+  let hadEmpties = false;
+  for (const o of outs) {
+    const qty = Number(o.quantity);
+    if (jug && o.item_id === jug.id) {
+      hadEmpties = true;
+      // ProductionBatch = jugs filled; JugsScrapped = jugs thrown out on the run.
+      await moveEmpties(t, Math.round(qty), o.reference_type === 'JugsScrapped' ? 'JugsScrapped' : 'Adjustment', backRef,
+        `${Math.round(qty)} jug${qty === 1 ? '' : 's'} back to the empties: ${mode === 'delete' ? 'run deleted' : 'run edited'}`,
+        { day: run.batch_date });
+      continue;
+    }
+    let left = qty;
+    for (const id of [...(o.batch_ids ?? [])].reverse()) {
+      if (left <= 1e-9) break;
+      const b = await t.maybeOne<{ room: string }>(
+        `SELECT (quantity_received - quantity_remaining)::text AS room FROM material_batches WHERE id = $1 FOR UPDATE`, [id]);
+      const put = Math.min(left, Number(b?.room ?? 0));
+      if (put <= 0) continue;
+      await t.query(
+        `UPDATE material_batches SET quantity_remaining = quantity_remaining + $2, status = 'Open' WHERE id = $1`, [id, put]);
+      left -= put;
+    }
+    if (left > 1e-6) throw new RuleViolation(`${o.item_name} cannot be put back where it came from; ask for help before changing this run`);
+    await t.query(`UPDATE raw_materials SET quantity_on_hand = quantity_on_hand + $2 WHERE id = $1`, [o.item_id, qty]);
+    await t.query(
+      `INSERT INTO inventory_transactions
+         (item_type, item_id, item_name, quantity, direction, reference, reference_type,
+          total_cost_cents, batch_ids, notes)
+       VALUES ('RawMaterial',$1,$2,$3,'in',$4,'Adjustment',$5,$6,$7)`,
+      [o.item_id, o.item_name, qty, backRef, o.total_cost_cents == null ? null : Number(o.total_cost_cents),
+       o.batch_ids ?? [], note],
+    );
+  }
+  // Retire the run's own rows: the run's cost and a later edit read only live ones.
+  await t.query(`UPDATE inventory_transactions SET reference = $2 WHERE reference = $1`, [ref, retired]);
+  return { hadEmpties };
+}
+
+/**
+ * Delete a production run entered by mistake (Everton, 11 Nov 2026: three
+ * runs of Fri 6 Nov were entered twice). Admin only; a reason is required.
+ * Everything the run did to stock is put back (takeRunBack). Refused if the
+ * bottles are no longer in stock (already sold or loaded): then the run
+ * happened and a stock count is the right correction. The run leaves the
+ * list; the stock ledger and the audit log keep the record.
+ */
+export async function deleteProduction(
+  db: Db, actor: Actor, batchId: string, reason: string,
+): Promise<{ bottles: number; productName: string }> {
+  requireRole(actor, 'admin');
+  const why = (reason ?? '').trim();
+  if (!why) throw new RuleViolation('say why the run is being deleted');
+  return db.tx(async (t) => {
+    const run = await lockRun(t, batchId);
+    const bottles = num(run.total_bottles);
+    const { hadEmpties } = await takeRunBack(t, batchId, run, why, 'delete');
+    await t.query(
+      `UPDATE production_batches SET status = 'Reversed', reversed_at = now(), reversed_by_id = $2, reversed_reason = $3
+       WHERE id = $1`, [batchId, actor.id, why]);
+    await audit(t, actor, 'delete', 'ProductionBatch', batchId, run.product_name, {
+      deleted: true, reason: why, bottles, batchDate: run.batch_date,
+      summary: `Production run of ${bottles} ${run.product_name} on ${run.batch_date} deleted: stock, materials${hadEmpties ? ' and empties' : ''} put back.`,
+    });
+    return { bottles, productName: run.product_name };
+  });
+}
+
+/**
+ * Edit a production run entered wrongly (Everton, 11 Nov 2026): the day, the
+ * operator, the cases / bottles, the jugs scrapped. Admin only. The product
+ * cannot change - delete the run and enter it again.
+ *
+ * Only the day or operator changed: updated in place (a 5-gallon run's
+ * empties rows move to the new day). Anything about the quantity changed:
+ * the old run is taken back (takeRunBack) and recorded afresh under the same
+ * run, all in one transaction - so a run made bigger needs the materials, and
+ * one made smaller needs the bottles it gives back still in stock.
+ */
+export async function editProduction(
+  db: Db, actor: Actor, batchId: string,
+  input: { productionDate?: string | null; operator?: string | null; cases?: number; looseBottles?: number;
+    jugsScrapped?: number | null; reason?: string | null },
+): Promise<{ bottles: number; productName: string; redone: boolean }> {
+  requireRole(actor, 'admin');
+  return db.tx(async (t) => {
+    const run = await lockRun(t, batchId);
+    const day = input.productionDate === undefined ? run.batch_date : (checkRunDay(input.productionDate) ?? businessToday());
+    const operator = input.operator === undefined ? run.operator : ((input.operator ?? '').trim() || run.operator);
+    const size = runSize(run, {
+      cases: input.cases ?? num(run.cases),
+      looseBottles: input.looseBottles ?? num(run.loose_bottles),
+      jugsScrapped: input.jugsScrapped ?? num(run.jugs_scrapped),
+    });
+    const why = (input.reason ?? '').trim() || 'entered wrongly';
+    const was = { day: run.batch_date, operator: run.operator, bottles: num(run.total_bottles),
+      cases: num(run.cases), loose: num(run.loose_bottles), scrapped: num(run.jugs_scrapped) };
+    const sizeChanged = size.bottles !== was.bottles || size.scrapped !== was.scrapped
+      || size.cases !== was.cases || size.loose !== was.loose;
+    if (!sizeChanged && day === was.day && operator === was.operator) {
+      throw new RuleViolation('nothing has been changed');
+    }
+
+    if (sizeChanged) {
+      await takeRunBack(t, batchId, run, why, 'edit', size.bottles);
+      await t.query(
+        `UPDATE production_batch_line_items SET cases = $2, loose_bottles = $3, total_bottles = $4 WHERE batch_id = $1`,
+        [batchId, size.cases, size.loose, size.bottles]);
+      await runMovements(t, actor, batchId, run.product_id,
+        { name: run.product_name, is_returnable: run.is_returnable }, size.bottles, size.scrapped, day);
+    } else if (day !== was.day) {
+      // Same run, another day: its empties rows are dated by the day.
+      await t.query(
+        `UPDATE inventory_transactions SET txn_date = ($2::text || 'T12:00:00-05:00')::timestamptz
+         WHERE reference = $1 AND reference_type IN ('ProductionBatch','JugsScrapped') AND item_type = 'RawMaterial'
+           AND item_id IN (SELECT id FROM raw_materials WHERE is_returnable_jug)`, [`Production ${batchId}`, day]);
+    }
+    await t.query(
+      `UPDATE production_batches SET batch_date = $2::date, operator = $3, jugs_scrapped = $4 WHERE id = $1`,
+      [batchId, day, operator, size.scrapped]);
+
+    const changes: string[] = [];
+    if (day !== was.day) changes.push(`day ${was.day} to ${day}`);
+    if (operator !== was.operator) changes.push(`operator ${was.operator ?? '-'} to ${operator ?? '-'}`);
+    if (size.bottles !== was.bottles) changes.push(`${was.bottles} to ${size.bottles} bottles`);
+    if (size.scrapped !== was.scrapped) changes.push(`jugs scrapped ${was.scrapped} to ${size.scrapped}`);
+    await audit(t, actor, 'update', 'ProductionBatch', batchId, run.product_name, {
+      edited: true, reason: input.reason ?? null, before: was,
+      after: { day, operator, bottles: size.bottles, cases: size.cases, loose: size.loose, scrapped: size.scrapped },
+      summary: `Production run of ${run.product_name} changed: ${changes.join(', ')}.`,
+    });
+    return { bottles: size.bottles, productName: run.product_name, redone: sizeChanged };
   });
 }
 
@@ -681,7 +1059,17 @@ export async function productionFeasibility(
 export async function listPurchaseOrders(db: Db, status?: string) {
   return db.query(
     `SELECT po.*, s.name AS supplier_name,
-            (SELECT COUNT(*)::int FROM po_line_items l WHERE l.po_id = po.id) AS line_count
+            (SELECT COUNT(*)::int FROM po_line_items l WHERE l.po_id = po.id) AS line_count,
+            -- Still to come in (11 Nov 2026): the unreceived share of each line, taxes
+            -- included; nothing once the PO is closed, cancelled or fully received.
+            CASE WHEN po.status IN ('Cancelled','Partially Received - Closed','Received') THEN 0 ELSE
+              (SELECT COALESCE(ROUND(SUM(
+                 (l.line_total_cents + l.gct_cents + l.env_tax_cents)
+                 * GREATEST(l.quantity_ordered - l.quantity_received, 0) / NULLIF(l.quantity_ordered, 0))), 0)::bigint
+               FROM po_line_items l WHERE l.po_id = po.id) END AS pending_cents,
+            CASE WHEN po.status IN ('Cancelled','Partially Received - Closed','Received') THEN 0 ELSE
+              (SELECT COALESCE(SUM(GREATEST(l.quantity_ordered - l.quantity_received, 0)), 0)::float
+               FROM po_line_items l WHERE l.po_id = po.id) END AS pending_qty
      FROM purchase_orders po JOIN suppliers s ON s.id = po.supplier_id
      WHERE ($1::text IS NULL OR po.status = $1)
      ORDER BY po.order_date DESC, po.po_number DESC`,
@@ -711,13 +1099,15 @@ export async function getPurchaseOrder(db: Db, poId: string) {
 export async function listProductionBatches(db: Db, limit = 50) {
   return db.query(
     `SELECT pb.id, pb.batch_date::text AS batch_date, pb.operator, pb.status, pb.notes, pb.jugs_scrapped,
-            p.name AS product_name, li.cases, li.loose_bottles, li.total_bottles,
+            p.name AS product_name, p.bottles_per_case, p.is_returnable, li.cases, li.loose_bottles, li.total_bottles,
             (SELECT COALESCE(SUM(total_cost_cents),0) FROM inventory_transactions it
              WHERE it.reference = 'Production ' || pb.id::text
                AND it.item_type = 'RawMaterial') AS material_cost_cents
      FROM production_batches pb
      LEFT JOIN production_batch_line_items li ON li.batch_id = pb.id
      LEFT JOIN products p ON p.id = li.product_id
+     -- A deleted run leaves the list (11 Nov 2026); the ledger and audit log keep it.
+     WHERE pb.status <> 'Reversed'
      ORDER BY pb.batch_date DESC, pb.created_at DESC
      LIMIT $1`,
     [limit],

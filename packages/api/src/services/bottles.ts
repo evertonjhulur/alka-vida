@@ -123,9 +123,10 @@ export async function poolFigures(db: Queryable): Promise<PoolFigures> {
      FROM (${CUSTOMER_MOVES}) m`,
   );
   const scrapped = jug ? await db.one<{ n: number }>(
-    `SELECT COALESCE(SUM(quantity), 0)::int AS n FROM inventory_transactions
-     WHERE item_type = 'RawMaterial' AND item_id = $1 AND reference_type = 'JugsScrapped'
-       AND direction = 'out'`, [jug.id]) : { n: 0 };
+    // Out, less any put back when a run was undone (11 Nov 2026).
+    `SELECT COALESCE(SUM(CASE WHEN direction = 'out' THEN quantity ELSE -quantity END), 0)::int AS n
+     FROM inventory_transactions
+     WHERE item_type = 'RawMaterial' AND item_id = $1 AND reference_type = 'JugsScrapped'`, [jug.id]) : { n: 0 };
   const empties = jug ? jug.onHand : 0;
   const fullN = full.reduce((s, r) => s + num(r.bottles), 0);
   return {

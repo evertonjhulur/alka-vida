@@ -8,7 +8,7 @@ import { counterSale } from '../src/services/counter.ts';
 import { createCreditNote, getInvoiceDetail } from '../src/services/invoices.ts';
 import { getCustomerBalance } from '../src/services/payments.ts';
 import { reviewApproval } from '../src/services/approvals.ts';
-import { applyCredit, unapplyCredit, unusedCredit } from '../src/services/creditapply.ts';
+import { applyCredit, applyCreditAcross, unapplyCredit, unusedCredit } from '../src/services/creditapply.ts';
 
 let f: Fixture;
 before(async () => { f = await setupFixture(); });
@@ -79,5 +79,70 @@ describe('credit notes applied to invoices', () => {
     const inv = await sale(f.otherCustomerId);
     const cn = await createCreditNote(f.db, f.admin, { customerId: f.customerId, amountCents: 300, reason: 'x' });
     await assert.rejects(applyCredit(f.db, f.office, { invoiceId: inv, creditNoteId: cn.id }), /different customer/);
+  });
+
+  test('one credit note over several invoices at once, oldest first, until it runs out', async () => {
+    const c = f.otherCustomerId;
+    // Clear what earlier tests left open for this customer, so the order is known.
+    const left = await f.db.query<{ invoice_id: string }>(
+      `SELECT invoice_id FROM invoice_ledger WHERE customer_id = $1 AND NOT is_credit_note AND balance_cents > 0 AND status <> 'Cancelled'`, [c]);
+    for (const l of left) await f.db.query(`UPDATE invoices SET lifecycle = 'Cancelled' WHERE id = $1`, [l.invoice_id]);
+    const a = await sale(c); const b = await sale(c); const d = await sale(c);
+    const owedA = await owes(a); const owedB = await owes(b);
+    const cn = await createCreditNote(f.db, f.admin, { customerId: c, amountCents: owedA + owedB - 100, reason: 'returns' });
+    const r = await applyCreditAcross(f.db, f.office, { customerId: c, creditNoteId: cn.id });
+    assert.equal(r.appliedCents, owedA + owedB - 100);
+    assert.equal(r.invoices.length, 2);
+    assert.equal(await owes(a), 0);
+    assert.equal(await owes(b), 100);
+    assert.equal(await owes(d), await owes(d), 'third untouched');
+    assert.equal(await owes(cn.id), 0);
+    await assert.rejects(applyCreditAcross(f.db, f.office, { customerId: c, creditNoteId: cn.id }), /no credit left/);
+  });
+
+  test('only the invoices ticked', async () => {
+    const c = f.customerId;
+    const a = await sale(c); const b = await sale(c);
+    const owedA = await owes(a); const owedB = await owes(b);
+    await createCreditNote(f.db, f.admin, { customerId: c, amountCents: owedA + owedB, reason: 'x' });
+    const r = await applyCreditAcross(f.db, f.office, { customerId: c, invoiceIds: [b] });
+    assert.equal(r.appliedCents, owedB);
+    assert.equal(await owes(b), 0);
+    assert.equal(await owes(a), owedA, 'not ticked: untouched');
+    await assert.rejects(applyCreditAcross(f.db, f.office, { customerId: f.otherCustomerId, invoiceIds: [a] }), /different customer/);
+  });
+
+  test('raised with "apply to their open invoices now": goes on the invoice picked, then the others, oldest first', async () => {
+    const c = f.customerId;
+    const left = await f.db.query<{ invoice_id: string }>(
+      `SELECT invoice_id FROM invoice_ledger WHERE customer_id = $1 AND NOT is_credit_note AND balance_cents > 0 AND status <> 'Cancelled'`, [c]);
+    for (const l of left) await f.db.query(`UPDATE invoices SET lifecycle = 'Cancelled' WHERE id = $1`, [l.invoice_id]);
+    const older = await sale(c); const picked = await sale(c);
+    const owedO = await owes(older); const owedP = await owes(picked);
+    const cn = await createCreditNote(f.db, f.admin, { invoiceId: picked, amountCents: owedP + owedO, reason: 'x', applyToOpenInvoices: true });
+    assert.equal(await owes(picked), 0, 'the invoice picked first');
+    assert.equal(await owes(older), 0, 'then the rest');
+    assert.equal(await owes(cn.id), 0);
+  });
+
+  test("office staff's, ticked: applied across when approved", async () => {
+    const c = f.otherCustomerId;
+    const left = await f.db.query<{ invoice_id: string }>(
+      `SELECT invoice_id FROM invoice_ledger WHERE customer_id = $1 AND NOT is_credit_note AND balance_cents > 0 AND status <> 'Cancelled'`, [c]);
+    for (const l of left) await f.db.query(`UPDATE invoices SET lifecycle = 'Cancelled' WHERE id = $1`, [l.invoice_id]);
+    const a = await sale(c); const b = await sale(c);
+    const owedA = await owes(a); const owedB = await owes(b);
+    const cn = await createCreditNote(f.db, f.office, { customerId: c, amountCents: owedA + 200, reason: 'y', applyToOpenInvoices: true });
+    assert.equal(await owes(a), owedA, 'nothing until approved');
+    await reviewApproval(f.db, f.admin, cn.approvalRequestId!, 'Approved');
+    assert.equal(await owes(a), 0);
+    assert.equal(await owes(b), owedB - 200);
+  });
+
+  test('not ticked, account only: left unused as before', async () => {
+    const c = f.customerId;
+    const inv = await sale(c); const owed = await owes(inv);
+    await createCreditNote(f.db, f.admin, { customerId: c, amountCents: 300, reason: 'z' });
+    assert.equal(await owes(inv), owed);
   });
 });

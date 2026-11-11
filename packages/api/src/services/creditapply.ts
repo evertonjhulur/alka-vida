@@ -131,6 +131,70 @@ export async function applyCredit(
   });
 }
 
+/**
+ * Unused credit over SEVERAL invoices at once (Everton, 9 Nov 2026: "one by
+ * one" was too slow - Treasure Isle had J$530 of credit and two invoices).
+ * The invoices named, or all the customer's open invoices, oldest first,
+ * until the credit (one credit note, or all of it) runs out. One transaction.
+ */
+export async function applyCreditAcross(
+  db: Db, actor: Actor, args: { customerId: string; creditNoteId?: string | null; invoiceIds?: readonly string[] | null },
+): Promise<{ appliedCents: Cents; invoices: string[]; creditNotes: string[] }> {
+  requireRole(actor, 'admin', 'user');
+  return db.tx((t) => applyCreditAcrossTx(t, actor, args));
+}
+
+/** applyCreditAcross inside the caller's transaction (credit note raised or approved). */
+export async function applyCreditAcrossTx(
+  t: Queryable, actor: Actor, args: { customerId: string; creditNoteId?: string | null; invoiceIds?: readonly string[] | null; quiet?: boolean },
+): Promise<{ appliedCents: Cents; invoices: string[]; creditNotes: string[] }> {
+  {
+    if (args.creditNoteId) {
+      const cn = await t.maybeOne<{ customer_id: string; invoice_number: string; credit_status: string; lifecycle: string; is_credit_note: boolean }>(
+        `SELECT customer_id, invoice_number, credit_status, lifecycle, is_credit_note FROM invoices WHERE id = $1`, [args.creditNoteId],
+      );
+      if (!cn || !cn.is_credit_note) throw new RuleViolation('that credit note no longer exists');
+      if (cn.customer_id !== args.customerId) throw new RuleViolation(`${cn.invoice_number} belongs to a different customer`);
+      if (cn.lifecycle === 'Cancelled') throw new RuleViolation(`${cn.invoice_number} is cancelled`);
+      if (cn.credit_status !== 'Approved') throw new RuleViolation(`${cn.invoice_number} is still waiting for approval`);
+    }
+    const wanted = args.invoiceIds?.length ? new Set(args.invoiceIds) : null;
+    const open = await t.query<{ invoice_id: string; customer_id: string; invoice_number: string }>(
+      `SELECT l.invoice_id, l.customer_id, l.invoice_number
+       FROM invoice_ledger l JOIN invoices i ON i.id = l.invoice_id
+       WHERE l.customer_id = $1 AND NOT l.is_credit_note AND l.status <> 'Cancelled' AND l.balance_cents > 0
+       ORDER BY COALESCE(l.due_date, l.invoice_date), l.invoice_date, i.created_at`, [args.customerId],
+    );
+    if (wanted) {
+      for (const id of wanted) {
+        if (!open.some((o) => o.invoice_id === id)) {
+          const x = await t.maybeOne<{ invoice_number: string; customer_id: string }>(`SELECT invoice_number, customer_id FROM invoices WHERE id = $1`, [id]);
+          if (!x) throw new RuleViolation('one of those invoices no longer exists');
+          if (x.customer_id !== args.customerId) throw new RuleViolation(`${x.invoice_number} belongs to a different customer`);
+          throw new RuleViolation(`${x.invoice_number} has nothing owed on it`);
+        }
+      }
+    }
+    const targets = open.filter((o) => !wanted || wanted.has(o.invoice_id));
+    if (targets.length === 0) {
+      if (args.quiet) return { appliedCents: 0, invoices: [], creditNotes: [] };
+      throw new RuleViolation('they have no open invoices to apply credit to');
+    }
+    let applied = 0;
+    const invoices: string[] = []; const used = new Set<string>();
+    for (const inv of targets) {
+      const r = await applyCreditTx(t, actor, { invoiceId: inv.invoice_id, creditNoteId: args.creditNoteId ?? null });
+      if (r.appliedCents <= 0) break; // the credit has run out
+      applied += r.appliedCents; invoices.push(inv.invoice_number);
+      r.creditNotes.forEach((c) => used.add(c));
+    }
+    if (applied <= 0 && !args.quiet) {
+      throw new RuleViolation(args.creditNoteId ? 'that credit note has no credit left to apply' : 'they have no unused credit to apply');
+    }
+    return { appliedCents: applied, invoices, creditNotes: [...used] };
+  }
+}
+
 /** Take credit back off an invoice (an admin, when it went on the wrong one). */
 export async function unapplyCredit(db: Db, actor: Actor, applicationId: string): Promise<void> {
   requireRole(actor, 'admin');
@@ -149,11 +213,19 @@ export async function unapplyCredit(db: Db, actor: Actor, applicationId: string)
   });
 }
 
-/** A credit note just approved: if it was raised against an invoice, apply it there. */
-export async function autoApplyLinked(t: Queryable, actor: Actor, creditNoteId: string): Promise<void> {
-  const cn = await t.maybeOne<{ linked_invoice_id: string | null; credit_status: string }>(
-    `SELECT linked_invoice_id, credit_status FROM invoices WHERE id = $1 AND is_credit_note`, [creditNoteId],
+/**
+ * A credit note just approved: if it was raised against an invoice, apply it
+ * there; if "apply to their open invoices now" was ticked (11 Nov 2026), the
+ * rest goes on their other open invoices, oldest first. Never refuses: the
+ * credit note is raised or approved whatever is left unused.
+ */
+export async function autoApplyLinked(
+  t: Queryable, actor: Actor, creditNoteId: string, opts: { toOpenInvoices?: boolean } = {},
+): Promise<void> {
+  const cn = await t.maybeOne<{ linked_invoice_id: string | null; credit_status: string; customer_id: string }>(
+    `SELECT linked_invoice_id, credit_status, customer_id FROM invoices WHERE id = $1 AND is_credit_note`, [creditNoteId],
   );
-  if (!cn?.linked_invoice_id || cn.credit_status !== 'Approved') return;
-  await applyCreditTx(t, actor, { invoiceId: cn.linked_invoice_id, creditNoteId, automatic: true });
+  if (!cn || cn.credit_status !== 'Approved') return;
+  if (cn.linked_invoice_id) await applyCreditTx(t, actor, { invoiceId: cn.linked_invoice_id, creditNoteId, automatic: true });
+  if (opts.toOpenInvoices) await applyCreditAcrossTx(t, actor, { customerId: cn.customer_id, creditNoteId, quiet: true });
 }

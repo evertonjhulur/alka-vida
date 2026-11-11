@@ -55,6 +55,8 @@ export default function CreditNotes({ session }: { session: Session }) {
   const [lines, setLines] = useState<Array<{ productId: string; qty: number; price: string; name?: string; bpc?: number }>>([]);
   const [amount, setAmount] = useState('');
   const [reason, setReason] = useState('');
+  /** Put it on their open invoices now, oldest first (11 Nov 2026). Ticked by default. */
+  const [applyOpen, setApplyOpen] = useState(true);
   const [gctExempt, setGctExempt] = useState(false);
 
   const load = () => api.get<Row[]>('/api/credit-notes').then(setRows);
@@ -104,14 +106,17 @@ export default function CreditNotes({ session }: { session: Session }) {
     return { subtotal: sub, gct, total: sub + gct };
   }, [how, amount, lines, gctExempt, prices]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  /** The customer's invoices with something still owed. */
+  const openCount = invoices.filter((i) => !i.is_credit_note && i.status !== 'Cancelled' && Number(i.balance_cents) > 0).length;
+
   async function raise(e: React.FormEvent) {
     e.preventDefault();
     setBusy(true); setError(null); setMsg(null);
     try {
       const body = how === 'amount'
-        ? { customerId, invoiceId: invoiceId || null, amountCents: toCents(amount), reason }
+        ? { customerId, invoiceId: invoiceId || null, amountCents: toCents(amount), reason, applyToOpenInvoices: applyOpen && openCount > 0 }
         : {
-          customerId, invoiceId: invoiceId || null, reason,
+          customerId, invoiceId: invoiceId || null, reason, applyToOpenInvoices: applyOpen && openCount > 0,
           lines: lines.filter((l) => l.qty > 0).map((l) => {
             const cased = Number(productOf(l.productId)?.bottles_per_case ?? l.bpc) > 0;
             return {
@@ -264,6 +269,13 @@ export default function CreditNotes({ session }: { session: Session }) {
             <input id="cn-why" required style={{ width: '100%' }} value={reason}
                    placeholder="e.g. 2 cases returned damaged on 28 Sep" onChange={(e) => setReason(e.target.value)} />
           </div>
+          {openCount > 0 && (
+            <label className="check" style={{ margin: '4px 0 10px' }}>
+              <input type="checkbox" checked={applyOpen} onChange={(e) => setApplyOpen(e.target.checked)} />
+              Apply it to their open invoices now, oldest first
+              {invoiceId ? ' (the invoice chosen above first)' : ''} · {openCount} open
+            </label>
+          )}
           <div className="totals-card" style={{ maxWidth: 360 }}>
             <div className="total-line"><span>Before GCT</span><span>{money(preview.subtotal)}</span></div>
             <div className="total-line"><span>{gctExempt ? 'GCT (exempt)' : 'GCT 15%'}</span><span>{money(preview.gct)}</span></div>

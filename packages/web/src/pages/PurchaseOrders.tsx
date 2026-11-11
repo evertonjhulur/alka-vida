@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import { api, openPdf, openPdfPost } from '../lib/api';
+import { api, getSession, openPdf, openPdfPost } from '../lib/api';
 import { openBatchSend, openSend, useSentRefresh } from '../lib/send';
 import { BatchBar, SortTh, MultiStatusSelect, passes, TickAllTh, TickTd, useSort, useTicks } from '../components/ListTools';
 import { downloadCsv, dollars } from '../lib/csv';
@@ -24,6 +24,10 @@ interface Supplier { id: string; name: string; email: string | null; materials: 
 interface PO {
   id: string; po_number: string; supplier_name: string; supplier_id: string; order_date: string;
   status: string; grand_total_cents: number; line_count: number; sent_to?: string | null;
+  /** Still to come in, taxes included (11 Nov 2026). */
+  pending_cents?: number | string;
+  /** Units still to come in, all lines together. */
+  pending_qty?: number | string;
 }
 interface POLine {
   id: string; raw_material_id: string; raw_material_name: string; unit_of_measure: string;
@@ -38,6 +42,8 @@ interface PODetail extends PO {
 interface DraftLine {
   rawMaterialId: string; qty: string; unitCost: string; autoPriced: boolean;
   gct: boolean; env: boolean;
+  /** Editing (11 Nov 2026): the line's id, and how much of it has come in already. */
+  id?: string; received?: number;
 }
 const BLANK_LINE: DraftLine = { rawMaterialId: '', qty: '', unitCost: '', autoPriced: false, gct: true, env: true };
 
@@ -95,6 +101,7 @@ export default function PurchaseOrders() {
   const poSort = useSort(poFiltered, {
     number: (p) => p.po_number, supplier: (p) => p.supplier_name, date: (p) => String(p.order_date).slice(0, 10),
     lines: (p) => Number(p.line_count), status: (p) => p.status, total: (p) => Number(p.grand_total_cents),
+    pending: (p) => Number(p.pending_cents ?? 0),
   });
   const poTicks = useTicks(poSort.sorted.map((p) => p.id));
   const poPicked = poSort.sorted.filter((p) => poTicks.has(p.id));
@@ -104,9 +111,9 @@ export default function PurchaseOrders() {
     finally { setBusy(false); }
   }
   const exportPos = (list: PO[]) => downloadCsv('purchase-orders', [
-    ['PO', 'Supplier', 'Ordered', 'Lines', 'Status', 'Total'],
+    ['PO', 'Supplier', 'Ordered', 'Lines', 'Status', 'Total', 'Pending'],
     ...list.map((p) => [p.po_number, p.supplier_name, String(p.order_date).slice(0, 10), String(p.line_count),
-      p.status, dollars(Number(p.grand_total_cents))]),
+      p.status, dollars(Number(p.grand_total_cents)), dollars(Number(p.pending_cents ?? 0))]),
   ]);
   const tagOf = (materialId: string) => supplier?.materials.find((m) => m.rawMaterialId === materialId);
 
@@ -125,8 +132,10 @@ export default function PurchaseOrders() {
 
   const lineTotal = (l: DraftLine) => Math.round((Number(l.qty) || 0) * toCents(l.unitCost || '0'));
   const subtotal = lines.reduce((s, l) => s + lineTotal(l), 0);
-  const gct = lines.reduce((s, l) => s + (l.gct ? Math.round(lineTotal(l) * 0.15) : 0), 0);
-  const env = lines.reduce((s, l) => s + (l.env ? Math.round(lineTotal(l) * envRate / 100) : 0), 0);
+  // GCT is charged on the levy too (11 Nov 2026), as the server works it out.
+  const envOf = (l: DraftLine) => (l.env ? Math.round(lineTotal(l) * envRate / 100) : 0);
+  const gct = lines.reduce((s, l) => s + (l.gct ? Math.round((lineTotal(l) + envOf(l)) * 0.15) : 0), 0);
+  const env = lines.reduce((s, l) => s + envOf(l), 0);
 
   function startNew() {
     setForm('new'); setSupplierId(''); setExpected(''); setNotes('');
@@ -139,6 +148,7 @@ export default function PurchaseOrders() {
       rawMaterialId: l.raw_material_id, qty: String(Number(l.quantity_ordered)),
       unitCost: (Number(l.unit_cost_cents) / 100).toFixed(2), autoPriced: false,
       gct: !l.gct_exempt, env: !l.env_exempt,
+      id: l.id, received: Number(l.quantity_received) || 0,
     })));
     setOpen(null);
     window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -151,6 +161,7 @@ export default function PurchaseOrders() {
       const payload = lines
         .filter((l) => l.rawMaterialId && Number(l.qty) > 0)
         .map((l) => ({
+          ...(l.id ? { id: l.id } : {}),
           rawMaterialId: l.rawMaterialId,
           quantityOrdered: Number(l.qty),
           ...(l.autoPriced ? {} : { unitCostCents: toCents(l.unitCost || '0') }),
@@ -248,6 +259,8 @@ export default function PurchaseOrders() {
    * Partially received - closed / Cancelled (deleted with nothing received).
    */
   const nothingReceived = open ? open.lines.every((l) => Number(l.quantity_received) === 0) : false;
+  /** A PO with goods received can still be edited by an administrator (11 Nov 2026). */
+  const isAdmin = getSession()?.role === 'admin';
   const ENDED = ['Received', 'Cancelled', 'Partially Received - Closed'];
   const statusLabel = (s: string) => ({
     Draft: 'Draft', Sent: 'Sent', Received: 'Received', 'Partially Received': 'Partially received',
@@ -318,7 +331,7 @@ export default function PurchaseOrders() {
                     {lines.map((l, i) => (
                       <tr key={i}>
                         <td>
-                          <select value={l.rawMaterialId} style={{ width: '100%' }}
+                          <select value={l.rawMaterialId} style={{ width: '100%' }} disabled={(l.received ?? 0) > 0}
                                   onChange={(e) => {
                                     const t = tagOf(e.target.value);
                                     setLine(i, { rawMaterialId: e.target.value, autoPriced: false,
@@ -330,6 +343,7 @@ export default function PurchaseOrders() {
                               <option key={m.rawMaterialId} value={m.rawMaterialId}>{m.name}</option>
                             ))}
                           </select>
+                          {(l.received ?? 0) > 0 && <div className="muted small">{l.received} received already: the quantity cannot go below that</div>}
                         </td>
                         <td>
                           <input type="number" min="0" step="any" style={{ width: 100 }} value={l.qty}
@@ -351,7 +365,7 @@ export default function PurchaseOrders() {
                         </td>
                         <td className="num">{money(lineTotal(l))}</td>
                         <td className="num">
-                          {lines.length > 1 && (
+                          {lines.length > 1 && !((l.received ?? 0) > 0) && (
                             <button type="button" className="danger-soft"
                                     onClick={() => setLines((c) => c.filter((_, x) => x !== i))}>Remove</button>
                           )}
@@ -365,8 +379,8 @@ export default function PurchaseOrders() {
                 </div>
                 <div style={{ maxWidth: 340, marginLeft: 'auto', marginTop: 12 }}>
                   <div className="total-line"><span>Subtotal</span><span>{money(subtotal)}</span></div>
-                  <div className="total-line"><span>GCT 15%</span><span>{money(gct)}</span></div>
                   <div className="total-line"><span>Environmental Levy {envRate}%</span><span>{money(env)}</span></div>
+                  <div className="total-line"><span>GCT 15% (levy included)</span><span>{money(gct)}</span></div>
                   <div className="total-line grand"><span>Order total</span><span>{money(subtotal + gct + env)}</span></div>
                   <button style={{ width: '100%', marginTop: 10 }} disabled={busy || !supplierId}>
                     {busy ? 'Saving…' : form === 'new' ? 'Create purchase order' : 'Save changes'}
@@ -415,6 +429,7 @@ export default function PurchaseOrders() {
                   <SortTh label="Lines" k="lines" sort={poSort.sort} onSort={poSort.onSort} />
                   <SortTh label="Status" k="status" sort={poSort.sort} onSort={poSort.onSort} />
                   <SortTh label="Total" k="total" sort={poSort.sort} onSort={poSort.onSort} className="num" />
+                  <SortTh label="Pending" k="pending" sort={poSort.sort} onSort={poSort.onSort} className="num" />
                   <th />
                 </tr>
               </thead>
@@ -428,6 +443,11 @@ export default function PurchaseOrders() {
                     <td>{p.line_count}</td>
                     <td><span className={`chip ${statusChip(p.status)}`}>{statusLabel(p.status)}</span></td>
                     <td className="num">{money(Number(p.grand_total_cents))}</td>
+                    <td className="num" title="Still to be received, taxes included">
+                      {Number(p.pending_cents ?? 0) > 0 ? money(Number(p.pending_cents))
+                        : Number(p.pending_qty ?? 0) > 0 ? <span className="small">{Number(p.pending_qty)} to come</span>
+                          : <span className="muted">—</span>}
+                    </td>
                     <td className="num">
                       <button className="secondary" onClick={() => openPO(p.id)}>{open?.id === p.id ? 'Close' : 'Open'}</button>
                     </td>
@@ -450,8 +470,8 @@ export default function PurchaseOrders() {
                       onClick={() => openPdf(`/api/purchase-orders/${open.id}/pdf`).catch((e) => setError(e.message))}>
                 View PDF</button>
               <span className={`chip ${statusChip(open.status)}`}>{statusLabel(open.status)}</span>
-              {nothingReceived && open.status !== 'Cancelled' && (
-                <button className="secondary" disabled={busy} onClick={() => startEdit(open)}>Change it</button>
+              {open.status !== 'Cancelled' && (nothingReceived || isAdmin) && (
+                <button className="secondary" disabled={busy} onClick={() => startEdit(open)}>Edit</button>
               )}
               {nothingReceived
                 ? open.status !== 'Cancelled' && <button className="danger-soft" disabled={busy} onClick={deleteIt}>Delete</button>
@@ -482,6 +502,7 @@ export default function PurchaseOrders() {
           <table>
             <thead>
               <tr><th>Material</th><th className="num">Ordered</th><th className="num">Already received</th>
+                <th className="num">Pending</th>
                 <th className="num">Cost each</th><th>Taxes</th><th>Receiving now</th></tr>
             </thead>
             <tbody>
@@ -490,6 +511,8 @@ export default function PurchaseOrders() {
                   <td>{l.raw_material_name}</td>
                   <td className="num">{Number(l.quantity_ordered)} {l.unit_of_measure}</td>
                   <td className="num">{Number(l.quantity_received)}</td>
+                  <td className="num">{ENDED.includes(open.status) ? <span className="muted">—</span>
+                    : Math.max(Number(l.quantity_ordered) - Number(l.quantity_received), 0)}</td>
                   <td className="num">{money(Number(l.unit_cost_cents))}</td>
                   <td className="small">{[l.gct_exempt ? null : 'GCT', l.env_exempt ? null : 'Env'].filter(Boolean).join(', ') || 'none'}</td>
                   <td>

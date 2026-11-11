@@ -10,7 +10,7 @@ import {
 import {
   createPurchaseOrder, receivePurchaseOrder, completeProduction,
   productionFeasibility, listPurchaseOrders, getPurchaseOrder,
-  finishedGoods, listInventoryTransactions, lookupSupplierPrice, issueMaterial,
+  finishedGoods, listInventoryTransactions, lookupSupplierPrice, issueMaterial, deleteProduction, editProduction, listProductionBatches, setBatchCost,
 } from '../src/services/inventory.ts';
 import {
   recordCount, reconcileCount, movementsSinceCount, listAudits,
@@ -180,8 +180,10 @@ describe('Purchase orders', () => {
     assert.equal(po.subtotalCents, 20_000 * 850 + 20_000 * 400);
     // GCT 15% and the Environmental Levy (0.6375% from 3 Nov 2026: 0.85% on
     // 75% of a local manufacturer's price) on every line not tagged Env-exempt.
-    assert.equal(po.grandTotalCents, po.subtotalCents + Math.round(po.subtotalCents * 0.15)
-      + Math.round(20_000 * 850 * 0.006375) + Math.round(20_000 * 400 * 0.006375));
+    // GCT is on the line plus its levy (11 Nov 2026).
+    const env1 = Math.round(20_000 * 850 * 0.006375); const env2 = Math.round(20_000 * 400 * 0.006375);
+    assert.equal(po.grandTotalCents, po.subtotalCents + env1 + env2
+      + Math.round((20_000 * 850 + env1) * 0.15) + Math.round((20_000 * 400 + env2) * 0.15));
   });
 
   test('receiving creates a FIFO batch and raises stock', async () => {
@@ -546,5 +548,100 @@ describe('Stock counts (InventoryAudit)', () => {
       }),
       /cannot be negative/,
     );
+  });
+});
+
+
+describe('Delete or edit a production run entered wrongly (11 Nov 2026)', () => {
+  const figures = async () => {
+    const m = await f.db.query<{ id: string; q: string; layers: string }>(
+      `SELECT rm.id, rm.quantity_on_hand::text AS q,
+              (SELECT COALESCE(SUM(quantity_remaining),0) FROM material_batches mb
+               WHERE mb.raw_material_id = rm.id AND mb.status = 'Open')::text AS layers
+       FROM raw_materials rm WHERE rm.id = ANY($1::uuid[]) ORDER BY rm.id`, [[preformId, capId]]);
+    const fg = await f.db.maybeOne<{ q: number }>(`SELECT quantity_on_hand q FROM finished_goods_stock WHERE product_id = $1`, [productId]);
+    return { m: m.map((r) => [r.id, Number(r.q), Number(r.layers)]), fg: Number(fg?.q ?? 0) };
+  };
+  const listed = async (id: string) =>
+    ((await listProductionBatches(f.db)) as Array<{ id: string; total_bottles: number; batch_date: string; material_cost_cents: string }>).find((r) => r.id === id);
+
+  test('a duplicate run is deleted: bottles off stock, materials back in their layers, gone from the list', async () => {
+    const before = await figures();
+    const run = await completeProduction(f.db, f.office, { productId, cases: 1, operator: 'Line 1' });
+    assert.notDeepEqual(await figures(), before);
+    await assert.rejects(deleteProduction(f.db, f.office, run.batchId, 'entered twice'), /admin|role/i);
+    await assert.rejects(deleteProduction(f.db, f.admin, run.batchId, ' '), /say why/);
+    await deleteProduction(f.db, f.admin, run.batchId, 'entered twice');
+    const after = await figures();
+    assert.deepEqual(after, before, 'everything back exactly as it was');
+    for (const [, q, layers] of after.m) assert.equal(q, layers, 'on hand still equals the open layers (invariant 9)');
+    assert.equal(await listed(run.batchId), undefined, 'no longer listed');
+    await assert.rejects(deleteProduction(f.db, f.admin, run.batchId, 'again'), /deleted/);
+  });
+
+  test('a 5-gallon run gives its empties back, scrapped jugs included', async () => {
+    const jug = async () => Number((await f.db.one<{ q: string }>(`SELECT quantity_on_hand::text q FROM raw_materials WHERE id = $1`, [f.jugMaterialId])).q);
+    const e0 = await jug();
+    const run = await completeProduction(f.db, f.office, { productId: f.fiveGalProductId, looseBottles: 5, jugsScrapped: 1 });
+    assert.equal(await jug(), e0 - 6);
+    await deleteProduction(f.db, f.admin, run.batchId, 'duplicate');
+    assert.equal(await jug(), e0);
+  });
+
+  test('refused when the bottles have already gone out of stock', async () => {
+    const run = await completeProduction(f.db, f.office, { productId, cases: 1 });
+    await f.db.query(`UPDATE finished_goods_stock SET quantity_on_hand = 10 WHERE product_id = $1`, [productId]);
+    await assert.rejects(deleteProduction(f.db, f.admin, run.batchId, 'oops'), /cannot be deleted/);
+    await f.db.query(`UPDATE finished_goods_stock SET quantity_on_hand = 1000 WHERE product_id = $1`, [productId]);
+  });
+
+  test('edit the day and operator only: in place, stock untouched', async () => {
+    const run = await completeProduction(f.db, f.office, { productId, cases: 1, productionDate: '2026-11-06' });
+    const before = await figures();
+    await assert.rejects(editProduction(f.db, f.office, run.batchId, { productionDate: '2026-11-05' }), /admin|role/i);
+    await editProduction(f.db, f.admin, run.batchId, { productionDate: '2026-11-05', operator: 'Collin Smith' });
+    assert.deepEqual(await figures(), before);
+    const r = await listed(run.batchId);
+    assert.equal(r!.batch_date, '2026-11-05');
+    await assert.rejects(editProduction(f.db, f.admin, run.batchId, { productionDate: '2026-11-05' }), /nothing has been changed/);
+  });
+
+  test('edit the quantity: the same as if it had been entered right the first time', async () => {
+    const start = await figures();
+    const right = await completeProduction(f.db, f.office, { productId, cases: 1 });
+    const rightFigures = await figures();
+    const rightCost = Number((await listed(right.batchId))!.material_cost_cents);
+    await deleteProduction(f.db, f.admin, right.batchId, 'test');
+    assert.deepEqual(await figures(), start);
+    const wrong = await completeProduction(f.db, f.office, { productId, cases: 2 });
+    await editProduction(f.db, f.admin, wrong.batchId, { cases: 1, reason: 'two typed for one' });
+    assert.deepEqual(await figures(), rightFigures, 'stock and materials as for one case');
+    const r = await listed(wrong.batchId);
+    assert.equal(Number(r!.total_bottles), 24);
+    assert.equal(Number(r!.material_cost_cents), rightCost, 'cost of the run as edited, not both');
+  });
+});
+
+
+describe('Correct a batch counted at J$0 (11 Nov 2026)', () => {
+  test('the batch, its count row and the draws from it alone take the new cost; a PO batch is refused', async () => {
+    const mat = (await createRawMaterial(f.db, f.office, { name: '55mm Cap', category: 'Cap' })).id;
+    const b = await f.db.one<{ id: string }>(
+      `INSERT INTO material_batches (raw_material_id, unit_cost_cents, quantity_received, quantity_remaining)
+       VALUES ($1, 0, 100, 100) RETURNING id`, [mat]);
+    await f.db.query(`UPDATE raw_materials SET quantity_on_hand = 100 WHERE id = $1`, [mat]);
+    await f.db.query(
+      `INSERT INTO inventory_transactions (item_type, item_id, item_name, quantity, direction, reference, reference_type, unit_cost_cents, total_cost_cents, batch_ids)
+       VALUES ('RawMaterial',$1,'55mm Cap',100,'in','Stock count x','Adjustment',0,0,ARRAY[$2::uuid])`, [mat, b.id]);
+    await issueMaterial(f.db, f.office, { rawMaterialId: mat, quantity: 30, reason: 'used' });
+    await assert.rejects(setBatchCost(f.db, f.office, b.id, 2_500), /admin|role/i);
+    const r = await setBatchCost(f.db, f.admin, b.id, 2_500);
+    assert.equal(r.drawsRecosted, 1);
+    const rows = await f.db.query<{ direction: string; total: string }>(
+      `SELECT direction, total_cost_cents::text AS total FROM inventory_transactions WHERE item_id = $1 ORDER BY direction`, [mat]);
+    assert.deepEqual(rows.map((x) => [x.direction, Number(x.total)]), [['in', 250_000], ['out', 75_000]]);
+
+    const poBatch = await f.db.one<{ id: string }>(`SELECT id FROM material_batches WHERE po_line_item_id IS NOT NULL LIMIT 1`);
+    await assert.rejects(setBatchCost(f.db, f.admin, poBatch.id, 1), /purchase order/);
   });
 });

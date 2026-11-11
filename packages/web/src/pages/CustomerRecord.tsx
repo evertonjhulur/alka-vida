@@ -99,6 +99,8 @@ const TX_DATES = [
 const KIND_WORDS: Record<Tx['kind'], string> = {
   invoice: 'Invoice', credit: 'Credit note', payment: 'Payment', reversal: 'Payment reversed',
 };
+/** "Apply to invoices" choice meaning every open invoice, oldest first. */
+const ALL_OPEN = '__all_open__';
 /** A number as WhatsApp wants it: with the country code (as the server's whatsappDigits). */
 function whatsappLink(raw: string | null | undefined): string | null {
   const d = (raw ?? '').replace(/\D/g, '');
@@ -312,6 +314,8 @@ export default function CustomerRecord({ session }: { session: Session }) {
   const tickedDocs = tickedTx.filter((t) => t.kind === 'invoice' || t.kind === 'credit');
   const tickedInvoices = tickedTx.filter((t) => t.kind === 'invoice');
   const tickedOwed = tickedInvoices.filter((t) => t.openCents > 0);
+  /** Credit-note credit not yet applied to an invoice (9 Nov 2026). */
+  const unusedCreditCents = allTx.filter((t) => t.kind === 'credit').reduce((a, t) => a + t.openCents, 0);
   const tickedPayRows = tickedTx.filter((t) => t.kind === 'payment' && t.reversed !== 'all')
     .flatMap((t) => (t.rows ?? []).filter((r) => !r.reversed && Number(r.amount_cents) > 0).map((r) => r.id));
   const filtered = !!(txType.length || txStatus.length || txRange);
@@ -364,10 +368,22 @@ export default function CustomerRecord({ session }: { session: Session }) {
   /** A credit note's unused credit put on one of their open invoices (4 Nov 2026). */
   const [creditFor, setCreditFor] = useState<{ key: string; invoiceId: string } | null>(null);
   const applyCreditNote = (creditNoteId: string, invoiceId: string) => run(async () => {
+    if (invoiceId === ALL_OPEN) { await applyCreditAcross({ creditNoteId }); return; }
     const r = await api.post<{ appliedCents: number }>(`/api/invoices/${invoiceId}/apply-credit`, { creditNoteId });
     setCreditFor(null);
     setMsg(`${money(r.appliedCents)} of credit applied. Their balance is unchanged; the invoice no longer shows that much owed.`);
   }, 'Could not apply the credit');
+  /** Credit over several invoices at once, oldest first (9 Nov 2026). */
+  async function applyCreditAcross(body: { creditNoteId?: string; invoiceIds?: string[] }) {
+    const r = await api.post<{ appliedCents: number; invoices: string[] }>(`/api/customers/${customerId}/apply-credit`, body);
+    setCreditFor(null);
+    setMsg(`${money(r.appliedCents)} of credit applied to ${r.invoices.join(', ')}. Their balance is unchanged; `
+      + `${r.invoices.length === 1 ? 'that invoice no longer shows' : 'those invoices no longer show'} that much owed.`);
+  }
+  const applyCreditToTicked = () => run(async () => {
+    await applyCreditAcross({ invoiceIds: tickedOwed.map((t) => t.invoice!.invoice_id) });
+  }, 'Could not apply the credit');
+  const applyAllCredit = () => run(async () => { await applyCreditAcross({}); }, 'Could not apply the credit');
 
   async function run(what: () => Promise<void>, fallback: string) {
     setBusy(true); setError(null); setMsg(null);
@@ -829,6 +845,12 @@ export default function CustomerRecord({ session }: { session: Session }) {
               {openSum - h.balanceCents > 0 ? `, less ${money(openSum - h.balanceCents)} credit` : ''}
             </span>
           </button>
+          {unusedCreditCents > 0 && openInvoices.length > 0 && (session.role === 'admin' || session.role === 'user') && (
+            <button type="button" className="as-link small" style={{ textAlign: 'left', margin: '-4px 0 8px' }} disabled={busy}
+                    onClick={applyAllCredit}>
+              Apply {money(Math.min(unusedCreditCents, openSum))} credit to the open invoices, oldest first
+            </button>
+          )}
           <button type="button" className="sum-btn"
                   onClick={() => { setTab('transactions'); setTxType(['invoice']); setTxStatus(['overdue']); setTxRange(''); }}>
             <span className="sum-k"><span className="dot late" aria-hidden="true" />Overdue</span>
@@ -1197,6 +1219,9 @@ export default function CustomerRecord({ session }: { session: Session }) {
                             disabledWhy: tickedDocs.length ? null : 'Tick an invoice or credit note' },
                           { label: 'Receive payment', run: () => payInvoices(tickedOwed),
                             disabledWhy: tickedOwed.length ? null : 'Nothing owed on what is ticked' },
+                          { label: 'Apply credit to them', run: applyCreditToTicked,
+                            disabledWhy: !tickedOwed.length ? 'Tick invoices with something owed'
+                              : unusedCreditCents > 0 ? null : 'No unused credit-note credit' },
                           { label: 'Mark as sent', run: markPickedSent,
                             disabledWhy: tickedInvoices.some((t) => invoiceState(t.invoice!) === 'Open') ? null : 'No ticked invoice is waiting to be sent' },
                           { label: 'Print receipts (one PDF)', run: printReceipts,
@@ -1290,12 +1315,13 @@ export default function CustomerRecord({ session }: { session: Session }) {
                           if (!owed.length) return null;
                           if (creditFor?.key !== t.key) {
                             return <button type="button" className="as-link small" disabled={busy}
-                                           onClick={() => setCreditFor({ key: t.key, invoiceId: owed[0].invoice!.invoice_id })}>Apply to an invoice</button>;
+                                           onClick={() => setCreditFor({ key: t.key, invoiceId: owed.length > 1 ? ALL_OPEN : owed[0].invoice!.invoice_id })}>Apply to invoices</button>;
                           }
                           return (
                             <span className="row" style={{ gap: 6, justifyContent: 'flex-end' }}>
                               <select aria-label="Invoice to apply the credit to" value={creditFor.invoiceId}
                                       onChange={(e) => setCreditFor({ key: t.key, invoiceId: e.target.value })}>
+                                {owed.length > 1 && <option value={ALL_OPEN}>All {owed.length} open invoices, oldest first</option>}
                                 {owed.map((x) => <option key={x.key} value={x.invoice!.invoice_id}>{x.number} · {money(x.openCents)} owed</option>)}
                               </select>
                               <button type="button" className="small" disabled={busy}

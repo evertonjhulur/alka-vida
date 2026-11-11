@@ -141,6 +141,25 @@ export default function RawMaterials({ session }: { session: Session }) {
     setBatches(await api.get<Batch[]>(`/api/raw-materials/${id}/batches`));
   }
 
+  /** Correct a batch's cost each - opening stock counted at J$0 (admins; 11 Nov 2026). */
+  const [costing, setCosting] = useState<{ id: string; value: string } | null>(null);
+  async function saveBatchCost(materialId: string) {
+    if (!costing) return;
+    setBusy(true); setError(null); setMsg(null);
+    try {
+      const r = await api.post<{ drawsRecosted: number; drawsLeft: number; materialName: string }>(
+        `/api/material-batches/${costing.id}/cost`, { unitCostCents: toCents(costing.value || '0') });
+      setCosting(null);
+      setMsg(`${r.materialName}: cost corrected to ${money(toCents(costing.value || '0'))} each.`
+        + (r.drawsRecosted ? ` ${r.drawsRecosted} use${r.drawsRecosted === 1 ? '' : 's'} of it (production runs, issues) re-costed to match.` : '')
+        + (r.drawsLeft ? ` ${r.drawsLeft} that also drew from another batch kept their cost.` : ''));
+      setBatches(await api.get<Batch[]>(`/api/raw-materials/${materialId}/batches`));
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not correct the cost');
+    } finally { setBusy(false); }
+  }
+
   async function createMaterial(e: React.FormEvent) {
     e.preventDefault();
     await run('Could not add the material', async () => {
@@ -634,7 +653,28 @@ export default function RawMaterials({ session }: { session: Session }) {
                       {/* Not every batch comes from a PO - opening stock and
                           count adjustments legitimately have none. */}
                       <td className="small muted">{b.po_number ?? '—'}</td>
-                      <td className="num">{money(Number(b.unit_cost_cents))}</td>
+                      <td className="num">
+                        {costing?.id === b.id ? (
+                          <span className="row" style={{ gap: 4, justifyContent: 'flex-end' }}>
+                            <input aria-label="Cost each" inputMode="decimal" style={{ width: 90 }} value={costing.value}
+                                   onChange={(e) => setCosting({ id: b.id, value: e.target.value })} />
+                            <button type="button" className="small" disabled={busy} onClick={() => saveBatchCost(m.id)}>Save</button>
+                            <button type="button" className="as-link small" onClick={() => setCosting(null)}>Cancel</button>
+                          </span>
+                        ) : (
+                          <>
+                            {money(Number(b.unit_cost_cents))}
+                            {session.role === 'admin' && !b.po_number && (
+                              <div><button type="button" className="as-link small"
+                                           onClick={() => setCosting({ id: b.id, value: (Number(b.unit_cost_cents) / 100).toFixed(2) })}>
+                                Correct cost…</button></div>
+                            )}
+                            {session.role === 'admin' && b.po_number && Number(b.unit_cost_cents) === 0 && (
+                              <div className="muted small">correct it on {b.po_number}</div>
+                            )}
+                          </>
+                        )}
+                      </td>
                       <td className="num">{Number(b.quantity_received)}</td>
                       <td className="num">{Number(b.quantity_remaining)}</td>
                       <td>

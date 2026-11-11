@@ -2849,3 +2849,96 @@ already in the payment ⋯ menu above.)
   credit note applied from the invoice page; Transactions shows it applied;
   a J$3,000 transfer split over two customers' invoices with J$861 left as
   credit on a third (three RCT numbers, same reference).
+
+## Credit over several invoices at once (9 Nov 2026)
+His report: on Treasure Isle the credit could only be applied one invoice at a
+time. Now (customer page; office or admin):
+- Money summary: "Apply $X credit to the open invoices, oldest first" when
+  there is unused credit-note credit and something open.
+- Transactions: a credit note's "Apply to invoices" choice starts on "All N
+  open invoices, oldest first" (single invoices still listed); Batch actions
+  "Apply credit to them" for the ticked invoices.
+- POST /api/customers/:id/apply-credit {creditNoteId?, invoiceIds?} ->
+  creditapply.applyCreditAcross: one transaction, oldest due first, stops
+  when the credit runs out; each invoice's application is audit-logged as
+  before. Tests: creditapply.test.ts (+2).
+- Note: api.test.ts "A full delivery cycle over HTTP" failed on Mon 9 Nov on
+  the deployed code too and passed on Wed 11 Nov - it depends on the day of
+  the week; to look at separately.
+
+## Credit applied when the credit note is raised; delete or edit a production run (11 Nov 2026)
+- **Credit note form tick** (his "yes"): "Apply it to their open invoices
+  now, oldest first" on Credit notes > New (shown when the customer has
+  something open; ticked by default) and on the invoice page's Credit note
+  panel ("apply any credit this invoice does not need to their other open
+  invoices"). createCreditNote({applyToOpenInvoices}); an admin's applies at
+  once, office staff's is kept in the approval payload and applied when
+  approved (approvals.ts -> autoApplyLinked(..., {toOpenInvoices})). The
+  invoice picked first, then applyCreditAcrossTx (oldest due first, quiet:
+  never refuses - whatever is left stays unused). Tests: creditapply (+3).
+- **Delete or edit a production run** (Fri 6 Nov: 5 Gallon 39, 500 ml 50
+  cases, 280 ml 80 cases entered twice by Collin Smith; his wording: Delete,
+  not Undo, and an Edit for wrong dates/numbers). Production > Recent runs >
+  Edit… / Delete… (admins). Migration 040 (file 040_undo_production.sql:
+  status 'Reversed' = deleted, reversed_at/by/reason).
+  - Delete (reason required) -> inventory.deleteProduction, POST
+    /api/production/:id/delete. takeRunBack puts back everything: bottles
+    off finished stock (refused if fewer are in stock - a stock count is the
+    fix then), each material into the FIFO layers it came from, newest
+    first, never above what a layer received (invariant 9), a 5-gallon run's
+    empties (scrapped too: JugsScrapped 'in'; the pool's scrapped figure nets
+    those off). The run's own ledger rows are relabelled "Production <id>
+    (deleted)" beside the put-backs; the run leaves the list.
+  - Edit (date, operator, cases/bottles, jugs scrapped; reason optional;
+    product cannot change) -> inventory.editProduction, POST
+    /api/production/:id/edit. Day/operator only: in place (a 5-gallon run's
+    empties rows move to the day). Quantity: takeRunBack (rows relabelled
+    "(before edit)") then runMovements afresh under the same run, one
+    transaction; the run's cost reads only live "Production <id>" rows.
+  - completeProduction split into checkRunDay / runSize / runMovements so
+    edit records a run exactly as entry does. Audit sentences.
+  - Tests: inventory.test.ts (+5: delete, empties, refusal, edit day, edit
+    quantity = as if entered right).
+- Shared 80, API 644, web 16 passing. Walked in a browser: two identical
+  500 ml runs; one edited to 3 cases and a day earlier, then deleted.
+
+## Purchasing and stock costs: GCT on the levy, Pending, edit received POs, correct J$0 batches (11 Nov 2026)
+His notes, and what the live app showed (read via the Browser pane, nothing changed):
+- "55mm caps not captured in 5 gal production; material cost not showing":
+  the 5 Gallon recipe has 1 x 55mm Cap and every run DOES draw them (524
+  counted 3 Nov + 100 on PO-001011, 248 left). They cost J$0: the 3 Nov count
+  valued overages at the blended average of earlier batches - there were
+  none - so labels, 28/48/55mm caps, 5 L handles and 5 L bottles all came in
+  at J$0; and PO-001011 was received at J$0 each.
+- "Are Alka Lyfe's orders depleting stock as agreed?": yes - SO-001159,
+  SO-001171, SO-001183 each match their Sale rows line for line. Alka Lyfe
+  1.5 L stands at -120 bottles: 12 counted + 192 made (run dated 6 Nov) vs
+  216 + 12 + 96 sold. A run of 10+ cases not entered, or the 3 Nov count low.
+Built:
+- **GCT on the Environmental Levy** (pricePoLines): GCT = 15% of (line +
+  levy) on a line that carries both. The PO form estimate matches; the PDF
+  shows the levy before GCT ("on the levy as well"). Existing POs keep their
+  figures until edited.
+- **Pending** on Purchase orders: list column (unreceived share of each line,
+  taxes included; "N to come" when that is J$0; blank once Received, Closed
+  or Cancelled; sorts; in the Excel export) and a Pending quantity column in
+  the open PO's lines.
+- **Edit a PO after goods are received** (admins; "Edit" in the open PO,
+  was "Change it" and hidden once anything came in). updatePurchaseOrder now
+  updates lines in place by id: quantity never below what came in, a line
+  with receipts keeps its material and supplier and cannot be removed, lines
+  can be added, cost each can be corrected - the batches that came in on it
+  are re-costed with recostBatchTx. Status worked out again (Received when
+  every line is in; Closed stays Closed). Office staff still edit only POs
+  with nothing received.
+- **Correct cost… on a batch** (Raw materials > Batches, admins, batches not
+  from a PO): POST /api/material-batches/:id/cost -> setBatchCost ->
+  recostBatchTx: the batch, its count/receipt row, every draw from that
+  batch alone (production, issues), and those production runs' finished-goods
+  cost row. A draw from that batch and others keeps its cost (the split was
+  not recorded); the screen says how many.
+- Tests: revisions.test.ts (levy GCT, edit after receipt, pending),
+  inventory.test.ts (PO total, batch cost). Shared 80, API 645, web 16.
+After it goes live: edit PO-001011 with the 55mm cap's real cost each; use
+Correct cost… on each 3 Nov count batch at J$0 (labels, caps, handles,
+5 L bottles); check Alka Lyfe 1.5 L production/count.

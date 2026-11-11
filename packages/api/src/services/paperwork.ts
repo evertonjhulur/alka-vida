@@ -248,7 +248,6 @@ async function drawPo(doc: PDFKit.PDFDocument, db: Db, poId: string) {
     doc.moveDown(0.35);
   };
   row('Subtotal', num(po.subtotal_cents));
-  row('GCT 15% (items marked G)', num(po.gct_cents));
   // The rate this PO was priced at, so an older PO still prints its own
   // rate after the setting changes (0.375% -> 0.6375%, 3 Nov 2026).
   const envBase = po.lines.filter((l) => !l.env_exempt)
@@ -257,6 +256,8 @@ async function drawPo(doc: PDFKit.PDFDocument, db: Db, poId: string) {
     ? String(Math.round((num(po.env_tax_cents) / envBase) * 100 * 10000) / 10000)
     : (envRate?.value ?? '0.6375');
   row(`Environmental Levy ${pricedAt}% (items marked E)`, num(po.env_tax_cents));
+  // GCT is charged on the levy too (11 Nov 2026), so the levy comes first.
+  row('GCT 15% (items marked G, on the levy as well)', num(po.gct_cents));
   row('Total', num(po.grand_total_cents), true);
   if (po.notes) doc.moveDown(1).fontSize(9).fillColor('#333').text(String(po.notes), 50, doc.y, { width: 510 });
   doc.moveDown(2).fontSize(8).fillColor('#777')

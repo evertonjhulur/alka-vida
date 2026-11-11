@@ -24,7 +24,7 @@ import {
 } from '../src/services/paperwork.ts';
 import { emailInvoices, renderInvoicePdf, setMailSinkForTests, type MailMessage } from '../src/services/documents.ts';
 import {
-  createPurchaseOrder, updatePurchaseOrder, deletePurchaseOrder, receivePurchaseOrder, getPurchaseOrder,
+  createPurchaseOrder, updatePurchaseOrder, listPurchaseOrders, deletePurchaseOrder, receivePurchaseOrder, getPurchaseOrder,
 } from '../src/services/inventory.ts';
 import { createSupplier, createRawMaterial, setSupplierMaterial } from '../src/services/catalog.ts';
 import { receivePayment } from '../src/services/payments.ts';
@@ -481,9 +481,9 @@ describe('Purchasing', () => {
       ],
     });
     assert.equal(po.subtotalCents, 1_100_000);
-    assert.equal(po.gctCents, 150_000);
     assert.equal(po.envTaxCents, 6_375, '0.6375% of 10,000.00 (3 Nov 2026)');
-    assert.equal(po.grandTotalCents, 1_256_375);
+    assert.equal(po.gctCents, 150_956, 'GCT on the line AND its levy: 15% of 10,063.75 (11 Nov 2026)');
+    assert.equal(po.grandTotalCents, 1_100_000 + 150_956 + 6_375);
     const pdf = await renderPoPdf(f.db, po.id);
     assert.ok(pdf.pdf.length > 1000);
 
@@ -495,7 +495,8 @@ describe('Purchasing', () => {
     await updatePurchaseOrder(f.db, f.office, po.id, { lines: [{ rawMaterialId: taxed, quantityOrdered: 500 }] });
     const edited = await getPurchaseOrder(f.db, po.id) as { grand_total_cents: number; lines: unknown[] };
     assert.equal(edited.lines.length, 1);
-    assert.equal(Number(edited.grand_total_cents), 500_000 + 75_000 + 3_188); // levy 0.6375% of 5,000.00 = 31.875, rounded
+    // levy 0.6375% of 5,000.00 = 31.875 -> 31.88; GCT 15% of 5,031.88 = 754.78
+    assert.equal(Number(edited.grand_total_cents), 500_000 + 75_478 + 3_188);
 
     await deletePurchaseOrder(f.db, f.office, po.id);
     // 7 Oct 2026 (point 14): deleting with nothing received keeps the PO,
@@ -503,14 +504,42 @@ describe('Purchasing', () => {
     assert.equal(((await getPurchaseOrder(f.db, po.id)) as { status: string }).status, 'Cancelled');
   });
 
-  test('once goods are received, a PO can be neither changed nor deleted', async () => {
+  test('once goods are received: not deleted, but an admin can still change it (11 Nov 2026)', async () => {
     const po = await createPurchaseOrder(f.db, f.office, {
-      supplierId, lines: [{ rawMaterialId: taxed, quantityOrdered: 100 }],
+      supplierId, lines: [{ rawMaterialId: taxed, quantityOrdered: 100, unitCostCents: 1_000 }],
     });
     const detail = await getPurchaseOrder(f.db, po.id) as { lines: Array<{ id: string }> };
-    await receivePurchaseOrder(f.db, f.office, po.id, [{ poLineItemId: detail.lines[0].id, quantityReceived: 50 }]);
-    await assert.rejects(updatePurchaseOrder(f.db, f.office, po.id,
-      { lines: [{ rawMaterialId: taxed, quantityOrdered: 10 }] }), /can no longer be changed/);
+    const lineId = detail.lines[0].id;
+    await receivePurchaseOrder(f.db, f.office, po.id, [{ poLineItemId: lineId, quantityReceived: 50 }]);
     await assert.rejects(deletePurchaseOrder(f.db, f.office, po.id), /cannot be deleted/);
+
+    const pending = async () => Number(((await listPurchaseOrders(f.db)) as Array<{ id: string; pending_cents: string }>)
+      .find((p) => p.id === po.id)!.pending_cents);
+    assert.equal(await pending(), Math.round((100_000 + 638 + Math.round((100_000 + 638) * 0.15)) / 2), 'half still to come, taxes included');
+
+    await assert.rejects(updatePurchaseOrder(f.db, f.office, po.id,
+      { lines: [{ id: lineId, rawMaterialId: taxed, quantityOrdered: 60 }] }), /admin|role/i);
+    await assert.rejects(updatePurchaseOrder(f.db, f.admin, po.id,
+      { lines: [{ id: lineId, rawMaterialId: taxed, quantityOrdered: 40 }] }), /cannot be less than/);
+    await assert.rejects(updatePurchaseOrder(f.db, f.admin, po.id,
+      { lines: [{ rawMaterialId: exempt, quantityOrdered: 1 }] }), /cannot be taken off/);
+
+    // Cost each corrected from 10.00 to 12.00, quantity down to what came in, a line added.
+    const r = await updatePurchaseOrder(f.db, f.admin, po.id, { lines: [
+      { id: lineId, rawMaterialId: taxed, quantityOrdered: 50, unitCostCents: 1_200 },
+      { rawMaterialId: exempt, quantityOrdered: 2 },
+    ] });
+    assert.equal(r.status, 'Partially Received', 'the new line is still to come');
+    const batch = await f.db.one<{ c: string }>(`SELECT unit_cost_cents::text AS c FROM material_batches WHERE po_line_item_id = $1`, [lineId]);
+    assert.equal(Number(batch.c), 1_200, 'what came in is re-costed');
+    assert.equal(await pending(), 20_000, 'only the new, untaxed line is pending');
+
+    const after = await getPurchaseOrder(f.db, po.id) as { lines: Array<{ id: string; raw_material_id: string }> };
+    const added = after.lines.find((l) => l.raw_material_id === exempt)!;
+    const r2 = await updatePurchaseOrder(f.db, f.admin, po.id, { lines: [
+      { id: lineId, rawMaterialId: taxed, quantityOrdered: 50, unitCostCents: 1_200 },
+    ] });
+    assert.equal(r2.status, 'Received', 'the unreceived line taken off: everything is in');
+    assert.equal(added.raw_material_id, exempt);
   });
 });

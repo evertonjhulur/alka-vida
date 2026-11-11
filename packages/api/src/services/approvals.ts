@@ -244,7 +244,7 @@ export async function reviewApproval(
       } else if (req.request_type === 'CreditNote') {
         // A credit note becomes live: its value posts to the ledger, with the
         // GCT split it was raised with (older requests carry none).
-        const p = (req.payload ?? {}) as unknown as { subtotalCents?: number; gctCents?: number };
+        const p = (req.payload ?? {}) as unknown as { subtotalCents?: number; gctCents?: number; applyToOpenInvoices?: boolean };
         const total = num(req.amount_cents);
         const gct = p.gctCents !== undefined ? num(p.gctCents) : 0;
         const subtotal = p.subtotalCents !== undefined ? num(p.subtotalCents) : total;
@@ -256,7 +256,7 @@ export async function reviewApproval(
           [req.entity_id, subtotal, gct, total],
         );
         // Raised against an invoice: it settles that invoice (4 Nov 2026).
-        await autoApplyLinked(t, actor, req.entity_id);
+        await autoApplyLinked(t, actor, req.entity_id, { toOpenInvoices: !!p.applyToOpenInvoices });
       }
     } else if (req.request_type === 'StopCorrection') {
       // Rejected: the stop keeps exactly what the driver recorded.
