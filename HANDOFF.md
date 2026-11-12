@@ -2942,3 +2942,44 @@ Built:
 After it goes live: edit PO-001011 with the 55mm cap's real cost each; use
 Correct cost… on each 3 Nov count batch at J$0 (labels, caps, handles,
 5 L bottles); check Alka Lyfe 1.5 L production/count.
+
+## Delete a production run that was never made, even when stock is short (12 Nov 2026)
+His report: one Fri 6 Nov duplicate (Alka Vida 5 Gallon, 39) would not delete.
+Alka Vida 5 Gallon stood at -4 in stock, so taking 39 more off was refused
+("some have gone out already"). That guard is right for a run that happened,
+but this one was entered twice and never made.
+- Delete… now offers a second step when refused: "It was never made: delete
+  anyway". deleteProduction(..., { evenIfShort: true }) (POST
+  /api/production/:id/delete {evenIfShort}) goes ahead and stock goes below
+  zero; the message says to count it on Stock > Count. Audit carries
+  evenIfShort. Admins only, as before. Test: inventory.test.ts.
+- After it: 5 Gallon finished stock will read about -43 and the empties +39.
+  That -43 means real 5-gallon production has not all been entered (or the
+  count was low): trucks loaded more than was recorded as made.
+
+## Settled rounds show what happened; delivered stops can be corrected (12 Nov 2026)
+His report: once a round was settled its final details did not show; opening
+a stop did not show what it really recorded; an admin could not edit a stop
+after it was marked delivered (Lightfire Partners handed back 12 bottles on
+Monday and it was recorded wrong).
+- Settlement page, settled stop: "Applied to" lists the payments settling it
+  created (invoice, amount, RCT number, reversed). Open shows a summary
+  (outcome, delivered, bottles, expected, collected) and those payments,
+  instead of the "apply the cash" table of today's open invoices.
+  getSettlementReview -> paidAtSettlement.
+- Stop page (/route/stop/:id) on a delivered stop: the quantities are what
+  the stop recorded (delivery_stop_lines), not the order again; full out,
+  empties and lost are the recorded figures, read only; the note shows; the
+  invoice and the settled payments are listed. getStopForDriver ->
+  recordedLines, settledPayments, invoice_number.
+- Correct this delivery (stop page) / Correct the bottles (settlement page):
+  POST /api/stops/:id/correct now works after settlement for the bottles
+  (full out, empties back, lost) and the note; admins apply at once, office
+  staff send it for approval. The money (cash, how, lines) still only until
+  the stop is settled - after that it is refused with "put the cash right on
+  Payments received"; unchanged money sent along is not refused.
+- A change to the empties now moves the empties in stock (the jug material)
+  by the difference, dated the round's day ("BottleReturn" up, "Adjustment"
+  down). Before, a correction changed the stop but not the stock. A settled
+  round's empties difference is worked out again.
+- Tests: stopcorrection.test.ts. Shared 80, API 650, web 16.

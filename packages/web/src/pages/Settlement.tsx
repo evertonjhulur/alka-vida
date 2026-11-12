@@ -41,6 +41,11 @@ interface StopRow {
   autoApplied?: Allocation[];
   openInvoices: OpenInvoice[];
   settled: boolean;
+  /** What settling it put on the account (12 Nov 2026). */
+  paidAtSettlement?: Array<{
+    paymentId: string; invoiceId: string | null; invoiceNumber: string | null;
+    amountCents: number; receiptNumber: string | null; reversed: boolean;
+  }>;
 }
 
 interface Review {
@@ -186,12 +191,12 @@ export default function Settlement({ session }: { session: Session }) {
     } finally { setBusy(false); }
   }
 
-  async function submitCorrection(s: StopRow) {
+  async function submitCorrection(s: StopRow, bottlesOnly = false) {
     setBusy(true); setError(null); setMsg(null);
     try {
       const out = await api.post<{ applied: boolean }>(`/api/stops/${s.stopId}/correct`, {
         changes: {
-          paymentAmountCents: toCents(fix.collected),
+          ...(bottlesOnly ? {} : { paymentAmountCents: toCents(fix.collected) }),
           bottlesDeliveredFull: Number(fix.delivered) || 0,
           bottlesEmptiesPickedUp: Number(fix.empties) || 0,
           bottlesLostDamaged: Number(fix.lost) || 0,
@@ -339,21 +344,59 @@ export default function Settlement({ session }: { session: Session }) {
     );
   };
 
-  const correctionPanel = (s: StopRow) => (
+  /** A settled stop: what was recorded, and what settling it put on the account. */
+  const settledPanel = (s: StopRow) => (
     <>
-      <h3 style={{ marginTop: 20, marginBottom: 4 }}>Confirm or correct what was recorded</h3>
+      <div className="notice info">Settled. This is what the stop recorded and what went on the account.</div>
+      <div className="total-line"><span>Outcome</span><span>{s.outcome === 'Payment Only' ? 'Payment only' : s.outcome}</span></div>
+      <div className="total-line"><span>Delivered</span><span>{s.deliveredSummary || '—'}</span></div>
+      <div className="total-line"><span>Bottles</span><span>{bottleWords(s)}</span></div>
+      <div className="total-line"><span>Expected</span><span>{money(s.expectedCents)}</span></div>
+      <div className="total-line"><span>Collected{s.paymentMethod && s.collectedCents > 0 ? ` (${s.paymentMethod.toLowerCase()})` : ''}</span><span>{money(s.collectedCents)}</span></div>
+      <h3 style={{ marginBottom: 4 }}>Payments created when it was settled</h3>
+      {(s.paidAtSettlement ?? []).length === 0 ? (
+        <p className="muted small" style={{ marginTop: 0 }}>{s.collectedCents > 0 ? 'None found for this stop.' : 'Nothing was collected, so no payment.'}</p>
+      ) : (
+        <table>
+          <thead><tr><th>Invoice</th><th>Receipt</th><th className="num">Amount</th><th /></tr></thead>
+          <tbody>
+            {(s.paidAtSettlement ?? []).map((p) => (
+              <tr key={p.paymentId}>
+                <td>{p.invoiceId ? <Link to={`/invoices/${p.invoiceId}`}>{p.invoiceNumber}</Link> : 'Left on the account as credit'}</td>
+                <td className="small">{p.receiptNumber ?? '—'}</td>
+                <td className="num">{money(p.amountCents)}</td>
+                <td className="small">{p.reversed ? <span className="chip warn">reversed</span> : ''}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </>
+  );
+
+  /**
+   * Once a stop is settled its money is on the account, so only the bottles
+   * can be corrected here (12 Nov 2026); the cash is put right on Payments
+   * received.
+   */
+  const correctionPanel = (s: StopRow, bottlesOnly = false) => (
+    <>
+      <h3 style={{ marginTop: 20, marginBottom: 4 }}>{bottlesOnly ? 'Correct the bottles' : 'Confirm or correct what was recorded'}</h3>
       <p className="muted small" style={{ marginTop: 0 }}>
         {isAdmin
           ? 'As an administrator your correction applies immediately.'
           : 'Your correction is sent to an administrator to approve — nothing changes until they do.'}
+        {bottlesOnly && ' The cash on a settled stop is corrected on Payments received (reverse or edit the payment). A change to the empties moves the empties in stock by the difference.'}
       </p>
       <div className="row" style={{ alignItems: 'flex-end' }}>
+        {!bottlesOnly && (
         <div className="field">
           <label>Cash collected</label>
           <input type="number" step="0.01" min="0" style={{ width: 130 }}
                  value={fix.collected} disabled={busy}
                  onChange={(e) => setFix({ ...fix, collected: e.target.value })} />
         </div>
+        )}
         <div className="field">
           <label>Bottles delivered</label>
           <input type="number" min="0" style={{ width: 110 }} value={fix.delivered}
@@ -380,7 +423,7 @@ export default function Settlement({ session }: { session: Session }) {
                onChange={(e) => setFix({ ...fix, reason: e.target.value })} />
       </div>
       <button type="button" disabled={busy || !fix.reason.trim()}
-              onClick={() => submitCorrection(s)}>
+              onClick={() => submitCorrection(s, bottlesOnly)}>
         {isAdmin ? 'Apply correction' : 'Send correction for approval'}
       </button>
     </>
@@ -409,8 +452,9 @@ export default function Settlement({ session }: { session: Session }) {
       })()}
       {locked && (
         <div className="notice info">
-          This route is closed and locked. Any further correction must go through a
-          payment reversal, reassignment, or an invoice edit.
+          This round is settled. Open a stop to see what it recorded and the payments it created.
+          Bottles can still be corrected there; the cash is put right on Payments received
+          (reverse or edit the payment), and quantities by editing the invoice.
         </div>
       )}
 
@@ -460,6 +504,17 @@ export default function Settlement({ session }: { session: Session }) {
                     : <span className="chip warn">{money(s.varianceCents)}</span>}
                 </td>
                 <td className="small">
+                  {s.settled ? (
+                    (s.paidAtSettlement ?? []).length === 0
+                      ? <span className="muted">{s.collectedCents > 0 ? 'no payment found' : '—'}</span>
+                      : (s.paidAtSettlement ?? []).map((p) => (
+                          <div key={p.paymentId} className={p.reversed ? 'muted' : undefined}>
+                            {p.invoiceId ? <Link to={`/invoices/${p.invoiceId}`}>{p.invoiceNumber}</Link> : 'on account'} — {money(p.amountCents)}
+                            {p.receiptNumber ? <span className="muted"> · {p.receiptNumber}</span> : null}
+                            {p.reversed ? ' (reversed)' : ''}
+                          </div>
+                        ))
+                  ) : <>
                   {s.allocations.length === 0 && (s.autoApplied ?? []).length === 0
                     ? <span className="muted">{s.collectedCents > 0 && !s.settled ? 'not applied yet' : '—'}</span>
                     : s.allocations.map((a, i) => (
@@ -475,6 +530,7 @@ export default function Settlement({ session }: { session: Session }) {
                       ))}
                     </div>
                   )}
+                  </>}
                 </td>
                 <td className="num">
                   <button className="secondary" onClick={() => openPanel(s)}>
@@ -491,11 +547,8 @@ export default function Settlement({ session }: { session: Session }) {
       {review.stops.filter((s) => s.stopId === openStop).map((s) => (
         <div className="panel" key={s.stopId}>
           <h2 style={{ marginTop: 0 }}>{s.customerName}</h2>
-          {s.settled && (
-            <div className="notice info">This stop has already been settled.</div>
-          )}
-          {cashPanel(s)}
-          {!s.settled && !locked && correctionPanel(s)}
+          {s.settled ? settledPanel(s) : cashPanel(s)}
+          {!s.settled && !locked ? correctionPanel(s) : correctionPanel(s, true)}
         </div>
       ))}
 

@@ -32,6 +32,7 @@ import { recomputeDelivered } from './orders.ts';
 import { openInvoicesForCustomer } from './invoices.ts';
 import { collectedEmpties, settleCollections } from './collections.ts';
 import { unconfirmedAdditions } from './trucks.ts';
+import { moveEmpties } from './bottles.ts';
 
 export interface SettlementStopRow {
   stopId: string;
@@ -72,6 +73,15 @@ export interface SettlementStopRow {
     grandTotalCents: Cents; invoiceDate: string; status: string;
   }>;
   settled: boolean;
+  /**
+   * What settling this stop actually put on the account (12 Nov 2026: a
+   * settled round showed "—" and today's open invoices instead of what was
+   * paid). One line per payment created, oldest first.
+   */
+  paidAtSettlement?: Array<{
+    paymentId: string; invoiceId: string | null; invoiceNumber: string | null;
+    amountCents: Cents; receiptNumber: string | null; reversed: boolean;
+  }>;
 }
 
 /**
@@ -205,6 +215,19 @@ export async function getSettlementReview(
       ];
     }
 
+    const paidAtSettlement = s.settled_at ? (await db.query<{
+      id: string; invoice_id: string | null; invoice_number: string | null; amount_cents: string;
+      receipt_number: string | null; reversed: boolean;
+    }>(
+      `SELECT p.id, p.invoice_id, i.invoice_number, p.amount_cents::text AS amount_cents, p.receipt_number,
+              EXISTS (SELECT 1 FROM payments r WHERE r.reverses_payment_id = p.id) AS reversed
+       FROM payments p LEFT JOIN invoices i ON i.id = p.invoice_id
+       WHERE p.delivery_stop_id = $1 AND NOT p.is_reversal
+       ORDER BY p.created_at, p.id`, [s.id])).map((p) => ({
+        paymentId: p.id, invoiceId: p.invoice_id, invoiceNumber: p.invoice_number,
+        amountCents: num(p.amount_cents), receiptNumber: p.receipt_number, reversed: !!p.reversed,
+      })) : [];
+
     const before = s.order_id && !s.after_stop_id ? await db.one<{ cents: string; receipts: string[] | null }>(
       // A payment since reversed no longer counts (28 Oct 2026: the doubles
       // reversed after the 26-28 Oct rounds still showed as "counted twice?").
@@ -249,6 +272,7 @@ export async function getSettlementReview(
       bottlesEmptiesPickedUp: num(s.bottles_empties_picked_up),
       bottlesLostDamaged: num(s.bottles_lost_damaged),
       settled: !!s.settled_at,
+      paidAtSettlement,
     });
   }
 
@@ -288,6 +312,65 @@ export interface StopCorrection {
   bottlesEmptiesPickedUp?: number;
   bottlesLostDamaged?: number;
   deliveredLines?: Array<{ orderLineId: string; cases: number; looseBottles: number }>;
+  /** The driver's note on the stop. */
+  notes?: string | null;
+}
+
+interface StopNow {
+  payment_method: string | null; payment_amount_cents: string;
+  bottles_delivered_full: number; bottles_empties_picked_up: number; bottles_lost_damaged: number;
+  driver_notes: string | null; settled_at: string | null; stop_outcome: string;
+  sheet_status: string; sheet_id: string; sheet_date: string | null; customer_name: string;
+}
+
+async function stopNow(t: Queryable, stopId: string, lock = false): Promise<StopNow | null> {
+  return t.maybeOne<StopNow>(
+    `SELECT s.payment_method, s.payment_amount_cents::text AS payment_amount_cents,
+            s.bottles_delivered_full, s.bottles_empties_picked_up, s.bottles_lost_damaged,
+            s.driver_notes, s.settled_at, s.stop_outcome,
+            d.status AS sheet_status, d.id AS sheet_id, d.delivery_date::text AS sheet_date,
+            c.name AS customer_name
+     FROM delivery_stops s JOIN delivery_sheets d ON d.id = s.delivery_sheet_id
+     JOIN customers c ON c.id = s.customer_id
+     WHERE s.id = $1${lock ? ' FOR UPDATE OF s' : ''}`,
+    [stopId],
+  );
+}
+
+/**
+ * Which parts of a correction can still be made (Everton, 12 Nov 2026: an
+ * admin could not fix a delivered stop - Lightfire Partners handed back 12
+ * bottles on Monday and it was recorded wrong).
+ *
+ *  - Bottles (full out, empties back, lost) and the note: always. A bottle is
+ *    not money, so a settled round does not lock them.
+ *  - The money (cash taken, how, the split by line): only until the stop is
+ *    settled. After that the payments are real and are put right on
+ *    Payments received (reverse, or edit the payment), never here.
+ *
+ * Only a field that actually CHANGES counts, so a form that sends the money
+ * back unchanged alongside a bottle fix is not refused.
+ */
+function checkCorrection(now: StopNow, changes: StopCorrection): void {
+  const moneyLocked = !!now.settled_at || now.sheet_status === 'Completed';
+  if (moneyLocked) {
+    const cashChanged = changes.paymentAmountCents !== undefined
+      && Math.round(Number(changes.paymentAmountCents)) !== num(now.payment_amount_cents);
+    const howChanged = changes.paymentMethod !== undefined && (changes.paymentMethod || null) !== (now.payment_method || null)
+      && num(now.payment_amount_cents) > 0;
+    if (cashChanged || howChanged || (changes.deliveredLines ?? []).length > 0) {
+      throw new RuleViolation(
+        'this stop is settled, so its money is on the account already: put the cash right on ' +
+        'Payments received (reverse or edit the payment). Bottles and the note can still be corrected here.',
+      );
+    }
+  }
+  for (const [k, v] of [['full bottles out', changes.bottlesDeliveredFull], ['empties back', changes.bottlesEmptiesPickedUp],
+    ['lost or damaged', changes.bottlesLostDamaged]] as const) {
+    if (v !== undefined && v !== null && (!Number.isFinite(Number(v)) || Number(v) < 0)) {
+      throw new RuleViolation(`${k} cannot be below zero`);
+    }
+  }
 }
 
 /**
@@ -304,35 +387,54 @@ export async function applyStopCorrection(
   changes: StopCorrection,
   reason: string,
 ): Promise<void> {
-  const before = await t.one<Record<string, unknown>>(
-    `SELECT s.payment_method, s.payment_amount_cents, s.bottles_delivered_full,
-            s.bottles_empties_picked_up, s.bottles_lost_damaged, s.settled_at,
-            d.status AS sheet_status
-     FROM delivery_stops s JOIN delivery_sheets d ON d.id = s.delivery_sheet_id
-     WHERE s.id = $1`,
-    [stopId],
-  );
+  const before = await stopNow(t, stopId, true);
+  if (!before) throw new RuleViolation('that stop no longer exists');
   // Re-checked here as well as at the entry point: an approval can be granted
-  // minutes after it was raised, and the route may have closed in between.
-  if (before.sheet_status === 'Completed') {
-    throw new RuleViolation(
-      'this route is closed; corrections now go through payment reversal, ' +
-      'reassignment or invoice editing',
-    );
-  }
+  // minutes after it was raised, and the round may have been settled since.
+  checkCorrectionAllowed(before, changes);
 
+  const int = (v: number | undefined) => (v === undefined || v === null ? null : Math.round(Number(v)));
   await t.query(
     `UPDATE delivery_stops
      SET payment_method = COALESCE($2, payment_method),
          payment_amount_cents = COALESCE($3, payment_amount_cents),
          bottles_delivered_full = COALESCE($4, bottles_delivered_full),
          bottles_empties_picked_up = COALESCE($5, bottles_empties_picked_up),
-         bottles_lost_damaged = COALESCE($6, bottles_lost_damaged)
+         bottles_lost_damaged = COALESCE($6, bottles_lost_damaged),
+         driver_notes = CASE WHEN $7::boolean THEN NULLIF(btrim($8), '') ELSE driver_notes END
      WHERE id = $1`,
-    [stopId, changes.paymentMethod ?? null, changes.paymentAmountCents ?? null,
-     changes.bottlesDeliveredFull ?? null, changes.bottlesEmptiesPickedUp ?? null,
-     changes.bottlesLostDamaged ?? null],
+    [stopId, changes.paymentMethod ?? null,
+     changes.paymentAmountCents === undefined ? null : Math.round(Number(changes.paymentAmountCents)),
+     int(changes.bottlesDeliveredFull), int(changes.bottlesEmptiesPickedUp), int(changes.bottlesLostDamaged),
+     changes.notes !== undefined, changes.notes ?? ''],
   );
+
+  // The empties back went into the empties at the plant when the stop was
+  // recorded, so a correction moves them by the difference, dated the
+  // round's day like the original. Without this the customer's account and
+  // the stock of empties drift apart.
+  if (changes.bottlesEmptiesPickedUp !== undefined && changes.bottlesEmptiesPickedUp !== null) {
+    const delta = Math.round(Number(changes.bottlesEmptiesPickedUp)) - num(before.bottles_empties_picked_up);
+    if (delta !== 0) {
+      const n = Math.abs(delta);
+      await moveEmpties(t, delta, delta > 0 ? 'BottleReturn' : 'Adjustment', `Correction ${stopId}`,
+        delta > 0
+          ? `${n} more empt${n === 1 ? 'y' : 'ies'} back from ${before.customer_name} (stop corrected)`
+          : `${n} empt${n === 1 ? 'y' : 'ies'} fewer back from ${before.customer_name} (stop corrected)`,
+        { day: before.sheet_date });
+    }
+    // A settled round keeps its empties count; the difference is worked out
+    // again against the corrected stops.
+    const sheet = await t.one<{ counted: number | null }>(
+      `SELECT bottle_actual_returned AS counted FROM delivery_sheets WHERE id = $1`, [before.sheet_id]);
+    if (sheet.counted !== null) {
+      const rec = await t.one<{ n: string }>(
+        `SELECT COALESCE(SUM(bottles_empties_picked_up), 0)::text AS n FROM delivery_stops WHERE delivery_sheet_id = $1`,
+        [before.sheet_id]);
+      await t.query(`UPDATE delivery_sheets SET bottle_variance = $2 WHERE id = $1`,
+        [before.sheet_id, num(sheet.counted) - num(rec.n) - await collectedEmpties(t, before.sheet_id)]);
+    }
+  }
 
   // What THIS stop handed over is corrected, and the order's delivered
   // figures recounted from all its stops (an order can go out in parts).
@@ -354,10 +456,12 @@ export async function applyStopCorrection(
     if (o?.order_id) await recomputeDelivered(t, o.order_id);
   }
 
-  await audit(t, actor, 'adjust', 'DeliveryStop', stopId, stopId, {
-    reason, before, changes, correctedBy: actor.name,
+  await audit(t, actor, 'adjust', 'DeliveryStop', stopId, before.customer_name, {
+    reason, before, changes, correctedBy: actor.name, afterSettlement: !!before.settled_at,
   });
 }
+
+const checkCorrectionAllowed = checkCorrection;
 
 /**
  * Correct what a stop recorded, or ask an admin to.
@@ -381,22 +485,11 @@ export async function requestStopCorrection(
   }
 
   return db.tx(async (t) => {
-    const stop = await t.maybeOne<{
-      order_ref: string | null; customer_id: string; settled_at: string | null;
-      sheet_status: string;
-    }>(
-      `SELECT s.order_ref, s.customer_id, s.settled_at, d.status AS sheet_status
-       FROM delivery_stops s JOIN delivery_sheets d ON d.id = s.delivery_sheet_id
-       WHERE s.id = $1`,
-      [stopId],
+    const stop = await t.maybeOne<{ order_ref: string | null; customer_id: string }>(
+      `SELECT order_ref, customer_id FROM delivery_stops WHERE id = $1`, [stopId],
     );
     if (!stop) throw new RuleViolation('that stop no longer exists');
-    if (stop.sheet_status === 'Completed') {
-      throw new RuleViolation(
-        'this route is closed; corrections now go through payment reversal, ' +
-        'reassignment or invoice editing',
-      );
-    }
+    checkCorrectionAllowed((await stopNow(t, stopId))!, changes);
 
     if (actor.role === 'admin') {
       await applyStopCorrection(t, actor, stopId, changes, reason);

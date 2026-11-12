@@ -76,6 +76,18 @@ interface Stop {
   pay_when?: 'Now' | 'On delivery' | 'On account' | null;
   lines: StopLine[];
   openInvoices: OpenInvoice[];
+  /** What this stop recorded handing over (12 Nov 2026). */
+  recordedLines?: Array<{ order_line_id: string; cases: number; loose_bottles: number }>;
+  bottles_delivered_full?: number;
+  bottles_empties_picked_up?: number;
+  bottles_lost_damaged?: number;
+  outcome_notes?: string | null;
+  invoice_number?: string | null;
+  /** The payments settling the round put on the account. */
+  settledPayments?: Array<{
+    id: string; amount_cents: number | string; method: string | null; receipt_number: string | null;
+    invoice_number: string | null; invoice_id: string | null; reversed: boolean;
+  }>;
 }
 
 /** How they paid, as big buttons. "Not paid" is the default on account. */
@@ -101,6 +113,10 @@ export default function DriverStop() {
   const takeCard = useTakeCard();
   const { stopId } = useParams();
   const office = ['admin', 'user'].includes(getSession()?.role ?? '');
+  const isAdmin = getSession()?.role === 'admin';
+  /** The office correcting a stop already recorded (12 Nov 2026). */
+  const [fixOpen, setFixOpen] = useState(false);
+  const [fix, setFix] = useState({ fulls: '', empties: '', lost: '', notes: '', cash: '', how: '', reason: '' });
 
   const [stop, setStop] = useState<Stop | null>(null);
   const [notesOpen, setNotesOpen] = useState(false);
@@ -139,12 +155,58 @@ export default function DriverStop() {
   async function load() {
     const s = await api.get<Stop>(`/api/stops/${stopId}`);
     setStop(s);
+    // A delivered stop shows what it RECORDED handing over, not the order
+    // again (12 Nov 2026).
+    const rec = new Map((s.recordedLines ?? []).map((r) => [r.order_line_id, r]));
+    const wasDelivered = s.stop_outcome === 'Delivered';
     setDelivered(Object.fromEntries(
-      s.lines.map((l) => [
-        l.order_line_id,
-        String(l.bottles_per_case > 0 ? l.cases : l.loose_bottles),
-      ]),
+      s.lines.map((l) => {
+        const r = rec.get(l.order_line_id);
+        const qty = wasDelivered
+          ? (r ? (l.bottles_per_case > 0 ? Number(r.cases) : Number(r.loose_bottles)) : 0)
+          : (l.bottles_per_case > 0 ? l.cases : l.loose_bottles);
+        return [l.order_line_id, String(qty)];
+      }),
     ));
+    if (wasDelivered) {
+      setFulls(String(Number(s.bottles_delivered_full ?? 0))); setFullsTouched(true);
+      setEmpties(String(Number(s.bottles_empties_picked_up ?? 0))); setEmptiesTouched(true);
+      setLost(Number(s.bottles_lost_damaged ?? 0) ? String(Number(s.bottles_lost_damaged)) : '');
+    }
+    setFix({
+      fulls: String(Number(s.bottles_delivered_full ?? 0)),
+      empties: String(Number(s.bottles_empties_picked_up ?? 0)),
+      lost: String(Number(s.bottles_lost_damaged ?? 0)),
+      notes: s.driver_notes ?? '',
+      cash: (Number(s.payment_amount_cents ?? 0) / 100).toFixed(2),
+      how: s.payment_method ?? '',
+      reason: '',
+    });
+  }
+
+  /** Office correction of a recorded stop: admins at once, office staff for approval. */
+  async function saveFix() {
+    setBusy(true); setError(null); setSaved(null);
+    try {
+      const st = stop!;
+      const moneyOpen = (st.sheet_status ?? 'Open') === 'Open' && !st.settled_at;
+      const out = await api.post<{ applied: boolean }>(`/api/stops/${st.id}/correct`, {
+        changes: {
+          bottlesDeliveredFull: Math.max(0, Math.round(Number(fix.fulls) || 0)),
+          bottlesEmptiesPickedUp: Math.max(0, Math.round(Number(fix.empties) || 0)),
+          bottlesLostDamaged: Math.max(0, Math.round(Number(fix.lost) || 0)),
+          notes: fix.notes,
+          ...(moneyOpen ? { paymentAmountCents: fix.how ? toCents(fix.cash || '0') : 0, paymentMethod: fix.how || null } : {}),
+        },
+        reason: fix.reason,
+      });
+      setSaved(out.applied ? 'Correction saved.' : 'Correction sent to an administrator to approve; nothing changes until they do.');
+      setFixOpen(false);
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not save the correction');
+    } finally { setBusy(false); }
   }
 
   useEffect(() => { load().catch((e) => setError(e.message)); }, [stopId]);
@@ -419,8 +481,9 @@ export default function DriverStop() {
       {done && !saved && (
         <div className="notice info">
           Already recorded as <strong>{OUTCOME_WORDS[stop.stop_outcome] ?? stop.stop_outcome}</strong>.
-          {delivered_ ? ' To change a delivered stop, the office corrects it on the round.'
+          {delivered_ ? (office ? ' Below is what it recorded. Use Correct this delivery to change it.' : ' Below is what it recorded. To change it, ask the office.')
             : ' If you went back and they took it, record it again below.'}
+          {stop.driver_notes && <div className="small" style={{ marginTop: 4 }}><strong>Note:</strong> {stop.driver_notes}</div>}
         </div>
       )}
 
@@ -461,8 +524,13 @@ export default function DriverStop() {
       </section>
 
       <section className="panel">
-        <h2 className="side-h">What you dropped</h2>
-        {remainderStop && (
+        <h2 className="side-h">{delivered_ ? 'What was dropped' : 'What you dropped'}</h2>
+        {delivered_ && stop.invoice_number && (
+          <div className="muted small" style={{ marginBottom: 6 }}>
+            Invoiced on {office && stop.invoice_id ? <Link to={`/invoices/${stop.invoice_id}`}>{stop.invoice_number}</Link> : stop.invoice_number}
+          </div>
+        )}
+        {remainderStop && !delivered_ && (
           <div className="notice warn" style={{ margin: '0 0 8px' }}>
             The rest of an order that was part delivered. Only what is left is shown.
           </div>
@@ -476,10 +544,14 @@ export default function DriverStop() {
               <div>
                 <strong>{l.product_name.replace(/^Alka Vida\s+/i, '')}</strong>
                 <div className="muted small">
-                  {remainderStop ? `${ordered} ${unit} left to bring` : `ordered ${ordered} ${unit}`}
+                  {delivered_ ? `ordered ${cased ? l.ordered_cases ?? l.cases : l.ordered_loose ?? l.loose_bottles} ${cased ? 'cases' : 'bottles'}`
+                    : remainderStop ? `${ordered} ${unit} left to bring` : `ordered ${ordered} ${unit}`}
                   {l.is_bottle_charge ? ' · bought (short of empties)' : ''}
                 </div>
               </div>
+              {delivered_ ? (
+                <div className="num"><strong>{delivered[l.order_line_id] ?? '0'}</strong> {cased ? (delivered[l.order_line_id] === '1' ? 'case' : 'cases') : (delivered[l.order_line_id] === '1' ? 'bottle' : 'bottles')}</div>
+              ) : (
               <div className="stepper big">
                 <button type="button" className="secondary" aria-label={`One fewer ${l.product_name}`}
                         onClick={() => step(l.order_line_id, -1)}>−</button>
@@ -489,6 +561,7 @@ export default function DriverStop() {
                 <button type="button" className="secondary" aria-label={`One more ${l.product_name}`}
                         onClick={() => step(l.order_line_id, 1)}>+</button>
               </div>
+              )}
             </div>
           );
         })}
@@ -500,15 +573,15 @@ export default function DriverStop() {
           {carriesReturnables && (
             <div className="field">
               <label htmlFor="fulls">Full bottles out</label>
-              <input id="fulls" type="number" min="0" inputMode="numeric" value={fullsShown}
+              <input id="fulls" type="number" min="0" inputMode="numeric" value={fullsShown} readOnly={delivered_}
                      onChange={(e) => { setFullsTouched(true); setFulls(e.target.value); }} />
             </div>
           )}
           <div className="field">
             <label htmlFor="empties">Empties picked up</label>
-            <input id="empties" type="number" min="0" inputMode="numeric" placeholder="0"
+            <input id="empties" type="number" min="0" inputMode="numeric" placeholder="0" readOnly={delivered_}
                    value={emptiesShown} onChange={(e) => { setEmptiesTouched(true); setEmpties(e.target.value); }} />
-            {expectedEmpties !== null ? (
+            {delivered_ ? null : expectedEmpties !== null ? (
               <div className="small"><strong>Expect {expectedEmpties} back</strong> (they said when ordering).</div>
             ) : carriesReturnables && (stop.bottlesHeld ?? 0) > 0 && (
               <div className="muted small">They have {stop.bottlesHeld} of our bottles.</div>
@@ -516,7 +589,7 @@ export default function DriverStop() {
           </div>
           <div className="field">
             <label htmlFor="lost">Lost or damaged</label>
-            <input id="lost" type="number" min="0" inputMode="numeric" placeholder="0"
+            <input id="lost" type="number" min="0" inputMode="numeric" placeholder="0" readOnly={delivered_}
                    value={lost} onChange={(e) => setLost(e.target.value)} />
           </div>
         </div>
@@ -575,6 +648,74 @@ export default function DriverStop() {
               <div className="muted small" style={{ marginTop: 6 }}>Like all round money, it reaches their account when the office settles the round.</div>
             </div>
           ) : <p className="muted small">This round is settled; take any further payment in the office.</p>}
+          {(stop.settledPayments ?? []).length > 0 && (
+            <>
+              <h3 className="small" style={{ margin: '10px 0 4px' }}>Put on the account when the round was settled</h3>
+              {(stop.settledPayments ?? []).map((p) => (
+                <div key={p.id} className={`total-line${p.reversed ? ' muted' : ''}`}>
+                  <span>
+                    {p.invoice_id ? (office ? <Link to={`/invoices/${p.invoice_id}`}>{p.invoice_number}</Link> : p.invoice_number) : 'Credit on the account'}
+                    {p.receipt_number ? ` · ${p.receipt_number}` : ''}{p.reversed ? ' (reversed)' : ''}
+                  </span>
+                  <span>{money(Number(p.amount_cents))}</span>
+                </div>
+              ))}
+            </>
+          )}
+        </section>
+      )}
+
+      {office && done && stop.order_id && (
+        <section className="panel">
+          <button type="button" className="secondary" aria-expanded={fixOpen} onClick={() => setFixOpen(!fixOpen)}>
+            {fixOpen ? 'Close' : 'Correct this delivery'}
+          </button>
+          {fixOpen && (() => {
+            const moneyOpen = roundOpen;
+            return (
+              <div style={{ marginTop: 10 }}>
+                <p className="muted small" style={{ marginTop: 0 }}>
+                  {isAdmin ? 'Your correction applies at once.' : 'Your correction goes to an administrator to approve.'}
+                  {' '}A change to the empties moves the empties in stock by the difference.
+                  {!moneyOpen && ' The round is settled, so the cash is put right on Payments received (reverse or edit the payment), and the quantities by editing the invoice.'}
+                </p>
+                <div className="two">
+                  <div className="field"><label htmlFor="fx-full">Full bottles out</label>
+                    <input id="fx-full" type="number" min="0" inputMode="numeric" value={fix.fulls}
+                           onChange={(e) => setFix({ ...fix, fulls: e.target.value })} /></div>
+                  <div className="field"><label htmlFor="fx-emp">Empties picked up</label>
+                    <input id="fx-emp" type="number" min="0" inputMode="numeric" value={fix.empties}
+                           onChange={(e) => setFix({ ...fix, empties: e.target.value })} /></div>
+                  <div className="field"><label htmlFor="fx-lost">Lost or damaged</label>
+                    <input id="fx-lost" type="number" min="0" inputMode="numeric" value={fix.lost}
+                           onChange={(e) => setFix({ ...fix, lost: e.target.value })} /></div>
+                  {moneyOpen && (
+                    <>
+                      <div className="field"><label htmlFor="fx-how">How they paid</label>
+                        <select id="fx-how" value={fix.how} onChange={(e) => setFix({ ...fix, how: e.target.value })}>
+                          {payMethods(PAY_WAYS, takeCard, fix.how).map(([v, label]) => <option key={label} value={v}>{label}</option>)}
+                        </select></div>
+                      {fix.how && (
+                        <div className="field"><label htmlFor="fx-cash">Amount taken</label>
+                          <input id="fx-cash" inputMode="decimal" value={fix.cash}
+                                 onChange={(e) => setFix({ ...fix, cash: e.target.value })} /></div>
+                      )}
+                    </>
+                  )}
+                </div>
+                <div className="field"><label htmlFor="fx-note">Note on the stop</label>
+                  <input id="fx-note" style={{ width: '100%', boxSizing: 'border-box' }} value={fix.notes}
+                         onChange={(e) => setFix({ ...fix, notes: e.target.value })} /></div>
+                <div className="field"><label htmlFor="fx-why">Why (required)</label>
+                  <input id="fx-why" style={{ width: '100%', boxSizing: 'border-box' }} value={fix.reason}
+                         placeholder="e.g. 12 empties came back, driver recorded none"
+                         onChange={(e) => setFix({ ...fix, reason: e.target.value })} /></div>
+                <button type="button" disabled={busy || !fix.reason.trim()} onClick={saveFix}>
+                  {busy ? 'Saving…' : isAdmin ? 'Save the correction' : 'Send for approval'}
+                </button>
+              </div>
+            );
+          })()}
         </section>
       )}
 

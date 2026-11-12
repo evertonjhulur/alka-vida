@@ -814,6 +814,7 @@ async function lockRun(t: Queryable, batchId: string): Promise<RunRow> {
  */
 async function takeRunBack(
   t: Queryable, batchId: string, run: RunRow, why: string, mode: 'delete' | 'edit', comingBack = 0,
+  evenIfShort = false,
 ): Promise<{ hadEmpties: boolean }> {
   const bottles = num(run.total_bottles);
   const ref = `Production ${batchId}`;
@@ -824,9 +825,10 @@ async function takeRunBack(
   const fg = await t.maybeOne<{ q: number }>(
     `SELECT quantity_on_hand AS q FROM finished_goods_stock WHERE product_id = $1 FOR UPDATE`, [run.product_id]);
   const onHand = num(fg?.q ?? 0);
-  if (onHand + comingBack < bottles) {
+  if (onHand + comingBack < bottles && !evenIfShort) {
     throw new RuleViolation(`only ${onHand} ${run.product_name} bottles are in stock, and this would take off ${bottles - comingBack}. `
-      + `Some have gone out already, so the run cannot be ${mode === 'delete' ? 'deleted' : 'made smaller'}; correct the stock with a count instead`);
+      + `Some have gone out already, so the run cannot be ${mode === 'delete' ? 'deleted' : 'made smaller'} unless you confirm it was never made `
+      + `(stock would go to ${onHand + comingBack - bottles}); then count the stock`);
   }
   await t.query(`UPDATE finished_goods_stock SET quantity_on_hand = quantity_on_hand - $2 WHERE product_id = $1`,
     [run.product_id, bottles]);
@@ -893,22 +895,25 @@ async function takeRunBack(
  */
 export async function deleteProduction(
   db: Db, actor: Actor, batchId: string, reason: string,
-): Promise<{ bottles: number; productName: string }> {
+  /** A run entered twice that was never made (12 Nov 2026): delete it even if stock goes below zero. */
+  opts: { evenIfShort?: boolean } = {},
+): Promise<{ bottles: number; productName: string; stockAfter: number }> {
   requireRole(actor, 'admin');
   const why = (reason ?? '').trim();
   if (!why) throw new RuleViolation('say why the run is being deleted');
   return db.tx(async (t) => {
     const run = await lockRun(t, batchId);
     const bottles = num(run.total_bottles);
-    const { hadEmpties } = await takeRunBack(t, batchId, run, why, 'delete');
+    const { hadEmpties } = await takeRunBack(t, batchId, run, why, 'delete', 0, !!opts.evenIfShort);
+    const after = await t.maybeOne<{ q: number }>(`SELECT quantity_on_hand AS q FROM finished_goods_stock WHERE product_id = $1`, [run.product_id]);
     await t.query(
       `UPDATE production_batches SET status = 'Reversed', reversed_at = now(), reversed_by_id = $2, reversed_reason = $3
        WHERE id = $1`, [batchId, actor.id, why]);
     await audit(t, actor, 'delete', 'ProductionBatch', batchId, run.product_name, {
-      deleted: true, reason: why, bottles, batchDate: run.batch_date,
+      deleted: true, reason: why, bottles, batchDate: run.batch_date, evenIfShort: opts.evenIfShort || undefined,
       summary: `Production run of ${bottles} ${run.product_name} on ${run.batch_date} deleted: stock, materials${hadEmpties ? ' and empties' : ''} put back.`,
     });
-    return { bottles, productName: run.product_name };
+    return { bottles, productName: run.product_name, stockAfter: num(after?.q ?? 0) };
   });
 }
 

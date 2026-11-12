@@ -591,7 +591,10 @@ describe('Delete or edit a production run entered wrongly (11 Nov 2026)', () => 
   test('refused when the bottles have already gone out of stock', async () => {
     const run = await completeProduction(f.db, f.office, { productId, cases: 1 });
     await f.db.query(`UPDATE finished_goods_stock SET quantity_on_hand = 10 WHERE product_id = $1`, [productId]);
-    await assert.rejects(deleteProduction(f.db, f.admin, run.batchId, 'oops'), /cannot be deleted/);
+    await assert.rejects(deleteProduction(f.db, f.admin, run.batchId, 'oops'), /cannot be deleted unless you confirm/);
+    // Confirmed it was never made (12 Nov 2026): deleted, stock goes below zero.
+    const r = await deleteProduction(f.db, f.admin, run.batchId, 'entered twice', { evenIfShort: true });
+    assert.equal(r.stockAfter, 10 - 24);
     await f.db.query(`UPDATE finished_goods_stock SET quantity_on_hand = 1000 WHERE product_id = $1`, [productId]);
   });
 

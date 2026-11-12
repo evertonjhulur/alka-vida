@@ -870,6 +870,27 @@ export async function getStopForDriver(db: Db, stopId: string) {
     [stop.customer_id],
   );
 
+  // What this stop RECORDED (12 Nov 2026): once a stop is done, its screen
+  // shows what was handed over, not the order's quantities again.
+  const recordedLines = await db.query(
+    `SELECT order_line_id, cases::int AS cases, loose_bottles::int AS loose_bottles
+     FROM delivery_stop_lines WHERE stop_id = $1`, [stopId],
+  );
+  // What settling it put on the account: one line per payment, with the
+  // invoice it paid and the receipt number.
+  const settledPayments = await db.query(
+    `SELECT p.id, p.amount_cents::bigint AS amount_cents, p.method, p.receipt_number,
+            i.invoice_number, p.invoice_id,
+            EXISTS (SELECT 1 FROM payments r WHERE r.reverses_payment_id = p.id) AS reversed
+     FROM payments p LEFT JOIN invoices i ON i.id = p.invoice_id
+     WHERE NOT p.is_reversal
+       AND (p.delivery_stop_id = $1 OR p.delivery_stop_id IN (SELECT id FROM delivery_stops WHERE after_stop_id = $1))
+     ORDER BY p.created_at, p.id`, [stopId],
+  );
+  const invoice = stop.invoice_id
+    ? await db.maybeOne<{ invoice_number: string }>(`SELECT invoice_number FROM invoices WHERE id = $1`, [stop.invoice_id])
+    : null;
+
   // Payments added after the delivery on stops of their own (10 Oct 2026).
   const laterPayments = await db.query(
     `SELECT id, payment_method, payment_amount_cents, settled_at FROM delivery_stops
@@ -879,6 +900,9 @@ export async function getStopForDriver(db: Db, stopId: string) {
   return {
     ...stop,
     laterPayments,
+    recordedLines,
+    settledPayments,
+    invoice_number: invoice?.invoice_number ?? null,
     // Tax-inclusive, always.
     amountOwedCents,
     // Paid with the order, or their credit, already taken off (11 Oct 2026).

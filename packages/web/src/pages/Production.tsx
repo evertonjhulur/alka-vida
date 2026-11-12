@@ -41,6 +41,8 @@ export default function Production() {
   /** Delete… or Edit… open on a run (admins; 11 Nov 2026). */
   const [fixing, setFixing] = useState<{
     id: string; mode: 'delete' | 'edit'; reason: string;
+    /** Refused because the bottles have gone out: offer "it was never made" (12 Nov 2026). */
+    short?: boolean;
     date: string; operator: string; cases: string; loose: string; scrapped: string;
   } | null>(null);
   const isAdmin = getSession()?.role === 'admin';
@@ -56,9 +58,20 @@ export default function Production() {
     setBusy(true); setError(null); setMsg(null);
     try {
       if (fixing.mode === 'delete') {
-        const r = await api.post<{ bottles: number; productName: string }>(
-          `/api/production/${fixing.id}/delete`, { reason: fixing.reason.trim() });
-        setMsg(`Run deleted: ${r.bottles} ${r.productName} taken back off stock, and the materials (and any empties) put back.`);
+        let r: { bottles: number; productName: string; stockAfter: number };
+        try {
+          r = await api.post(`/api/production/${fixing.id}/delete`, { reason: fixing.reason.trim(), evenIfShort: !!fixing.short });
+        } catch (err) {
+          const m = err instanceof Error ? err.message : '';
+          if (!fixing.short && /cannot be deleted unless you confirm/.test(m)) {
+            setFixing({ ...fixing, short: true });
+            setError(m);
+            return;
+          }
+          throw err;
+        }
+        setMsg(`Run deleted: ${r.bottles} ${r.productName} taken back off stock, and the materials (and any empties) put back.`
+          + (r.stockAfter < 0 ? ` ${r.productName} stock is now ${r.stockAfter}: count it on Stock › Count to set the true figure.` : ''));
       } else {
         const r = await api.post<{ bottles: number; productName: string; redone: boolean }>(
           `/api/production/${fixing.id}/edit`, {
@@ -361,7 +374,7 @@ export default function Production() {
                         </div>
                         <button type="button" className={fixing.mode === 'delete' ? 'danger-soft' : undefined}
                                 disabled={busy || (fixing.mode === 'delete' && !fixing.reason.trim())} onClick={saveFix}>
-                          {fixing.mode === 'delete' ? 'Delete run' : 'Save changes'}</button>
+                          {fixing.mode === 'delete' ? (fixing.short ? 'It was never made: delete anyway' : 'Delete run') : 'Save changes'}</button>
                         <button type="button" className="secondary" onClick={() => setFixing(null)}>Cancel</button>
                       </div>
                     </div>

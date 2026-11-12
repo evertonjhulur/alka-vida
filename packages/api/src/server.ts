@@ -1648,8 +1648,11 @@ export async function buildServer(db: Db) {
 
   // Delete or edit a run entered wrongly (11 Nov 2026). Admin only.
   app.post('/api/production/:id/delete', { preHandler: allow('admin') },
-    async (req) => inventory.deleteProduction(db, actorOf(req), (req.params as { id: string }).id,
-      String((req.body as { reason?: string } | null)?.reason ?? '')));
+    async (req) => {
+      const body = (req.body ?? {}) as { reason?: string; evenIfShort?: boolean };
+      return inventory.deleteProduction(db, actorOf(req), (req.params as { id: string }).id,
+        String(body.reason ?? ''), { evenIfShort: body.evenIfShort === true });
+    });
   app.post('/api/production/:id/edit', { preHandler: allow('admin') },
     async (req) => inventory.editProduction(db, actorOf(req), (req.params as { id: string }).id, req.body as never));
 
