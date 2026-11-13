@@ -9,7 +9,7 @@ import { setupFixture, type Fixture } from './helpers.ts';
 import { createOrder } from '../src/services/orders.ts';
 import { assignDriver } from '../src/services/routing.ts';
 import { setCustomerPin, setPlantLocation, setStopPin, proposeSort } from '../src/services/locations.ts';
-import { approximatePinsForAll, pinCounts, resetGeocodeCounter } from '../src/services/approxpins.ts';
+import { approximatePinsForAll, pinCounts, resetGeocodeCounter, missingPins } from '../src/services/approxpins.ts';
 
 let f: Fixture;
 let sheetId: string;
@@ -106,6 +106,18 @@ describe('approximate pins', () => {
     assert.deepEqual(asked, ['14 Hope Road, Kingston 10, St Andrew']);
     const a = await pin(ids['Andrea Brown']);
     assert.deepEqual([a.lat, a.location_accuracy_m], [18.0251, 30]);
+  });
+
+  test('the list of addresses still without a pin says why (13 Nov 2026)', async () => {
+    const list = await missingPins(f.db);
+    const find = (n: string) => list.find((r) => r.customerId === ids[n]);
+    assert.equal(find('Lost Person')?.why, 'not-found');
+    assert.equal(find('Lost Person')?.text, 'Nowhere Lane, Kingston');
+    assert.equal(find('Vague Person')?.why, 'not-found', 'only as close as the parish: not used');
+    assert.equal(find('Andrea Brown'), undefined, 'placed approximately: not on the list');
+    assert.equal(find('Pinned Already'), undefined);
+    await f.db.query(`INSERT INTO customers (name, phone, email) VALUES ('No Address Ltd', '8765559999', '')`);
+    assert.equal((await missingPins(f.db)).find((r) => r.customer === 'No Address Ltd')?.why, 'no-address');
   });
 
   test('the driver\'s pin at the gate replaces an approximate one', async () => {

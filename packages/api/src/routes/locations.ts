@@ -34,6 +34,9 @@ export function registerLocationRoutes(
   app.post('/api/settings/approximate-pins', admin, async (req) =>
     approx.approximatePinsForAll(db, actorOf(req), Number((req.body as { max?: number } | undefined)?.max) || 100));
 
+  // The addresses still without a pin, and why (13 Nov 2026).
+  app.get('/api/settings/approximate-pins/missing', admin, async () => approx.missingPins(db));
+
   // Pins on a customer's addresses.
   app.get('/api/customers/:id/pins', office, async (req) => locations.customerPins(db, id(req)));
   app.put('/api/customers/:id/pin', office, async (req) =>

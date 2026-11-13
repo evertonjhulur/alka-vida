@@ -3019,3 +3019,14 @@ tabs on Reports, on the same period picker and Export to Excel.
   the Production report and its export. Earlier runs stay blank.
   Tests: opsreports.test.ts (batch numbers); cased test runs now pass a
   batchCode. API 654.
+
+## List of addresses without a pin (13 Nov 2026)
+His question, after running "Find approximate pins": how to see the addresses
+that cannot be approximated. Settings › Delivery zones › Pins from the typed
+address now has "Show the addresses without a pin": every active delivery
+address (main or extra) with no pin, with why - "Google could not place it"
+(looked up with these words, nothing usable, or only the parish), "No
+address typed", or "Not looked up yet" - filter pills, a link to each
+customer, and Export to Excel. GET /api/settings/approximate-pins/missing
+(admin) -> approxpins.missingPins. These are the stops that still go last
+when a round is sorted. Test: approxpins.test.ts. API 655.

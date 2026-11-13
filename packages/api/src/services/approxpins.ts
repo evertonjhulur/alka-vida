@@ -181,3 +181,36 @@ export async function pinCounts(db: Queryable) {
           WHERE c.active AND ca.active AND ca.is_delivery AND ca.location_source = 'Approximate') AS approx`);
   return { noPin: Number(r.none), approximate: Number(r.approx), enabled: approximatePinsEnabled() };
 }
+
+export interface MissingPin {
+  customerId: string; customer: string; address: string; kind: 'main' | 'extra';
+  text: string | null; zone: string | null; phone: string | null;
+  /** no-address: nothing typed; not-found: Google could not place it; not-tried: not looked up yet. */
+  why: 'no-address' | 'not-found' | 'not-tried';
+}
+
+/**
+ * Every active delivery address with no pin, and why (Everton, 13 Nov 2026:
+ * "how can I have a list of the addresses that can't be approximated?").
+ * These are the stops that still go last when a round is sorted.
+ */
+export async function missingPins(db: Queryable): Promise<MissingPin[]> {
+  const rows = await db.query<{
+    customer_id: string; customer: string; address: string; kind: 'main' | 'extra';
+    text: string | null; zone: string | null; phone: string | null; tried: string | null;
+  }>(
+    `SELECT c.id AS customer_id, c.name AS customer, 'Main address' AS address, 'main' AS kind,
+            ${MAIN_TEXT} AS text, c.delivery_zone AS zone, c.phone, c.geocoded_text AS tried
+     FROM customers c WHERE c.active AND c.lat IS NULL
+     UNION ALL
+     SELECT c.id, c.name, ca.label, 'extra', ${EXTRA_TEXT}, COALESCE(ca.delivery_zone, c.delivery_zone),
+            COALESCE(ca.phone, c.phone), ca.geocoded_text
+     FROM customer_addresses ca JOIN customers c ON c.id = ca.customer_id
+     WHERE c.active AND ca.active AND ca.is_delivery AND ca.lat IS NULL
+     ORDER BY 2, 3`);
+  return rows.map((r) => ({
+    customerId: r.customer_id, customer: r.customer, address: r.address, kind: r.kind,
+    text: r.text, zone: r.zone, phone: r.phone,
+    why: !r.text ? 'no-address' : r.tried === r.text ? 'not-found' : 'not-tried',
+  }));
+}
