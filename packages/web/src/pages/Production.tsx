@@ -17,6 +17,10 @@ interface Feasibility {
 
 interface Run {
   id: string; batch_date: string; operator: string | null; product_name: string | null;
+  /** PR-0001 (13 Nov 2026). */
+  run_number?: number | null;
+  /** The batch number printed on the goods (13 Nov 2026). */
+  batch_code?: string | null;
   cases: number; loose_bottles: number; total_bottles: number;
   material_cost_cents: number; status: string; jugs_scrapped?: number;
   /** For the Edit panel (11 Nov 2026). */
@@ -34,6 +38,11 @@ export default function Production() {
   const [madeOn, setMadeOn] = useState('');
   /** 5-gallon runs: jugs taken from the empties but found unusable. */
   const [scrapped, setScrapped] = useState('');
+  /** The batch number on the goods; follows the same brand's run that day until typed over (13 Nov 2026). */
+  const [batch, setBatch] = useState('');
+  const [batchTouched, setBatchTouched] = useState(false);
+  const [batchHint, setBatchHint] = useState<{ suggested: string | null; brand: string | null;
+    sameDay: Array<{ brand: string | null; batchCode: string; products: string[] }> } | null>(null);
   const [check, setCheck] = useState<Feasibility | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
@@ -43,14 +52,15 @@ export default function Production() {
     id: string; mode: 'delete' | 'edit'; reason: string;
     /** Refused because the bottles have gone out: offer "it was never made" (12 Nov 2026). */
     short?: boolean;
-    date: string; operator: string; cases: string; loose: string; scrapped: string;
+    date: string; operator: string; cases: string; loose: string; scrapped: string; batch: string;
   } | null>(null);
   const isAdmin = getSession()?.role === 'admin';
 
   function openFix(r: Run, mode: 'delete' | 'edit') {
     setError(null); setMsg(null);
     setFixing({ id: r.id, mode, reason: '', date: String(r.batch_date).slice(0, 10), operator: r.operator ?? '',
-      cases: String(Number(r.cases) || 0), loose: String(Number(r.loose_bottles) || 0), scrapped: String(Number(r.jugs_scrapped) || 0) });
+      cases: String(Number(r.cases) || 0), loose: String(Number(r.loose_bottles) || 0), scrapped: String(Number(r.jugs_scrapped) || 0),
+      batch: r.batch_code ?? '' });
   }
 
   async function saveFix() {
@@ -79,6 +89,8 @@ export default function Production() {
             cases: Math.max(0, Math.round(Number(fixing.cases) || 0)),
             looseBottles: Math.max(0, Math.round(Number(fixing.loose) || 0)),
             jugsScrapped: Math.max(0, Math.round(Number(fixing.scrapped) || 0)),
+            // Only when changed, so an older run without one can still be edited.
+            ...((runs.find((x) => x.id === fixing.id)?.batch_code ?? '') !== fixing.batch.trim() ? { batchCode: fixing.batch } : {}),
             reason: fixing.reason.trim() || null,
           });
         setMsg(r.redone ? `Run changed to ${r.bottles} ${r.productName}; stock and materials adjusted to match.` : 'Run changed.');
@@ -105,6 +117,15 @@ export default function Production() {
   }
   useEffect(() => { load().catch((e) => setError(e.message)); }, []);
 
+  // The batch number the same brand used that day (13 Nov 2026).
+  useEffect(() => {
+    if (!productId) { setBatchHint(null); return; }
+    api.get<NonNullable<typeof batchHint>>(`/api/production/batch-suggestion?productId=${productId}${madeOn ? `&day=${madeOn}` : ''}`)
+      .then(setBatchHint).catch(() => setBatchHint(null));
+  }, [productId, madeOn]);
+  const batchShown = batchTouched ? batch : (batchHint?.suggested ?? '');
+  const needsBatch = !!product && bpc > 0;
+
   // Check the bill of material against stock before anything is committed.
   useEffect(() => {
     if (!productId || bottles <= 0) { setCheck(null); return; }
@@ -129,6 +150,7 @@ export default function Production() {
           operator: operator || undefined,
           productionDate: madeOn || null,
           jugsScrapped: isJug ? (Number(scrapped) || 0) : 0,
+          batchCode: batchShown.trim() || null,
         },
       );
       const e = result.empties;
@@ -138,7 +160,7 @@ export default function Production() {
         (e ? ` ${e.drawn} empties used${e.scrapped ? ` (${e.scrapped} scrapped)` : ''}; ` +
           `${e.left} left on record${e.left < 0 ? ' - below zero: record the empties brought back, or count them' : ''}.` : ''),
       );
-      setCases(''); setLoose(''); setMadeOn(''); setScrapped('');
+      setCases(''); setLoose(''); setMadeOn(''); setScrapped(''); setBatch(''); setBatchTouched(false);
       await load();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not record the production run');
@@ -184,6 +206,18 @@ export default function Production() {
               </label>
               <input id="l" type="number" min="0" style={{ width: 150 }} value={loose}
                      onChange={(e) => setLoose(e.target.value)} />
+            </div>
+
+            <div className="field">
+              <label htmlFor="bn">Batch number{needsBatch ? '' : ' (optional)'}</label>
+              <input id="bn" value={batchShown} style={{ width: 150 }} required={needsBatch}
+                     onChange={(e) => { setBatchTouched(true); setBatch(e.target.value); }} />
+              {!batchTouched && batchHint?.suggested && (
+                <div className="muted small">Same as the {batchHint.brand ?? 'other'} run that day.</div>
+              )}
+              {batchTouched && batchHint?.suggested && batchShown.trim() && batchShown.trim() !== batchHint.suggested && (
+                <div className="small bad-text">The {batchHint.brand ?? 'other'} run that day used {batchHint.suggested}.</div>
+              )}
             </div>
 
             <div className="field">
@@ -279,7 +313,7 @@ export default function Production() {
             </>
           )}
 
-          <button disabled={busy || !check?.canProduce} style={{ marginTop: 12 }}>
+          <button disabled={busy || !check?.canProduce || (needsBatch && !batchShown.trim())} style={{ marginTop: 12 }}>
             {busy ? 'Recording…' : 'Record production run'}
           </button>
         </form>
@@ -290,7 +324,7 @@ export default function Production() {
         <table>
           <thead>
             <tr>
-              <th>Date</th><th>Product</th><th>Operator</th>
+              <th>Date</th><th>Product</th><th>Batch</th><th>Operator</th>
               <th className="num">Output</th><th className="num">Material cost</th><th>Status</th>
               {isAdmin && <th aria-label="Actions" />}
             </tr>
@@ -299,8 +333,9 @@ export default function Production() {
             {runs.map((r) => (
               <Fragment key={r.id}>
               <tr>
-                <td>{when(r.batch_date)}</td>
+                <td>{when(r.batch_date)}{r.run_number ? <div className="muted small">PR-{String(r.run_number).padStart(4, '0')}</div> : null}</td>
                 <td>{r.product_name ?? '—'}</td>
+                <td>{r.batch_code ?? <span className="muted">—</span>}</td>
                 <td className="muted">{r.operator ?? '—'}</td>
                 <td className="num">
                   {Number(r.total_bottles)} bottles
@@ -326,7 +361,7 @@ export default function Production() {
               </tr>
               {fixing?.id === r.id && (
                 <tr>
-                  <td colSpan={isAdmin ? 7 : 6}>
+                  <td colSpan={isAdmin ? 8 : 7}>
                     <div className="panel" style={{ margin: '4px 0 8px', background: 'var(--surface-2, #f7f9fc)' }}>
                       {fixing.mode === 'delete' ? (
                         <>
@@ -356,6 +391,9 @@ export default function Production() {
                                 <input id="fx-scr" inputMode="numeric" style={{ width: 90 }} value={fixing.scrapped}
                                        onChange={(e) => setFixing({ ...fixing, scrapped: e.target.value })} /></div>
                             )}
+                            <div className="field"><label htmlFor="fx-batch">Batch number</label>
+                              <input id="fx-batch" style={{ width: 130 }} value={fixing.batch}
+                                     onChange={(e) => setFixing({ ...fixing, batch: e.target.value })} /></div>
                             <div className="field"><label htmlFor="fx-op">Operator</label>
                               <input id="fx-op" value={fixing.operator}
                                      onChange={(e) => setFixing({ ...fixing, operator: e.target.value })} /></div>

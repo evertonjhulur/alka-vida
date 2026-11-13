@@ -2983,3 +2983,39 @@ Monday and it was recorded wrong).
   down). Before, a correction changed the stop but not the stock. A settled
   round's empties difference is worked out again.
 - Tests: stopcorrection.test.ts. Shared 80, API 650, web 16.
+
+## Production and Purchasing reports (13 Nov 2026)
+His ask: a production report over periods, and a purchasing report showing
+what was ordered, received and not received, grouped by supplier. Two new
+tabs on Reports, on the same period picker and Export to Excel.
+- Production (GET /api/reports/production?from&to&by=day|week|month,
+  services/opsreports.ts): runs, bottles and material cost; made by product
+  with cost per bottle and per case; a day / week (Mon-Sun) / month table
+  with a column per product; every run with its number, operator, who
+  entered it (audit log 'create') and who last edited it. Deleted runs left
+  out. Cost = the run's RawMaterial rows on the ledger, as on Production.
+- Run numbers: migration 041 adds production_batches.run_number (existing
+  runs numbered in entry order, deleted ones included; new runs from
+  production_run_number_seq). Shown as PR-0001 on the report and on the
+  Production list. Start fresh resets the sequence.
+- Purchasing (GET /api/reports/purchasing?from&to): POs raised in the period
+  plus any older PO with something still to come (Draft, Sent, Partially
+  Received); cancelled ones left out. Drafts stay in, marked "Draft, not
+  sent", because a PO only becomes Sent when emailed from the app. Grouped
+  by supplier, then PO (expand for lines): ordered, received, still to come
+  (values incl. GCT and levy, split by quantity); "closed short" lines show
+  what is not coming; overdue = expected date passed with something to come.
+  "Only what is still to come" filter.
+- Tests: opsreports.test.ts. Shared 80, API 653, web 16.
+- Batch numbers (same day, his addition): production_batches.batch_code
+  (migration 041). All Alka Vida cased goods made in one session share a
+  batch number; other brands have their own. The production form has a Batch
+  number box: required for cased goods (checkBatchCode, refused blank),
+  optional for 5-gallon. It fills itself from the same brand's cased run that
+  day (GET /api/production/batch-suggestion?productId&day ->
+  batchCodeSuggestion) until typed over, and notes when a different number is
+  typed. Shown on the Production list, editable in Edit… (sent only when
+  changed, so older runs without one still edit), in the audit summary, and on
+  the Production report and its export. Earlier runs stay blank.
+  Tests: opsreports.test.ts (batch numbers); cased test runs now pass a
+  batchCode. API 654.

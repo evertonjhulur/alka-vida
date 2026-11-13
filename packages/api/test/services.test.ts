@@ -357,7 +357,7 @@ describe('FIFO material costing', () => {
 
     // Produce 150 bottles: 100 from the 9.00 batch, 50 from the 12.00 batch.
     const run = await completeProduction(f.db, f.office, {
-      productId: product.id, cases: 0, looseBottles: 150,
+      productId: product.id, cases: 0, looseBottles: 150, batchCode: 'T-1',
     });
     assert.equal(run.bottlesProduced, 150);
     assert.equal(run.materialCostCents, 100 * 900 + 50 * 1200,

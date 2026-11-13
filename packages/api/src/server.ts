@@ -25,6 +25,7 @@ import * as endofday from './services/endofday.ts';
 import * as undoDelivery from './services/undodelivery.ts';
 import * as routing from './services/routing.ts';
 import * as settlement from './services/settlement.ts';
+import * as opsreports from './services/opsreports.ts';
 import * as invoices from './services/invoices.ts';
 import * as documents from './services/documents.ts';
 import * as payments from './services/payments.ts';
@@ -1646,6 +1647,14 @@ export async function buildServer(db: Db) {
   app.post('/api/production', { preHandler: allow('admin', 'user') },
     async (req) => inventory.completeProduction(db, actorOf(req), req.body as never));
 
+  // The batch number to suggest: the same brand's cased run that day (13 Nov 2026).
+  app.get('/api/production/batch-suggestion', { preHandler: allow('admin', 'user') },
+    async (req) => {
+      const q = req.query as { productId?: string; day?: string };
+      if (!q.productId) return { suggested: null, brand: null, sameDay: [] };
+      return inventory.batchCodeSuggestion(db, q.productId, q.day || null);
+    });
+
   // Delete or edit a run entered wrongly (11 Nov 2026). Admin only.
   app.post('/api/production/:id/delete', { preHandler: allow('admin') },
     async (req) => {
@@ -1846,6 +1855,20 @@ export async function buildServer(db: Db) {
     async (req) => {
       const q = req.query as { from?: string; to?: string };
       return reports.marginReport(db, q.from || null, q.to || null);
+    });
+
+  // Production and Purchasing reports (13 Nov 2026).
+  app.get('/api/reports/production', { preHandler: allow('admin', 'user') },
+    async (req) => {
+      const q = req.query as { from?: string; to?: string; by?: string };
+      const by = q.by === 'week' || q.by === 'month' ? q.by : 'day';
+      return opsreports.productionReport(db, q.from || null, q.to || null, by);
+    });
+
+  app.get('/api/reports/purchasing', { preHandler: allow('admin', 'user') },
+    async (req) => {
+      const q = req.query as { from?: string; to?: string };
+      return opsreports.purchasingReport(db, q.from || null, q.to || null);
     });
 
   app.get('/api/reports/material-costs', { preHandler: allow('admin', 'user') },

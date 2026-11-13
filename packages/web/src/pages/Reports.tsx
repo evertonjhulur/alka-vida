@@ -3,6 +3,7 @@ import { Link, useSearchParams } from 'react-router-dom';
 import { api, openPdf } from '../lib/api';
 import { downloadCsv } from '../lib/csv';
 import { money, day, todayInJamaica } from '../lib/format';
+import { ProductionTab, PurchasingTab, productionCsv, purchasingCsv, type ProductionBy, type ProductionReport, type PurchasingReport } from '../components/OpsReports';
 
 /**
  * Reports, as tabs over one period (approved mockup, 29 Sep 2026).
@@ -109,7 +110,7 @@ interface MaterialCost {
 }
 
 const TABS = [
-  ['sales', 'Sales'], ['eod', 'End of day'], ['transactions', 'Sales transactions'], ['margin', 'Margin'], ['rounds', 'Rounds and cash'], ['loadings', 'Truck loadings'],
+  ['sales', 'Sales'], ['eod', 'End of day'], ['transactions', 'Sales transactions'], ['margin', 'Margin'], ['rounds', 'Rounds and cash'], ['loadings', 'Truck loadings'], ['production', 'Production'], ['purchasing', 'Purchasing'],
   ['owed', 'Money owed'], ['bottles', 'Bottles'], ['discounts', 'Discounts'], ['materials', 'Material cost'],
 ] as const;
 
@@ -190,6 +191,12 @@ export default function Reports() {
   const [materials, setMaterials] = useState<MaterialCost[] | null>(null);
   const [txns, setTxns] = useState<Txn[] | null>(null);
   const [loadings, setLoadings] = useState<Loading[] | null>(null);
+  const [production, setProduction] = useState<ProductionReport | null>(null);
+  const [purchasing, setPurchasing] = useState<PurchasingReport | null>(null);
+  const [prodBy, setProdByState] = useState<ProductionBy>(() => {
+    try { const b = localStorage.getItem('reports.productionBy'); return b === 'week' || b === 'month' ? b : 'day'; } catch { return 'day'; }
+  });
+  const setProdBy = (b: ProductionBy) => { setProdByState(b); try { localStorage.setItem('reports.productionBy', b); } catch { /* fine */ } };
   const [error, setError] = useState<string | null>(null);
 
   const q = new URLSearchParams();
@@ -206,8 +213,10 @@ export default function Reports() {
     if (tab === 'loadings') api.get<Loading[]>(`/api/reports/loadings?${qs}`).then(setLoadings).catch(fail);
     if (tab === 'transactions') api.get<Txn[]>(`/api/reports/sales-transactions?${qs}`).then(setTxns).catch(fail);
     if (tab === 'eod') { setEod(null); api.get<EndOfDay>(`/api/reports/end-of-day?day=${eodDay}`).then(setEod).catch(fail); }
+    if (tab === 'production') api.get<ProductionReport>(`/api/reports/production?${qs}${qs ? '&' : ''}by=${prodBy}`).then(setProduction).catch(fail);
+    if (tab === 'purchasing') api.get<PurchasingReport>(`/api/reports/purchasing?${qs}`).then(setPurchasing).catch(fail);
     if (tab === 'discounts') api.get<{ totals: DiscountTotals; byClient: PerClient[] }>(`/api/reports/discounts?${qs}`).then(setDisc).catch(fail);
-  }, [tab, qs, eodDay]);
+  }, [tab, qs, eodDay, prodBy]);
   useEffect(() => {
     if (tab === 'owed' && !owed) api.get<Aging>('/api/reports/aging').then(setOwed).catch((e) => setError(e.message));
     if (tab === 'bottles' && !pool) api.get<Pool>('/api/reports/bottle-pool').then(setPool).catch(() => setPool(null));
@@ -308,6 +317,10 @@ export default function Reports() {
               short(x.name), x.bottles / per, '', '', '', x.bottlesPerCase > 0 ? 'cases' : 'bottles'];
           })))),
       ]);
+    } else if (tab === 'production' && production) {
+      downloadCsv(file('production'), productionCsv(production, range.label));
+    } else if (tab === 'purchasing' && purchasing) {
+      downloadCsv(file('purchasing'), purchasingCsv(purchasing, range.label));
     } else if (tab === 'owed' && owed) {
       if (age === 'all') {
         downloadCsv(`alka-vida-aged-receivables-${owed.asOf}.csv`, [
@@ -1033,7 +1046,8 @@ export default function Reports() {
     );
   };
 
-  const body = tab === 'sales' ? salesTab() : tab === 'eod' ? eodTab() : tab === 'transactions' ? transactionsTab() : tab === 'margin' ? marginTab() : tab === 'rounds' ? roundsTab() : tab === 'loadings' ? loadingsTab() : tab === 'owed' ? owedTab()
+  const body = tab === 'sales' ? salesTab() : tab === 'eod' ? eodTab() : tab === 'transactions' ? transactionsTab() : tab === 'margin' ? marginTab() : tab === 'rounds' ? roundsTab() : tab === 'loadings' ? loadingsTab() : tab === 'production' ? <ProductionTab data={production} by={prodBy} setBy={setProdBy} label={range.label} />
+    : tab === 'purchasing' ? <PurchasingTab data={purchasing} label={range.label} /> : tab === 'owed' ? owedTab()
     : tab === 'bottles' ? bottlesTab() : tab === 'discounts' ? discountsTab() : materialsTab();
 
   return (
@@ -1045,6 +1059,8 @@ export default function Reports() {
             {tab === 'eod' ? <>One day: sales, money collected, rounds and orders.</>
               : !periodMatters ? 'As of today.'
               : tab === 'bottles' ? <>From rounds dated {range.label === 'all time' ? 'at any time' : `in ${range.label}`}, and where the bottles are today.</>
+                : tab === 'production' ? <>Production runs dated {range.label === 'all time' ? 'at any time' : `in ${range.label}`}.</>
+                : tab === 'purchasing' ? <>Purchase orders raised {range.label === 'all time' ? 'at any time' : `in ${range.label}`}, and older ones still open.</>
                 : tab === 'rounds' ? <>Rounds dated {range.label === 'all time' ? 'at any time' : `in ${range.label}`}.</>
                 : <>From invoices dated {range.label === 'all time' ? 'at any time' : `in ${range.label}`}, before GCT unless it says otherwise.</>}
           </p>

@@ -644,6 +644,8 @@ export async function completeProduction(
     productionDate?: string | null;
     /** 5-gallon runs: jugs taken from the empties but found unusable (jug cycle, 3 Nov 2026). */
     jugsScrapped?: number | null;
+    /** The batch number printed on the goods (13 Nov 2026); required for cased goods. */
+    batchCode?: string | null;
   },
 ): Promise<{
   batchId: string; bottlesProduced: number; materialCostCents: Cents;
@@ -658,11 +660,12 @@ export async function completeProduction(
       `SELECT name, bottles_per_case, is_returnable FROM products WHERE id = $1`, [input.productId],
     );
     const { cases, loose, bottles, scrapped } = runSize(product, input);
+    const batchCode = checkBatchCode(product, input.batchCode);
 
     const batch = await t.one<{ id: string }>(
-      `INSERT INTO production_batches (operator, status, notes, batch_date, jugs_scrapped)
-       VALUES ($1,'Completed',$2, COALESCE($3::date, business_today()), $4) RETURNING id`,
-      [input.operator ?? actor.name, input.notes ?? null, day, scrapped],
+      `INSERT INTO production_batches (operator, status, notes, batch_date, jugs_scrapped, batch_code)
+       VALUES ($1,'Completed',$2, COALESCE($3::date, business_today()), $4, $5) RETURNING id`,
+      [input.operator ?? actor.name, input.notes ?? null, day, scrapped, batchCode],
     );
     await t.query(
       `INSERT INTO production_batch_line_items
@@ -675,10 +678,61 @@ export async function completeProduction(
 
     await audit(t, actor, 'create', 'ProductionBatch', batch.id, product.name,
       { bottlesProduced: bottles, materialCostCents: made.materialCost, jugsScrapped: scrapped || undefined,
-        emptiesLeft: made.empties?.left });
+        emptiesLeft: made.empties?.left, batchCode: batchCode ?? undefined });
 
     return { batchId: batch.id, bottlesProduced: bottles, materialCostCents: made.materialCost, empties: made.empties };
   });
+}
+
+/**
+ * The batch number printed on the goods (Everton, 13 Nov 2026): required for
+ * cased goods, optional for the rest (5-gallon). Kept as typed, trimmed,
+ * spaces squeezed; null when blank.
+ */
+function checkBatchCode(product: { bottles_per_case: number; name?: string }, code: string | null | undefined): string | null {
+  const c = String(code ?? '').trim().replace(/\s+/g, ' ');
+  if (!c && num(product.bottles_per_case) > 0) {
+    throw new RuleViolation(`enter the batch number printed on the ${product.name ?? 'cases'}`);
+  }
+  if (c.length > 40) throw new RuleViolation('the batch number is too long');
+  return c || null;
+}
+
+/**
+ * The batch number to suggest for a new run (13 Nov 2026): all the cased
+ * goods of one brand made on one day share a batch number, so it is the one
+ * the same brand's last cased run that day used. Null when there is none.
+ * Also says what each brand used that day, for the form's note.
+ */
+export async function batchCodeSuggestion(db: Queryable, productId: string, day?: string | null): Promise<{
+  suggested: string | null; brand: string | null;
+  sameDay: Array<{ brand: string | null; batchCode: string; products: string[] }>;
+}> {
+  const d = checkRunDay(day) ?? businessToday();
+  const product = await db.maybeOne<{ brand_id: string | null; brand: string | null; bottles_per_case: number }>(
+    `SELECT p.brand_id, b.name AS brand, p.bottles_per_case FROM products p LEFT JOIN brands b ON b.id = p.brand_id WHERE p.id = $1`,
+    [productId],
+  );
+  const used = await db.query<{ brand_id: string | null; brand: string | null; batch_code: string; product: string; created_at: string }>(
+    `SELECT p.brand_id, b.name AS brand, pb.batch_code, p.name AS product, pb.created_at::text AS created_at
+     FROM production_batches pb
+     JOIN production_batch_line_items li ON li.batch_id = pb.id
+     JOIN products p ON p.id = li.product_id
+     LEFT JOIN brands b ON b.id = p.brand_id
+     WHERE pb.status = 'Completed' AND pb.batch_date = $1::date AND pb.batch_code IS NOT NULL
+       AND p.bottles_per_case > 0
+     ORDER BY pb.created_at DESC`, [d],
+  );
+  const groups = new Map<string, { brand: string | null; batchCode: string; products: string[] }>();
+  for (const u of used) {
+    const k = `${u.brand_id ?? ''}|${u.batch_code}`;
+    const g = groups.get(k) ?? { brand: u.brand, batchCode: u.batch_code, products: [] };
+    if (!g.products.includes(u.product)) g.products.push(u.product);
+    groups.set(k, g);
+  }
+  const mine = product && num(product.bottles_per_case) > 0
+    ? used.find((u) => (u.brand_id ?? null) === (product.brand_id ?? null)) : undefined;
+  return { suggested: mine?.batch_code ?? null, brand: product?.brand ?? null, sameDay: [...groups.values()] };
 }
 
 /** The production date given, checked; null = today. */
@@ -780,14 +834,14 @@ async function runMovements(
 }
 
 interface RunRow {
-  status: string; batch_date: string; jugs_scrapped: number; operator: string | null;
+  status: string; batch_date: string; jugs_scrapped: number; operator: string | null; batch_code: string | null;
   product_id: string; product_name: string; bottles_per_case: number; is_returnable: boolean;
   cases: number; loose_bottles: number; total_bottles: number;
 }
 
 async function lockRun(t: Queryable, batchId: string): Promise<RunRow> {
   const run = await t.maybeOne<RunRow>(
-    `SELECT pb.status, pb.batch_date::text AS batch_date, pb.jugs_scrapped, pb.operator,
+    `SELECT pb.status, pb.batch_date::text AS batch_date, pb.jugs_scrapped, pb.operator, pb.batch_code,
             li.product_id, p.name AS product_name, p.bottles_per_case, p.is_returnable,
             li.cases, li.loose_bottles, li.total_bottles
      FROM production_batches pb
@@ -931,13 +985,15 @@ export async function deleteProduction(
 export async function editProduction(
   db: Db, actor: Actor, batchId: string,
   input: { productionDate?: string | null; operator?: string | null; cases?: number; looseBottles?: number;
-    jugsScrapped?: number | null; reason?: string | null },
+    jugsScrapped?: number | null; reason?: string | null; batchCode?: string | null },
 ): Promise<{ bottles: number; productName: string; redone: boolean }> {
   requireRole(actor, 'admin');
   return db.tx(async (t) => {
     const run = await lockRun(t, batchId);
     const day = input.productionDate === undefined ? run.batch_date : (checkRunDay(input.productionDate) ?? businessToday());
     const operator = input.operator === undefined ? run.operator : ((input.operator ?? '').trim() || run.operator);
+    const batchCode = input.batchCode === undefined ? run.batch_code
+      : checkBatchCode({ bottles_per_case: run.bottles_per_case, name: run.product_name }, input.batchCode);
     const size = runSize(run, {
       cases: input.cases ?? num(run.cases),
       looseBottles: input.looseBottles ?? num(run.loose_bottles),
@@ -948,7 +1004,7 @@ export async function editProduction(
       cases: num(run.cases), loose: num(run.loose_bottles), scrapped: num(run.jugs_scrapped) };
     const sizeChanged = size.bottles !== was.bottles || size.scrapped !== was.scrapped
       || size.cases !== was.cases || size.loose !== was.loose;
-    if (!sizeChanged && day === was.day && operator === was.operator) {
+    if (!sizeChanged && day === was.day && operator === was.operator && batchCode === run.batch_code) {
       throw new RuleViolation('nothing has been changed');
     }
 
@@ -967,17 +1023,18 @@ export async function editProduction(
            AND item_id IN (SELECT id FROM raw_materials WHERE is_returnable_jug)`, [`Production ${batchId}`, day]);
     }
     await t.query(
-      `UPDATE production_batches SET batch_date = $2::date, operator = $3, jugs_scrapped = $4 WHERE id = $1`,
-      [batchId, day, operator, size.scrapped]);
+      `UPDATE production_batches SET batch_date = $2::date, operator = $3, jugs_scrapped = $4, batch_code = $5 WHERE id = $1`,
+      [batchId, day, operator, size.scrapped, batchCode]);
 
     const changes: string[] = [];
     if (day !== was.day) changes.push(`day ${was.day} to ${day}`);
     if (operator !== was.operator) changes.push(`operator ${was.operator ?? '-'} to ${operator ?? '-'}`);
+    if (batchCode !== run.batch_code) changes.push(`batch ${run.batch_code ?? '-'} to ${batchCode ?? '-'}`);
     if (size.bottles !== was.bottles) changes.push(`${was.bottles} to ${size.bottles} bottles`);
     if (size.scrapped !== was.scrapped) changes.push(`jugs scrapped ${was.scrapped} to ${size.scrapped}`);
     await audit(t, actor, 'update', 'ProductionBatch', batchId, run.product_name, {
-      edited: true, reason: input.reason ?? null, before: was,
-      after: { day, operator, bottles: size.bottles, cases: size.cases, loose: size.loose, scrapped: size.scrapped },
+      edited: true, reason: input.reason ?? null, before: { ...was, batchCode: run.batch_code },
+      after: { day, operator, batchCode, bottles: size.bottles, cases: size.cases, loose: size.loose, scrapped: size.scrapped },
       summary: `Production run of ${run.product_name} changed: ${changes.join(', ')}.`,
     });
     return { bottles: size.bottles, productName: run.product_name, redone: sizeChanged };
@@ -1103,7 +1160,7 @@ export async function getPurchaseOrder(db: Db, poId: string) {
 
 export async function listProductionBatches(db: Db, limit = 50) {
   return db.query(
-    `SELECT pb.id, pb.batch_date::text AS batch_date, pb.operator, pb.status, pb.notes, pb.jugs_scrapped,
+    `SELECT pb.id, pb.run_number, pb.batch_code, pb.batch_date::text AS batch_date, pb.operator, pb.status, pb.notes, pb.jugs_scrapped,
             p.name AS product_name, p.bottles_per_case, p.is_returnable, li.cases, li.loose_bottles, li.total_bottles,
             (SELECT COALESCE(SUM(total_cost_cents),0) FROM inventory_transactions it
              WHERE it.reference = 'Production ' || pb.id::text

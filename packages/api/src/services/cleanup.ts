@@ -181,6 +181,7 @@ export async function startFresh(db: Db, actor: Actor, input: CleanupInput): Pro
       await t.query(`SELECT setval('${seq}', 1000, false)`);
     }
     await t.query(`SELECT setval('website_order_seq', 1, false)`);
+    await t.query(`SELECT setval('production_run_number_seq', 1, false)`);
 
     const after = await t.one<{ c: number; u: number }>(
       `SELECT (SELECT COUNT(*) FROM customers)::int AS c, (SELECT COUNT(*) FROM users)::int AS u`,

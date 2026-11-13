@@ -264,7 +264,7 @@ describe('Production runs', () => {
   test('consume materials FIFO and add finished goods', async () => {
     // 500ml is 24 per case: 20 cases plus 4 loose = 484 bottles.
     const run = await completeProduction(f.db, f.office, {
-      productId, cases: 20, looseBottles: 4, operator: 'Line 1',
+      productId, cases: 20, looseBottles: 4, operator: 'Line 1', batchCode: 'AV-1',
     });
     assert.equal(run.bottlesProduced, 484);
     assert.ok(run.materialCostCents > 0);
@@ -283,7 +283,7 @@ describe('Production runs', () => {
       `SELECT quantity_on_hand q FROM raw_materials WHERE id = $1`, [preformId],
     );
     await assert.rejects(
-      completeProduction(f.db, f.office, { productId, cases: 10_000 }),
+      completeProduction(f.db, f.office, { productId, cases: 10_000, batchCode: 'AV-1' }),
       /insufficient stock/,
     );
     const after = await f.db.one<{ q: number }>(
@@ -567,7 +567,7 @@ describe('Delete or edit a production run entered wrongly (11 Nov 2026)', () => 
 
   test('a duplicate run is deleted: bottles off stock, materials back in their layers, gone from the list', async () => {
     const before = await figures();
-    const run = await completeProduction(f.db, f.office, { productId, cases: 1, operator: 'Line 1' });
+    const run = await completeProduction(f.db, f.office, { productId, cases: 1, operator: 'Line 1', batchCode: 'AV-1' });
     assert.notDeepEqual(await figures(), before);
     await assert.rejects(deleteProduction(f.db, f.office, run.batchId, 'entered twice'), /admin|role/i);
     await assert.rejects(deleteProduction(f.db, f.admin, run.batchId, ' '), /say why/);
@@ -589,7 +589,7 @@ describe('Delete or edit a production run entered wrongly (11 Nov 2026)', () => 
   });
 
   test('refused when the bottles have already gone out of stock', async () => {
-    const run = await completeProduction(f.db, f.office, { productId, cases: 1 });
+    const run = await completeProduction(f.db, f.office, { productId, cases: 1, batchCode: 'AV-1' });
     await f.db.query(`UPDATE finished_goods_stock SET quantity_on_hand = 10 WHERE product_id = $1`, [productId]);
     await assert.rejects(deleteProduction(f.db, f.admin, run.batchId, 'oops'), /cannot be deleted unless you confirm/);
     // Confirmed it was never made (12 Nov 2026): deleted, stock goes below zero.
@@ -599,7 +599,7 @@ describe('Delete or edit a production run entered wrongly (11 Nov 2026)', () => 
   });
 
   test('edit the day and operator only: in place, stock untouched', async () => {
-    const run = await completeProduction(f.db, f.office, { productId, cases: 1, productionDate: '2026-11-06' });
+    const run = await completeProduction(f.db, f.office, { productId, cases: 1, productionDate: '2026-11-06', batchCode: 'AV-1' });
     const before = await figures();
     await assert.rejects(editProduction(f.db, f.office, run.batchId, { productionDate: '2026-11-05' }), /admin|role/i);
     await editProduction(f.db, f.admin, run.batchId, { productionDate: '2026-11-05', operator: 'Collin Smith' });
@@ -611,12 +611,12 @@ describe('Delete or edit a production run entered wrongly (11 Nov 2026)', () => 
 
   test('edit the quantity: the same as if it had been entered right the first time', async () => {
     const start = await figures();
-    const right = await completeProduction(f.db, f.office, { productId, cases: 1 });
+    const right = await completeProduction(f.db, f.office, { productId, cases: 1, batchCode: 'AV-1' });
     const rightFigures = await figures();
     const rightCost = Number((await listed(right.batchId))!.material_cost_cents);
     await deleteProduction(f.db, f.admin, right.batchId, 'test');
     assert.deepEqual(await figures(), start);
-    const wrong = await completeProduction(f.db, f.office, { productId, cases: 2 });
+    const wrong = await completeProduction(f.db, f.office, { productId, cases: 2, batchCode: 'AV-1' });
     await editProduction(f.db, f.admin, wrong.batchId, { cases: 1, reason: 'two typed for one' });
     assert.deepEqual(await figures(), rightFigures, 'stock and materials as for one case');
     const r = await listed(wrong.batchId);
