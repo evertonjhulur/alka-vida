@@ -5,7 +5,7 @@ import { api, openPdf, type Session } from '../lib/api';
 import SortStopsPanel from '../components/SortStopsPanel';
 import { money, date, day, time, when } from '../lib/format';
 import {
-  AddStopPanel, AddToLoadPanel, AdditionsList, LoadingPanel, ReturnsPanel, TruckTable, KIND_WORDS, collectionSummary, loaderWords,
+  AddStopPanel, AddToLoadPanel, AdditionsList, LoadingPanel, ReturnsPanel, SamePersonFlag, TruckTable, KIND_WORDS, collectionSummary, loaderWords,
   type Collection, type Truck,
 } from '../components/Truck';
 
@@ -55,7 +55,7 @@ interface Sheet {
   bottle_settle_notes?: string | null; reconciled_date?: string | null; reconciled_by_name?: string | null;
 }
 
-interface Driver { id: string; name: string }
+interface Driver { id: string; name: string; office?: boolean }
 
 interface Candidate {
   id: string;
@@ -260,7 +260,7 @@ export default function RouteDetail({ session }: { session: Session }) {
             <select aria-label="Driver" value={sheet.assigned_driver_id ?? ''} disabled={busy}
                     onChange={(e) => assign(e.target.value)}>
               <option value="">Choose a driver…</option>
-              {drivers.map((d) => <option key={d.id} value={d.id}>{d.name}</option>)}
+              {drivers.map((d) => <option key={d.id} value={d.id}>{d.name}{d.office ? ' (office)' : ''}</option>)}
             </select>
           ) : <div className="small">{sheet.driver_name ?? 'no driver'}{sheet.vehicle ? `, ${sheet.vehicle}` : ''}</div>}
         </li>
@@ -269,7 +269,10 @@ export default function RouteDetail({ session }: { session: Session }) {
           {/* Dual accountability (10 Oct 2026): the office logs the loading and
               confirms it loaded; the driver confirms the totals to start. */}
           {sheet.started_at ? (
-            <div className="small">{time(sheet.started_at)}{truck?.driverConfirmedName ? ` · load confirmed by ${truck.driverConfirmedName}` : ''}</div>
+            <>
+              <div className="small">{time(sheet.started_at)}{truck?.driverConfirmedName ? ` · load confirmed by ${truck.driverConfirmedName}` : ''}</div>
+              {truck?.samePerson && <div style={{ marginTop: 4 }}><SamePersonFlag name={truck.samePerson} compact /></div>}
+            </>
           ) : !open ? <div className="small">—</div>
             : !truck ? (
               <>
@@ -449,6 +452,7 @@ export default function RouteDetail({ session }: { session: Session }) {
                   : ' Not yet confirmed by the driver.'}
                 {truck.returnedAt ? ` Counted back ${time(truck.returnedAt)} by ${truck.returnedByName ?? '—'}.` : ''}
               </p>
+              <SamePersonFlag name={truck.samePerson} />
               <TruckTable truck={truck} />
               <AdditionsList additions={truck.additions ?? []} role="office" onDone={done} />
               {open && office && truck.driverConfirmedAt && !truck.returnedAt && (

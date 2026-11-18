@@ -150,18 +150,21 @@ export type AlertKind = keyof typeof ALERT_KINDS;
 
 export interface AlertSettings {
   userId: string; name: string; email: string; role: string; active: boolean;
+  /** Office/admin login ticked "Can also drive" (18 Nov 2026): can have load alerts. */
+  canDrive: boolean;
   orders: boolean; decisions: boolean; decisionEmails: boolean; load: boolean;
   quietFrom: string | null; quietTo: string | null; devices: number;
 }
 
 const SETTINGS_SQL = `
-  SELECT u.id, u.name, u.email, u.role, u.active, u.notify_orders, u.notify_decisions, u.decision_emails,
+  SELECT u.id, u.name, u.email, u.role, u.active, u.can_drive, u.notify_orders, u.notify_decisions, u.decision_emails,
          u.notify_load, u.quiet_from, u.quiet_to,
          (SELECT COUNT(*)::int FROM push_subscriptions s WHERE s.user_id = u.id) AS devices
   FROM users u`;
 const toSettings = (r: Record<string, unknown>): AlertSettings => ({
   userId: r.id as string, name: r.name as string, email: r.email as string, role: r.role as string,
-  active: !!r.active, orders: !!r.notify_orders, decisions: !!r.notify_decisions,
+  active: !!r.active, canDrive: !!r.can_drive && (r.role === 'admin' || r.role === 'user'),
+  orders: !!r.notify_orders, decisions: !!r.notify_decisions,
   decisionEmails: !!r.decision_emails, load: !!r.notify_load,
   quietFrom: (r.quiet_from as string) ?? null, quietTo: (r.quiet_to as string) ?? null, devices: Number(r.devices) || 0,
 });
@@ -189,14 +192,16 @@ export async function setAlertSettings(
   input: Partial<Pick<AlertSettings, 'orders' | 'decisions' | 'decisionEmails' | 'load' | 'quietFrom' | 'quietTo'>>,
 ): Promise<AlertSettings> {
   if (userId !== actor.id) requireRole(actor, 'admin');
-  const u = await db.maybeOne<{ role: string }>(`SELECT role FROM users WHERE id = $1`, [userId]);
+  const u = await db.maybeOne<{ role: string; can_drive: boolean }>(`SELECT role, can_drive FROM users WHERE id = $1`, [userId]);
   if (!u) throw new RuleViolation('that login no longer exists');
   const sets: string[] = [];
   const vals: unknown[] = [userId];
   for (const k of ['orders', 'decisions', 'decisionEmails', 'load'] as const) {
     if (input[k] === undefined) continue;
     const def = ALERT_KINDS[k];
-    if (!(def.roles as readonly string[]).includes(u.role)) continue;
+    // Load alerts also go to office/admin logins that can drive (18 Nov 2026).
+    const drives = k === 'load' && u.can_drive && (u.role === 'admin' || u.role === 'user');
+    if (!(def.roles as readonly string[]).includes(u.role) && !drives) continue;
     vals.push(input[k] === true);
     sets.push(`${def.column} = $${vals.length}`);
   }

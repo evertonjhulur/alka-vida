@@ -24,13 +24,39 @@ export interface Truck {
   driverConfirmedAt?: string | null; driverConfirmedName?: string | null;
   /** Last-minute additions after the driver confirmed, each reconfirmed by the driver. */
   additions?: Addition[];
+  /**
+   * Loaded and confirmed by the same person (18 Nov 2026): who it was, when
+   * the load or an addition was confirmed by the person who logged or loaded
+   * it (an office login that can also drive). Allowed, but flagged.
+   */
+  samePerson?: string | null;
   returnedAt: string | null; returnedByName: string | null; emptiesBack: number | null; returnNotes: string | null;
   lines: TruckLine[];
 }
 export interface Addition {
   id: string; note: string | null; addedAt: string; addedByName: string | null; loaderNames: string[];
   driverConfirmedAt: string | null; driverConfirmedName: string | null;
+  /** Reconfirmed by the person who logged or loaded it (18 Nov 2026). */
+  samePerson?: boolean;
   lines: Array<{ productId: string; name: string; bottlesPerCase: number; bottles: number }>;
+}
+
+/**
+ * The flag for a round whose load was logged and confirmed by one person
+ * (18 Nov 2026). Allowed - an office login that can also drive - so it only
+ * draws the eye; nothing is blocked.
+ */
+export function SamePersonFlag({ name, compact }: { name: string | null | undefined; compact?: boolean }) {
+  if (!name) return null;
+  if (compact) {
+    return <span className="chip warn" title={`${name} logged or loaded it and confirmed it as the driver`}>Same person loaded and confirmed</span>;
+  }
+  return (
+    <div className="notice warn small" role="note" style={{ margin: '6px 0' }}>
+      <strong>Loaded and confirmed by the same person</strong> ({name}). Allowed, as they can also drive,
+      but nobody else checked the load: compare what came back carefully.
+    </div>
+  );
 }
 export interface Collection {
   id: string; kind: 'Empties' | 'Returns' | 'Supplier'; status: 'Pending' | 'Collected' | 'Not collected';
@@ -433,6 +459,7 @@ export function AdditionsList({ additions, role, onDone }: {
               {a.driverConfirmedAt
                 ? <span className="chip ok">Confirmed by {a.driverConfirmedName} {time(a.driverConfirmedAt)}</span>
                 : <span className="chip warn">Waiting for the driver to confirm</span>}
+              {a.samePerson && <> <span className="chip warn" title="Logged or loaded and confirmed by the same person">same person</span></>}
             </div>
           </div>
           {!a.driverConfirmedAt && role === 'driver' && (

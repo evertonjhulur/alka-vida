@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { api, type Session } from '../lib/api';
 import { money, toCents, date, when } from '../lib/format';
-import { ReturnsPanel, TruckTable, KIND_WORDS, collectionSummary, type Collection, type Truck } from '../components/Truck';
+import { ReturnsPanel, SamePersonFlag, TruckTable, KIND_WORDS, collectionSummary, type Collection, type Truck } from '../components/Truck';
 
 interface Allocation {
   invoiceId: string | null;
@@ -555,6 +555,7 @@ export default function Settlement({ session }: { session: Session }) {
       {truck && (
         <div className="panel">
           <h2 style={{ marginTop: 0 }}>The truck</h2>
+          <SamePersonFlag name={truck.samePerson} />
           <TruckTable truck={truck} />
           {truckOut && !locked && (
             <>

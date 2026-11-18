@@ -336,6 +336,7 @@ export async function renderEndOfDayPdf(db: Db, day: string): Promise<{ filename
     ['', '', `${rt.delivered} of ${rt.stops}`, cash(rt.recordedCents), cash(rt.handedInCents),
       `${r.rounds.rounds.reduce((a, x) => a + x.fullOut, 0)} / ${r.rounds.rounds.reduce((a, x) => a + (x.emptiesCounted ?? x.emptiesRecorded), 0)}`]);
     for (const x of r.rounds.rounds) {
+      if (x.samePerson) note(`${x.zone} round: loaded and confirmed by the same person (${x.samePerson}).`);
       if (x.notes) note(`${x.zone} settlement notes: ${x.notes.replace(/\s*\n\s*/g, '; ')}`);
     }
     note('Recorded = what drivers entered at the stops. Handed in = what was counted at settlement.');

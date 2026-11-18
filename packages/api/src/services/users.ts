@@ -69,6 +69,20 @@ export interface UserInput {
   byInvitation?: boolean;
   /** Required for a portal login, refused for any other role. */
   customerId?: string | null;
+  /**
+   * Office or administrator login that can also be the driver on a round
+   * (18 Nov 2026). Refused for driver and customer logins.
+   */
+  canDrive?: boolean;
+}
+
+/** "Can also drive" only means something on an office or administrator login. */
+function assertCanDriveFits(role: Role, canDrive: boolean | undefined): void {
+  if (canDrive && role !== 'admin' && role !== 'user') {
+    throw new RuleViolation(role === 'driver'
+      ? 'a driver login already drives - "Can also drive" is for office and administrator logins'
+      : 'a customer login cannot drive');
+  }
 }
 
 function assertPassword(password: string): void {
@@ -123,6 +137,7 @@ export async function listUsers(db: Db, actor: Actor) {
   return db.query(
     `SELECT u.id, u.email, u.name, u.role, u.active,
             u.created_at, u.last_login_at,
+            (u.can_drive AND u.role IN ('admin','user')) AS can_drive,
             c.id   AS customer_id,
             c.name AS customer_name
      FROM users u
@@ -143,6 +158,7 @@ export async function createUser(
   if (!email) throw new RuleViolation('a login needs an email address');
   if (!name) throw new RuleViolation('a login needs a name');
   assertRole(input.role);
+  assertCanDriveFits(input.role, input.canDrive);
   if (!input.byInvitation) assertPassword(input.password);
   await assertEmailFree(db, email);
 
@@ -174,16 +190,16 @@ export async function createUser(
     }
 
     const row = await t.one<{ id: string }>(
-      `INSERT INTO users (email, name, password_hash, role)
-       VALUES ($1,$2,$3,$4) RETURNING id`,
-      [email, name, hash, input.role],
+      `INSERT INTO users (email, name, password_hash, role, can_drive)
+       VALUES ($1,$2,$3,$4,$5) RETURNING id`,
+      [email, name, hash, input.role, !!input.canDrive],
     );
     if (input.customerId) {
       await t.query(`UPDATE customers SET user_id = $2 WHERE id = $1`,
         [input.customerId, row.id]);
     }
     await audit(t, actor, 'create', 'User', row.id, name,
-      { email, role: input.role, customerId: input.customerId ?? null });
+      { email, role: input.role, customerId: input.customerId ?? null, ...(input.canDrive ? { canDrive: true } : {}) });
     return { id: row.id };
   });
 }
@@ -194,7 +210,7 @@ export async function createUser(
  */
 export async function updateUser(
   db: Db, actor: Actor, userId: string,
-  input: Partial<Pick<UserInput, 'email' | 'name' | 'role'>>,
+  input: Partial<Pick<UserInput, 'email' | 'name' | 'role' | 'canDrive'>>,
 ): Promise<void> {
   requireRole(actor, 'admin');
   await assertNotSystemAccount(db, userId);
@@ -235,6 +251,26 @@ export async function updateUser(
     }
     await assertNotLastAdmin(db, userId, 'changing their role');
     set('role', input.role);
+    // Becoming a driver login: the tick has no meaning any more.
+    if (input.role === 'driver' && !('canDrive' in input)) set('can_drive', false);
+  }
+
+  if ('canDrive' in input && input.canDrive != null) {
+    const role = (input.role ?? before.role) as Role;
+    assertCanDriveFits(role, input.canDrive);
+    // Unticking while they hold an open round would leave a round whose
+    // driver can no longer open it.
+    if (!input.canDrive) {
+      const open = await db.maybeOne<{ zone: string; day: string }>(
+        `SELECT zone, delivery_date::text AS day FROM delivery_sheets
+         WHERE assigned_driver_id = $1 AND status = 'Open' ORDER BY delivery_date LIMIT 1`, [userId],
+      );
+      if (open && role !== 'driver') {
+        throw new RuleViolation(`${before.name} is the driver on the open ${open.zone} round (${open.day}). `
+          + 'Give that round to another driver, or settle it, before taking "Can also drive" off.');
+      }
+    }
+    set('can_drive', !!input.canDrive);
   }
 
   if (sets.length === 0) return;

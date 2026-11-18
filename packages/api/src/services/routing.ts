@@ -16,12 +16,21 @@ import type { Actor } from './core.ts';
 import { audit, requireRole } from './core.ts';
 import { RuleViolation } from '@alka/shared';
 
-/** The drivers a route can be handed to. */
+/**
+ * The people a route can be handed to: driver logins, plus office and
+ * administrator logins ticked "Can also drive" (18 Nov 2026). `office` marks
+ * the latter, so the drop-down can say so.
+ */
 export async function listDrivers(db: Db) {
-  return db.query<{ id: string; name: string }>(
-    `SELECT id, name FROM users WHERE role = 'driver' ORDER BY name`,
+  return db.query<{ id: string; name: string; office: boolean }>(
+    `SELECT id, name, role <> 'driver' AS office FROM users
+     WHERE role = 'driver' OR (can_drive AND active AND role IN ('admin','user'))
+     ORDER BY name`,
   );
 }
+
+/** SQL: may this users row be put on a round as its driver? */
+const DRIVES_SQL = `(role = 'driver' OR (can_drive AND role IN ('admin','user')))`;
 
 /**
  * Put a driver on a sheet, or take one off with a null driverId.
@@ -36,8 +45,13 @@ export async function assignDriver(
   actor: Actor,
   sheetId: string,
   driverId: string | null,
+  opts: { asDriver?: boolean } = {},
 ): Promise<{ assignedDriverId: string | null; driverName: string | null }> {
   requireRole(actor, 'admin', 'user', 'driver');
+  // Acting as the driver (a driver login, or an office/admin login that can
+  // drive confirming a load from My route): only ever themselves, and never
+  // a round somebody else holds - office rights do not reach over that.
+  const asDriver = actor.role === 'driver' || !!opts.asDriver;
 
   return db.tx(async (t) => {
     const sheet = await t.maybeOne<{
@@ -51,7 +65,7 @@ export async function assignDriver(
       throw new RuleViolation('a settled route cannot be reassigned');
     }
 
-    if (actor.role === 'driver') {
+    if (asDriver) {
       if (driverId !== null && driverId !== actor.id) {
         throw new RuleViolation('a driver can only take a route for themselves');
       }
@@ -61,7 +75,7 @@ export async function assignDriver(
         );
       }
     }
-    const target = actor.role === 'driver' ? actor.id : driverId;
+    const target = asDriver ? actor.id : driverId;
 
     if (target === null) {
       await t.query(
@@ -73,11 +87,13 @@ export async function assignDriver(
       return { assignedDriverId: null, driverName: null };
     }
 
-    const driver = await t.maybeOne<{ id: string; name: string; role: string }>(
-      `SELECT id, name, role FROM users WHERE id = $1`, [target],
+    const driver = await t.maybeOne<{ id: string; name: string; drives: boolean }>(
+      `SELECT id, name, ${DRIVES_SQL} AS drives FROM users WHERE id = $1`, [target],
     );
     if (!driver) throw new RuleViolation('that driver no longer exists');
-    if (driver.role !== 'driver') throw new RuleViolation(`${driver.name} is not a driver`);
+    if (!driver.drives) {
+      throw new RuleViolation(`${driver.name} is not a driver. An administrator can tick "Can also drive" on their login under Settings › Users`);
+    }
 
     await t.query(
       `UPDATE delivery_sheets SET assigned_driver_id = $2, driver_name = $3 WHERE id = $1`,

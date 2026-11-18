@@ -192,7 +192,10 @@ function sentence(r: Row, L: Lookups): string {
       if (d.collectPaymentStop) return `"Collect payment" stop planned for ${r.entity_label}.`;
       if (d.loaded) return `Truck loading ${d.reloaded ? 're-logged' : 'logged'} for the ${round}${Array.isArray(d.loaders) && d.loaders.length ? `, loaded by ${d.loaders.join(', ')}` : ''}.`;
       if (d.loadAddition) return `Goods added to the load of the ${round}, waiting for the driver to confirm.`;
-      if (d.driverConfirmedAddition) return `The driver confirmed goods added to the load of the ${round}.`;
+      // Loaded and confirmed by the same person (18 Nov 2026): allowed, flagged.
+      const same = d.samePerson ? ' Flag: loaded and confirmed by the same person.' : '';
+      if (d.driverConfirmedLoad) return `The driver confirmed the load and started the ${round}.${same}`;
+      if (d.driverConfirmedAddition) return `The driver confirmed goods added to the load of the ${round}.${same}`;
       if (d.cancelledAddition) return `Goods added to the load of the ${round} were taken back off.`;
       if (d.collectionId || d.kind) return `${d.kind ?? ''} collection on the ${round}: ${String(d.status ?? '').toLowerCase()}${d.emptiesCount ? `, ${d.emptiesCount} empties` : ''}.`;
       break;

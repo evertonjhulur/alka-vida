@@ -2,7 +2,7 @@ import { useEffect, useState, type ReactNode } from 'react';
 import {
   HashRouter, Link, Routes, Route, NavLink, Navigate, useNavigate, useLocation,
 } from 'react-router-dom';
-import { api, getSession, takeReturnPath, type Session, type Role } from './lib/api';
+import { api, drives, getSession, setSession as keepSession, takeReturnPath, type Session, type Role } from './lib/api';
 
 import Login from './pages/Login';
 import PublicSite, { SITE_PATHS } from './site/Site';
@@ -84,6 +84,8 @@ interface NavItem {
   also?: string[];
   /** Which pending count, if any, puts a badge on this item. */
   badge?: 'decisions' | 'quotes';
+  /** Also shown to office/admin logins ticked "Can also drive" (18 Nov 2026). */
+  drivers?: boolean;
 }
 
 /** A section that prints a rule instead of a heading. */
@@ -119,6 +121,8 @@ const NAV: NavItem[] = [
 
   { to: '/delivery', label: 'Delivery rounds', roles: ['admin', 'user'], section: 'Deliveries' },
   { to: '/reminders', label: "Tomorrow's reminders", roles: ['admin', 'user'], section: 'Deliveries' },
+  // Drivers, and office/admin logins ticked "Can also drive" (18 Nov 2026).
+  { to: '/route', label: 'My route', roles: ['driver'], drivers: true, section: 'Deliveries' },
 
   { to: '/invoices', label: 'Invoices', roles: ['admin', 'user'], section: 'Money', also: ['/credit-notes'] },
   { to: '/payments', label: 'Payments', roles: ['admin', 'user'], section: 'Money' },
@@ -132,7 +136,6 @@ const NAV: NavItem[] = [
   // Set up once, changed rarely: one page of cards (pages/SettingsHub.tsx).
   { to: '/settings', label: 'Settings', roles: ['admin', 'user'], section: RULE, also: SETTINGS_PAGES },
 
-  { to: '/route', label: 'My route', roles: ['driver'] },
   // The portal, as separate modules rather than tabs inside one screen.
   { to: '/portal/home', label: 'Home', roles: ['customer'] },
   { to: '/portal/order', label: 'Place an order', roles: ['customer'] },
@@ -168,7 +171,9 @@ function exactMatch(to: string): boolean {
 
 function Shell({ session }: { session: Session }) {
   const navigate = useNavigate();
-  const items = NAV.filter((n) => n.roles.includes(session.role));
+  const items = NAV.filter((n) => n.roles.includes(session.role) || (n.drivers && drives(session)))
+    // A driver login's menu stays as it was: no section heading over My route.
+    .map((n) => (session.role === 'driver' && n.section ? { ...n, section: undefined } : n));
   const listed = items.filter((n) => !n.placement);
   const actions = items.filter((n) => n.placement === 'action');
   const account = items.filter((n) => n.placement === 'account');
@@ -486,6 +491,23 @@ function Routed({
 
 export default function App() {
   const [session, setSession] = useState<Session | null>(getSession());
+
+  // "Can also drive" can be ticked or unticked while someone is signed in
+  // (18 Nov 2026): ask the server, so My route appears or goes without
+  // signing in again. Keyed on the person, so it runs once per sign-in.
+  const sessionId = session?.id;
+  useEffect(() => {
+    if (!sessionId) return;
+    api.get<Session | null>('/api/auth/me').then((me) => {
+      if (!me || me.id !== sessionId) return;
+      setSession((s) => {
+        if (!s || !!s.canDrive === !!me.canDrive) return s;
+        const next = { ...s, canDrive: !!me.canDrive };
+        keepSession(next);
+        return next;
+      });
+    }).catch(() => {});
+  }, [sessionId]);
 
   useEffect(() => {
     const onStorage = () => setSession(getSession());

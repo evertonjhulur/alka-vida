@@ -32,7 +32,7 @@
 
 import type { Db, Queryable } from '../db/index.ts';
 import type { Actor } from './core.ts';
-import { audit, num, requireRole } from './core.ts';
+import { audit, num, requireDriver, requireRole } from './core.ts';
 import { RuleViolation } from '@alka/shared';
 import { assignDriver, startRoute } from './routing.ts';
 
@@ -181,8 +181,10 @@ export async function getLoad(db: Queryable, sheetId: string) {
     updated_at: string; returned_at: string | null; returned_by_name: string | null;
     empties_back: number | null; return_notes: string | null;
     driver_confirmed_at: string | null; driver_confirmed_name: string | null;
+    loaded_by: string | null; driver_confirmed_by: string | null;
   }>(`SELECT * FROM round_loads WHERE delivery_sheet_id = $1`, [sheetId]);
   if (!l) return null;
+  const additions = await listAdditions(db, sheetId);
   const lines = await db.query<{
     product_id: string; name: string; bottles_per_case: number;
     ordered_bottles: number; extra_bottles: number; loaded_bottles: number; returned_bottles: number | null;
@@ -207,8 +209,25 @@ export async function getLoad(db: Queryable, sheetId: string) {
       addedBottles: num(r.added_bottles),
       returnedBottles: r.returned_bottles === null ? null : num(r.returned_bottles),
     })),
-    additions: await listAdditions(db, sheetId),
+    additions,
+    /**
+     * Loaded and confirmed by the same person (18 Nov 2026): the name of
+     * whoever confirmed the load, or an addition, that they had also logged
+     * or loaded themselves. Allowed - an office login that can drive - but
+     * shown on the round page, the settlement and the End of day report.
+     */
+    samePerson: sameAsLoader(l.driver_confirmed_by, l.loaded_by, l.loader_ids)
+      ? l.driver_confirmed_name
+      : additions.find((a) => a.samePerson)?.driverConfirmedName ?? null,
   };
+}
+
+/** Did the person who confirmed it as driver also log it or load it? */
+export function sameAsLoader(
+  confirmedBy: string | null, loggedBy: string | null, loaderIds: string[] | null,
+): boolean {
+  if (!confirmedBy) return false;
+  return confirmedBy === loggedBy || (loaderIds ?? []).includes(confirmedBy);
 }
 
 /* ------------------------------------------- additions after confirmation */
@@ -218,8 +237,10 @@ export async function listAdditions(db: Queryable, sheetId: string) {
     id: string; lines: Array<{ productId: string; bottles: number }>; note: string | null;
     added_at: string; added_by_name: string | null; loader_names: string[];
     driver_confirmed_at: string | null; driver_confirmed_name: string | null;
+    added_by: string | null; loader_ids: string[] | null; driver_confirmed_by: string | null;
   }>(
-    `SELECT id, lines, note, added_at, added_by_name, loader_names, driver_confirmed_at, driver_confirmed_name
+    `SELECT id, lines, note, added_at, added_by_name, loader_names, driver_confirmed_at, driver_confirmed_name,
+            added_by, loader_ids, driver_confirmed_by
      FROM round_load_additions WHERE delivery_sheet_id = $1 AND cancelled_at IS NULL ORDER BY added_at`, [sheetId],
   );
   const products = new Map((await db.query<{ id: string; name: string; bottles_per_case: number }>(
@@ -228,6 +249,8 @@ export async function listAdditions(db: Queryable, sheetId: string) {
   return rows.map((r) => ({
     id: r.id, note: r.note, addedAt: r.added_at, addedByName: r.added_by_name, loaderNames: r.loader_names ?? [],
     driverConfirmedAt: r.driver_confirmed_at, driverConfirmedName: r.driver_confirmed_name,
+    /** Reconfirmed by the person who logged or loaded it (18 Nov 2026). */
+    samePerson: sameAsLoader(r.driver_confirmed_by, r.added_by, r.loader_ids),
     lines: (r.lines ?? []).map((l) => ({
       productId: l.productId, name: products.get(l.productId)?.name ?? 'Product',
       bottlesPerCase: num(products.get(l.productId)?.bottles_per_case ?? 0), bottles: num(l.bottles),
@@ -301,9 +324,11 @@ async function additionFor(t: Queryable, id: string) {
     delivery_sheet_id: string; lines: Array<{ productId: string; bottles: number }>;
     driver_confirmed_at: string | null; cancelled_at: string | null;
     sheet_status: string; assigned_driver_id: string | null; returned_at: string | null;
+    added_by: string | null; loader_ids: string[] | null;
   }>(
     `SELECT a.delivery_sheet_id, a.lines, a.driver_confirmed_at, a.cancelled_at,
-            ds.status AS sheet_status, ds.assigned_driver_id, rl.returned_at
+            ds.status AS sheet_status, ds.assigned_driver_id, rl.returned_at,
+            a.added_by, a.loader_ids
      FROM round_load_additions a
      JOIN delivery_sheets ds ON ds.id = a.delivery_sheet_id
      JOIN round_loads rl ON rl.delivery_sheet_id = a.delivery_sheet_id
@@ -316,7 +341,8 @@ async function additionFor(t: Queryable, id: string) {
 
 /** The driver reconfirms an addition: it is on the truck, and theirs. */
 export async function confirmAddition(db: Db, actor: Actor, id: string): Promise<void> {
-  requireRole(actor, 'driver');
+  // A driver login, or an office/admin login that can also drive (18 Nov 2026).
+  requireDriver(actor);
   await db.tx(async (t) => {
     const a = await additionFor(t, id);
     if (a.assigned_driver_id && a.assigned_driver_id !== actor.id) throw new RuleViolation('this is not your round');
@@ -325,8 +351,10 @@ export async function confirmAddition(db: Db, actor: Actor, id: string): Promise
       `UPDATE round_load_additions SET driver_confirmed_at = now(), driver_confirmed_by = $2, driver_confirmed_name = $3
        WHERE id = $1`, [id, actor.id, actor.name],
     );
+    // Allowed, but flagged (18 Nov 2026): the person reconfirming logged or loaded it.
+    const samePerson = a.added_by === actor.id || (a.loader_ids ?? []).includes(actor.id);
     await audit(t, actor, 'update', 'DeliverySheet', a.delivery_sheet_id, await roundLabel(t, a.delivery_sheet_id), {
-      driverConfirmedAddition: id, lines: a.lines,
+      driverConfirmedAddition: id, lines: a.lines, ...(samePerson ? { samePerson: true } : {}),
     });
   });
 }
@@ -466,17 +494,20 @@ export async function loadRound(
 export async function confirmLoad(
   db: Db, actor: Actor, sheetId: string,
 ): Promise<{ startedAt: string; confirmedAt: string }> {
-  requireRole(actor, 'driver');
-  // Refused on somebody else's round before anything is recorded.
-  await assignDriver(db, actor, sheetId, actor.id);
+  // A driver login, or an office/admin login that can also drive (18 Nov 2026).
+  requireDriver(actor);
+  // Refused on somebody else's round before anything is recorded - as a
+  // driver, even for an office login, so confirming never takes over a round.
+  await assignDriver(db, actor, sheetId, actor.id, { asDriver: true });
   const confirmedAt = await db.tx(async (t) => {
     const sheet = await t.maybeOne<{ status: string }>(
       `SELECT status FROM delivery_sheets WHERE id = $1 FOR UPDATE`, [sheetId],
     );
     if (!sheet) throw new RuleViolation('that round no longer exists');
     if (sheet.status !== 'Open') throw new RuleViolation('this round is settled');
-    const load = await t.maybeOne<{ driver_confirmed_at: string | null }>(
-      `SELECT driver_confirmed_at::text AS driver_confirmed_at FROM round_loads WHERE delivery_sheet_id = $1`, [sheetId],
+    const load = await t.maybeOne<{ driver_confirmed_at: string | null; loaded_by: string | null; loader_ids: string[] | null }>(
+      `SELECT driver_confirmed_at::text AS driver_confirmed_at, loaded_by, loader_ids
+       FROM round_loads WHERE delivery_sheet_id = $1`, [sheetId],
     );
     if (!load) {
       throw new RuleViolation('the office has not logged the loading for this round yet. Ask them to, then confirm it here.');
@@ -490,8 +521,11 @@ export async function confirmLoad(
     const lines = await t.query<{ product_id: string; loaded_bottles: number }>(
       `SELECT product_id, loaded_bottles FROM round_load_lines WHERE delivery_sheet_id = $1`, [sheetId],
     );
+    // Allowed, but flagged (18 Nov 2026): the driver also logged or loaded it.
+    const samePerson = load.loaded_by === actor.id || (load.loader_ids ?? []).includes(actor.id);
     await audit(t, actor, 'update', 'DeliverySheet', sheetId, await roundLabel(t, sheetId), {
       driverConfirmedLoad: lines.map((l) => ({ productId: l.product_id, bottles: num(l.loaded_bottles) })),
+      ...(samePerson ? { samePerson: true } : {}),
     });
     return row.at;
   });
@@ -646,11 +680,13 @@ export async function loadingsReport(db: Queryable, from: string, to: string) {
     sheet_id: string; day: string; zone: string; driver_name: string | null; loaded_at: string;
     loaded_by_name: string | null; loader_names: string[]; returned_at: string | null;
     driver_confirmed_name: string | null; driver_confirmed_at: string | null;
+    loaded_by: string | null; loader_ids: string[] | null; driver_confirmed_by: string | null;
     product: string; bottles_per_case: number; loaded_bottles: number; returned_bottles: number | null; added_bottles: number;
     delivered_bottles: number;
   }>(
     `SELECT ds.id AS sheet_id, ds.delivery_date::text AS day, ds.zone, ds.driver_name, rl.loaded_at,
             rl.loaded_by_name, rl.loader_names, rl.returned_at, rl.driver_confirmed_name, rl.driver_confirmed_at,
+            rl.loaded_by, rl.loader_ids, rl.driver_confirmed_by,
             p.name AS product, p.bottles_per_case, ll.loaded_bottles, ll.returned_bottles, ll.added_bottles,
             COALESCE((SELECT SUM(sl.total_bottles) FROM delivery_stop_lines sl
                       JOIN delivery_stops st ON st.id = sl.stop_id
@@ -668,6 +704,8 @@ export async function loadingsReport(db: Queryable, from: string, to: string) {
     sheetId: string; day: string; zone: string; driverName: string | null; loadedAt: string;
     loadedByName: string | null; loaders: string[]; returned: boolean;
     driverConfirmedName: string | null; driverConfirmedAt: string | null;
+    /** Loaded and confirmed by the same person (18 Nov 2026): their name, else null. */
+    samePerson: string | null;
     /** loaded = the confirmed loading; added = later additions (credited to their own loaders below). */
     lines: Array<{ product: string; bottlesPerCase: number; loaded: number; added: number; delivered: number; returned: number | null; difference: number | null }>;
     additions: Awaited<ReturnType<typeof listAdditions>>;
@@ -675,11 +713,15 @@ export async function loadingsReport(db: Queryable, from: string, to: string) {
   for (const r of rows) {
     const key = r.sheet_id;
     if (!loads.has(key)) {
+      const additions = await listAdditions(db, r.sheet_id);
       loads.set(key, {
         sheetId: r.sheet_id, day: r.day, zone: r.zone, driverName: r.driver_name, loadedAt: r.loaded_at,
         loadedByName: r.loaded_by_name, loaders: r.loader_names ?? [], returned: !!r.returned_at, lines: [],
-        additions: await listAdditions(db, r.sheet_id),
+        additions,
         driverConfirmedName: r.driver_confirmed_name, driverConfirmedAt: r.driver_confirmed_at,
+        samePerson: sameAsLoader(r.driver_confirmed_by, r.loaded_by, r.loader_ids)
+          ? r.driver_confirmed_name
+          : additions.find((a) => a.samePerson)?.driverConfirmedName ?? null,
       });
     }
     const returned = r.returned_bottles === null ? null : num(r.returned_bottles);

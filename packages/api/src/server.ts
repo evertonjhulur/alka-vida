@@ -13,7 +13,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createDb, type Db } from './db/index.ts';
 import { migrate } from './db/migrate.ts';
-import { loadSigningKey, login, signToken, userAccess, verifyToken, SESSION_COOKIE, SESSION_TTL_SECONDS, type Session } from './lib/auth.ts';
+import { loadSigningKey, login, signToken, userAccessDetail, verifyToken, SESSION_COOKIE, SESSION_TTL_SECONDS, type Session } from './lib/auth.ts';
 import { loadSettings } from './lib/settings.ts';
 import { ForbiddenError, RuleViolation, type PaymentMethod, type RecurrencePattern } from '@alka/shared';
 import { BUSINESS_TIMEZONE, assertMethodAllowed, type Actor } from './services/core.ts';
@@ -287,7 +287,7 @@ export async function buildServer(db: Db) {
     // new ids, leaving a browser "signed in" as somebody who is gone. Left
     // unchecked that surfaces at the END of the first write, as a raw
     // audit_log foreign key error, with the order number already burned.
-    const access = await userAccess(db, session.id);
+    const { access, canDrive } = await userAccessDetail(db, session.id);
     if (access === 'gone') {
       return reply.status(401).send({
         error: 'Your session has expired. Please sign in again.',
@@ -300,12 +300,14 @@ export async function buildServer(db: Db) {
         error: 'This login has been deactivated. Speak to an administrator.',
       });
     }
-    req.session = session;
+    // "Can also drive" (18 Nov 2026) comes from the database, not the token,
+    // so ticking it takes effect on the next request.
+    req.session = { ...session, canDrive };
   });
 
   const actorOf = (req: { session?: Session }): Actor => {
     const s = req.session!;
-    return { id: s.id, name: s.name, role: s.role };
+    return { id: s.id, name: s.name, role: s.role, canDrive: !!s.canDrive };
   };
 
   /** Guard a route to specific roles. */

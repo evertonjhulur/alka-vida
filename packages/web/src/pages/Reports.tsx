@@ -3,6 +3,7 @@ import { Link, useSearchParams } from 'react-router-dom';
 import { api, openPdf } from '../lib/api';
 import { downloadCsv } from '../lib/csv';
 import { money, day, todayInJamaica } from '../lib/format';
+import { SamePersonFlag } from '../components/Truck';
 import { ProductionTab, PurchasingTab, productionCsv, purchasingCsv, type ProductionBy, type ProductionReport, type PurchasingReport } from '../components/OpsReports';
 
 /**
@@ -75,6 +76,8 @@ interface RoundRow {
   fullOut: number; emptiesRecorded: number; emptiesCounted: number | null; bottleVariance: number | null;
   /** What the office wrote at settlement (27 Oct 2026). */
   notes?: string | null;
+  /** Loaded and confirmed by the same person (18 Nov 2026): their name. */
+  samePerson?: string | null;
 }
 interface Rounds {
   totals: { rounds: number; settled: number; stops: number; delivered: number; missed: number;
@@ -119,6 +122,8 @@ interface Loading {
   sheetId: string; day: string; zone: string; driverName: string | null; loadedAt: string;
   loadedByName: string | null; loaders: string[]; returned: boolean;
   driverConfirmedName: string | null; driverConfirmedAt: string | null;
+  /** Loaded and confirmed by the same person (18 Nov 2026): their name. */
+  samePerson?: string | null;
   lines: Array<{ product: string; bottlesPerCase: number; loaded: number; added?: number; delivered: number; returned: number | null; difference: number | null }>;
   /** Added after the driver confirmed; credited to their own loaders. */
   additions?: Array<{ addedAt: string; addedByName: string | null; loaderNames: string[]; driverConfirmedName: string | null;
@@ -265,8 +270,8 @@ export default function Reports() {
         ...e.sales.invoices.map((i) => [i.number, i.customer, i.how, dollars(i.netCents), dollars(i.gctCents), dollars(i.totalCents), dollars(Math.max(i.balanceCents, 0))]), [],
         ['Time', 'Customer', 'Method', 'Receipt', 'Invoice', 'Taken by', 'Settled', 'Amount'],
         ...e.money.payments.map((p) => [p.at, p.customer, p.method, p.receipt ?? '', p.invoice ?? 'on account', p.takenBy, p.confirmed ? 'yes' : 'no', dollars(p.amountCents)]), [],
-        ['Round', 'Driver', 'Stops', 'Delivered', 'Not delivered', 'Not done', 'Recorded', 'Handed in', 'Bottles out', 'Empties back'],
-        ...e.rounds.rounds.map((r) => [r.zone, r.driver ?? '', r.stops, r.delivered, r.missed, r.pending, dollars(r.recordedCents), dollars(r.handedInCents), r.fullOut, r.emptiesCounted ?? r.emptiesRecorded]), [],
+        ['Round', 'Driver', 'Stops', 'Delivered', 'Not delivered', 'Not done', 'Recorded', 'Handed in', 'Bottles out', 'Empties back', 'Loaded and confirmed by the same person'],
+        ...e.rounds.rounds.map((r) => [r.zone, r.driver ?? '', r.stops, r.delivered, r.missed, r.pending, dollars(r.recordedCents), dollars(r.handedInCents), r.fullOut, r.emptiesCounted ?? r.emptiesRecorded, r.samePerson ?? '']), [],
         ['Orders taken', 'Customer', 'For', 'Items', 'From'],
         ...e.orders.taken.map((o) => [o.number, o.customer, o.forDay ?? '', o.items, o.source]), [],
         [`Booked for ${e.tomorrow}`, 'Customer', 'Zone', 'Items', 'From'],
@@ -286,10 +291,10 @@ export default function Reports() {
       ]);
     } else if (tab === 'rounds' && rounds) {
       downloadCsv(file('rounds-and-cash'), [
-        ['Date', 'Round', 'Driver', 'Status', 'Stops', 'Delivered', 'Not delivered', 'Invoiced', 'Recorded by driver', 'Handed in', 'Difference', 'Full bottles out', 'Empties recorded', 'Empties counted', 'Settlement notes'],
+        ['Date', 'Round', 'Driver', 'Status', 'Stops', 'Delivered', 'Not delivered', 'Invoiced', 'Recorded by driver', 'Handed in', 'Difference', 'Full bottles out', 'Empties recorded', 'Empties counted', 'Settlement notes', 'Loaded and confirmed by the same person'],
         ...rounds.rounds.map((r) => [r.date, r.zone, r.driver ?? '', r.status === 'Completed' ? 'Settled' : 'Open', r.stops, r.delivered, r.missed,
           dollars(r.invoicedCents), dollars(r.recordedCents), dollars(r.handedInCents), dollars(r.cashVarianceCents),
-          r.fullOut, r.emptiesRecorded, r.emptiesCounted ?? '', (r.notes ?? '').replace(/\s*\n\s*/g, '; ')]),
+          r.fullOut, r.emptiesRecorded, r.emptiesCounted ?? '', (r.notes ?? '').replace(/\s*\n\s*/g, '; '), r.samePerson ?? '']),
       ]);
     } else if (tab === 'margin' && margin) {
       downloadCsv(file('margin'), [
@@ -626,6 +631,7 @@ export default function Reports() {
                   <tr key={r.id}>
                     <td data-label="Round"><Link to={`/delivery/${r.id}`}>{r.zone}</Link>
                       <div className="muted small">{r.status === 'Completed' ? 'settled' : !r.started ? 'not started' : r.pending > 0 ? 'on the road' : 'back, to settle'}</div>
+                      {r.samePerson && <div style={{ marginTop: 4 }}><SamePersonFlag name={r.samePerson} compact /></div>}
                       {r.notes && <div className="small" style={{ whiteSpace: 'pre-line', marginTop: 4 }}><strong>Notes:</strong> {r.notes}</div>}</td>
                     <td data-label="Driver" className="small">{r.driver ?? '—'}</td>
                     <td data-label="Stops" className="num">{r.delivered} of {r.stops} delivered
@@ -761,6 +767,7 @@ export default function Reports() {
                     <td>
                       <Link to={`/delivery/${r.id}`}>{r.zone} · {day(r.date)}</Link>
                       <div className="muted small">{r.status === 'Completed' ? 'settled' : !r.started ? 'not started' : r.pending > 0 ? 'on the road' : 'back, to settle'}</div>
+                      {r.samePerson && <div style={{ marginTop: 4 }}><SamePersonFlag name={r.samePerson} compact /></div>}
                       {r.notes && <div className="small" style={{ whiteSpace: 'pre-line', marginTop: 4 }}><strong>Notes:</strong> {r.notes}</div>}
                     </td>
                     <td className="small">{r.driver ?? '—'}</td>
@@ -1002,7 +1009,7 @@ export default function Reports() {
               {loadings.flatMap((l) => l.lines.map((x, i) => (
                 <tr key={`${l.sheetId}-${i}`}>
                   <td>{i === 0 && <><Link to={`/delivery/${l.sheetId}`}>{day(l.day)} · {l.zone}</Link><div className="muted small">{l.driverName ?? ''}</div></>}</td>
-                  <td className="small">{i === 0 && <>{l.loaders.join(', ')}<div className="muted">logged by {l.loadedByName ?? '—'}; {l.driverConfirmedName ? `confirmed by ${l.driverConfirmedName}` : 'driver not confirmed'}</div></>}</td>
+                  <td className="small">{i === 0 && <>{l.loaders.join(', ')}<div className="muted">logged by {l.loadedByName ?? '—'}; {l.driverConfirmedName ? `confirmed by ${l.driverConfirmedName}` : 'driver not confirmed'}</div>{l.samePerson && <SamePersonFlag name={l.samePerson} compact />}</>}</td>
                   <td>{short(x.product)}</td>
                   <td className="num">{qtyOf(x.bottlesPerCase, x.loaded + (x.added ?? 0))}{(x.added ?? 0) > 0 && <div className="muted small">incl. {qtyOf(x.bottlesPerCase, x.added!)} added later</div>}</td>
                   <td className="num">{qtyOf(x.bottlesPerCase, x.delivered)}</td>

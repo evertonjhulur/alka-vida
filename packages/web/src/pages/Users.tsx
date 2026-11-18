@@ -7,7 +7,14 @@ interface User {
   id: string; email: string; name: string; role: Role; active: boolean;
   created_at: string; last_login_at: string | null;
   customer_id: string | null; customer_name: string | null;
+  /** Office/admin login that can also be a round's driver (18 Nov 2026). */
+  can_drive: boolean;
 }
+
+/** "Can also drive" is offered on office and administrator logins only. */
+const mayDrive = (r: Role) => r === 'admin' || r === 'user';
+const CAN_DRIVE_NOTE = 'Can be put on a round as its driver and gets My route. '
+  + 'If they log the load and confirm it themselves, the round is flagged.';
 
 interface CustomerRef { id: string; name: string }
 
@@ -30,7 +37,7 @@ const ROLE_NOTE: Record<Role, string> = {
 const STAFF_ROLES: Role[] = ['admin', 'user', 'driver'];
 
 const BLANK_NEW = {
-  name: '', email: '', role: 'user' as Role, password: '', customerId: '',
+  name: '', email: '', role: 'user' as Role, password: '', customerId: '', canDrive: false,
   // Preferred: the office never learns a password that can place orders.
   byInvitation: true,
 };
@@ -46,7 +53,7 @@ export default function Users({ session }: { session: Session }) {
   const [nw, setNw] = useState({ ...BLANK_NEW });
 
   const [editFor, setEditFor] = useState<string | null>(null);
-  const [ed, setEd] = useState({ name: '', email: '', role: 'user' as Role });
+  const [ed, setEd] = useState({ name: '', email: '', role: 'user' as Role, canDrive: false });
 
   const [search, setSearch] = useState('');
   const [roleFilter, setRoleFilter] = useState<Role | ''>('');
@@ -84,6 +91,7 @@ export default function Users({ session }: { session: Session }) {
         name: nw.name, email: nw.email, role: nw.role,
         password: nw.password, byInvitation: nw.byInvitation,
         customerId: nw.role === 'customer' ? nw.customerId : undefined,
+        canDrive: mayDrive(nw.role) && nw.canDrive,
       });
       if (nw.byInvitation) {
         const inv = await api.post<{ link: string; sent: boolean; reason?: string }>(
@@ -125,6 +133,8 @@ export default function Users({ session }: { session: Session }) {
     if (ed.name !== u.name) patch.name = ed.name;
     if (ed.email !== u.email) patch.email = ed.email;
     if (ed.role !== u.role) patch.role = ed.role;
+    const drives = mayDrive(ed.role) && ed.canDrive;
+    if (drives !== !!u.can_drive && (mayDrive(ed.role) || u.can_drive)) patch.canDrive = drives;
     if (Object.keys(patch).length === 0) { setEditFor(null); say('Nothing was changed.'); return; }
 
     await run(async () => {
@@ -158,7 +168,7 @@ export default function Users({ session }: { session: Session }) {
 
   const needle = search.trim().toLowerCase();
   const matches = (u: User) => (roleFilter === '' || u.role === roleFilter) && (needle === '' || [
-    u.name, u.email, ROLE_LABEL[u.role], u.role, u.customer_name ?? '',
+    u.name, u.email, ROLE_LABEL[u.role], u.role, u.customer_name ?? '', u.can_drive ? 'also drives driver' : '',
   ].some((f) => f.toLowerCase().includes(needle)));
 
   const active = users.filter((u) => u.active && matches(u));
@@ -170,7 +180,7 @@ export default function Users({ session }: { session: Session }) {
   const toggleEdit = (u: User) => {
     const next = editFor === u.id ? null : u.id;
     setEditFor(next); setPwFor(null);
-    if (next) setEd({ name: u.name, email: u.email, role: u.role });
+    if (next) setEd({ name: u.name, email: u.email, role: u.role, canDrive: !!u.can_drive });
   };
 
   const row = (u: User) => (
@@ -188,6 +198,7 @@ export default function Users({ session }: { session: Session }) {
         </td>
         <td>
           {ROLE_LABEL[u.role]}
+          {u.can_drive && mayDrive(u.role) && <span className="chip info" style={{ marginLeft: 6 }}>also drives</span>}
           <div className="muted small">{ROLE_NOTE[u.role]}</div>
         </td>
         <td className="small muted">
@@ -243,6 +254,16 @@ export default function Users({ session }: { session: Session }) {
                   </select>
                 )}
               </div>
+              {mayDrive(ed.role) && (
+                <div className="field">
+                  <label>&nbsp;</label>
+                  <label className="check" title={CAN_DRIVE_NOTE}>
+                    <input type="checkbox" checked={ed.canDrive}
+                           onChange={(e) => setEd({ ...ed, canDrive: e.target.checked })} />
+                    Can also drive
+                  </label>
+                </div>
+              )}
               <div className="field">
                 <button disabled={busy || !ed.name.trim() || !ed.email.trim()}
                         onClick={() => saveEdit(u)}>
@@ -250,6 +271,11 @@ export default function Users({ session }: { session: Session }) {
                 </button>
               </div>
             </div>
+            {mayDrive(ed.role) && (
+              <p className="muted small" style={{ margin: '0 0 4px' }}>
+                <strong>Can also drive:</strong> {CAN_DRIVE_NOTE}
+              </p>
+            )}
             {u.id === session.id && (
               <p className="muted small" style={{ margin: 0 }}>
                 You cannot change your own role. Another administrator has to do it —
@@ -364,6 +390,16 @@ export default function Users({ session }: { session: Session }) {
                   </select>
                 </div>
               )}
+              {mayDrive(nw.role) && (
+                <div className="field">
+                  <label>&nbsp;</label>
+                  <label className="check" title={CAN_DRIVE_NOTE}>
+                    <input type="checkbox" checked={nw.canDrive}
+                           onChange={(e) => setNw({ ...nw, canDrive: e.target.checked })} />
+                    Can also drive
+                  </label>
+                </div>
+              )}
               <div className="field">
                 <label htmlFor="uh">How do they get in?</label>
                 <select id="uh" value={nw.byInvitation ? 'invite' : 'password'}
@@ -392,6 +428,7 @@ export default function Users({ session }: { session: Session }) {
             </div>
             <p className="muted small" style={{ margin: 0 }}>
               {ROLE_NOTE[nw.role]}{' '}
+              {mayDrive(nw.role) && nw.canDrive && <>{CAN_DRIVE_NOTE}{' '}</>}
               {nw.byInvitation
                 ? 'They choose their own password from a one-time link, so nobody here '
                   + 'ever knows it. The link is shown to you as well, in case email is not '

@@ -1,15 +1,21 @@
 import { useEffect, useState } from 'react';
-import { api, type Session } from '../lib/api';
+import { api, drives, type Session } from '../lib/api';
 import { PUSH_WORDS, currentEndpoint, pushState, turnPushOff, turnPushOn, type PushState } from '../lib/push';
 import { ask } from './Dialog';
 
 /** What the server keeps about who gets what (15 Oct 2026). */
 export interface AlertSettings {
   userId: string; name: string; email: string; role: string; active: boolean;
+  /** Office/admin login that can also drive (18 Nov 2026): can have load alerts. */
+  canDrive?: boolean;
   orders: boolean; decisions: boolean; decisionEmails: boolean; load: boolean;
   quietFrom: string | null; quietTo: string | null; devices: number;
 }
 export interface Device { id: string; device: string | null; created_at: string; last_ok_at: string | null; last_error: string | null; endpoint: string }
+
+/** Can a login with this role have this kind? Load alerts also go to logins that can drive (18 Nov 2026). */
+export const kindFits = (k: { key: string; roles: string[] }, role: string, canDrive?: boolean) =>
+  k.roles.includes(role) || (k.key === 'load' && !!canDrive);
 
 /** The kinds of notification, and which roles can have each. */
 export const KINDS: Array<{ key: 'orders' | 'decisions' | 'decisionEmails' | 'load'; label: string; hint: string; roles: string[] }> = [
@@ -72,7 +78,7 @@ export default function NotificationsCard({ session }: { session: Session }) {
     setBusy(true); setError(null); setMsg(null);
     try { await fn(); } catch (e) { setError(e instanceof Error ? e.message : 'That did not work'); } finally { setBusy(false); }
   }
-  const kinds = KINDS.filter((k) => k.roles.includes(session.role));
+  const kinds = KINDS.filter((k) => kindFits(k, session.role, drives(session)));
 
   return (
     <div className="panel" style={{ maxWidth: 620 }}>

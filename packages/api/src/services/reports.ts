@@ -529,6 +529,7 @@ export async function roundsReport(db: Db, from?: string | null, to?: string | n
     invoiced_cents: number; recorded_cents: number; actual_cash_cents: number | null;
     cash_variance_cents: number | null; empties_recorded: number; bottle_actual_returned: number | null;
     bottle_variance: number | null; full_out: number; settlement_notes: string | null; bottle_settle_notes: string | null;
+    same_person: string | null;
   }>(
     `SELECT d.id, d.delivery_date::text AS delivery_date, d.zone, d.status,
             COALESCE(u.name, d.driver_name) AS driver, (d.started_at IS NOT NULL) AS started,
@@ -543,7 +544,18 @@ export async function roundsReport(db: Db, from?: string | null, to?: string | n
               + (SELECT COALESCE(SUM(rc.empties_count), 0) FROM round_collections rc
                  WHERE rc.delivery_sheet_id = d.id AND rc.kind = 'Empties' AND rc.status = 'Collected'))::int AS empties_recorded,
             COALESCE(SUM(s.bottles_delivered_full), 0)::int AS full_out,
-            d.bottle_actual_returned, d.bottle_variance, d.settlement_notes, d.bottle_settle_notes
+            d.bottle_actual_returned, d.bottle_variance, d.settlement_notes, d.bottle_settle_notes,
+            -- Loaded and confirmed by the same person (18 Nov 2026): the load,
+            -- or an addition, confirmed by whoever logged or loaded it.
+            COALESCE(
+              (SELECT rl.driver_confirmed_name FROM round_loads rl
+               WHERE rl.delivery_sheet_id = d.id AND rl.driver_confirmed_by IS NOT NULL
+                 AND (rl.driver_confirmed_by = rl.loaded_by OR rl.driver_confirmed_by = ANY(rl.loader_ids))),
+              (SELECT a.driver_confirmed_name FROM round_load_additions a
+               WHERE a.delivery_sheet_id = d.id AND a.cancelled_at IS NULL AND a.driver_confirmed_by IS NOT NULL
+                 AND (a.driver_confirmed_by = a.added_by OR a.driver_confirmed_by = ANY(a.loader_ids))
+               ORDER BY a.added_at LIMIT 1)
+            ) AS same_person
      FROM delivery_sheets d
      LEFT JOIN users u ON u.id = d.assigned_driver_id
      LEFT JOIN delivery_stops s ON s.delivery_sheet_id = d.id
@@ -566,6 +578,8 @@ export async function roundsReport(db: Db, from?: string | null, to?: string | n
     bottleVariance: r.bottle_variance === null ? null : num(r.bottle_variance),
     // What the office wrote at settlement (27 Oct 2026: notes were hard to find).
     notes: [r.settlement_notes, r.bottle_settle_notes].filter((x) => x && String(x).trim()).join('\n') || null,
+    /** Loaded and confirmed by the same person (18 Nov 2026): their name, else null. */
+    samePerson: r.same_person ?? null,
   }));
 
   const settled = rounds.filter((r) => r.status === 'Completed');

@@ -110,12 +110,14 @@ export function registerTruckRoutes(
   // The office logs the loading; the driver confirms it and starts.
   app.post('/api/delivery-sheets/:id/load', office, async (req) =>
     trucks.loadRound(db, actor(req), id(req as Req), req.body as never));
-  app.post('/api/delivery-sheets/:id/confirm-load', only('driver'), async (req) =>
+  // Driver logins, and office/admin logins that can also drive (18 Nov 2026):
+  // trucks.confirmLoad checks which.
+  app.post('/api/delivery-sheets/:id/confirm-load', crew, async (req) =>
     trucks.confirmLoad(db, actor(req), id(req as Req)));
   // Last-minute additions after the driver confirmed: office adds, driver reconfirms.
   app.post('/api/delivery-sheets/:id/load-additions', office, async (req) =>
     trucks.addToLoad(db, actor(req), id(req as Req), req.body as never));
-  app.post('/api/load-additions/:id/confirm', only('driver'), async (req) => {
+  app.post('/api/load-additions/:id/confirm', crew, async (req) => {
     await trucks.confirmAddition(db, actor(req), id(req as Req));
     return { ok: true };
   });

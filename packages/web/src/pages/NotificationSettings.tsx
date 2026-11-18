@@ -1,7 +1,7 @@
 import { Fragment, useEffect, useState } from 'react';
 import { api, type Session } from '../lib/api';
 import { ask } from '../components/Dialog';
-import { KINDS, devicesList, type AlertSettings, type Device } from '../components/NotificationsCard';
+import { KINDS, kindFits, devicesList, type AlertSettings, type Device } from '../components/NotificationsCard';
 
 /**
  * Settings › Notifications (Everton, 15 Oct 2026): an administrator sets who
@@ -67,7 +67,7 @@ export default function NotificationSettings({ session }: { session: Session }) 
                   <td className="lead" data-label="Who">
                     <span><strong>{r.name}</strong><div className="muted small">{ROLE_WORDS[r.role] ?? r.role}{r.email ? ` · ${r.email}` : ''}</div></span>
                   </td>
-                  {KINDS.map((k) => (k.roles.includes(r.role) ? (
+                  {KINDS.map((k) => (kindFits(k, r.role, r.canDrive) ? (
                     <td key={k.key} data-label={k.label}>
                       <button type="button" role="switch" aria-checked={r[k.key]} aria-label={`${k.label} for ${r.name}`}
                               className={`switch${r[k.key] ? ' on' : ''}`} disabled={busy || (k.key === 'decisionEmails' && !r.email)}

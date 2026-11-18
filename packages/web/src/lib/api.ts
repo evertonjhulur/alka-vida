@@ -7,7 +7,13 @@ export interface Session {
   name: string;
   role: Role;
   customerId: string | null;
+  /** Office/admin login ticked "Can also drive" (18 Nov 2026): gets My route. */
+  canDrive?: boolean;
 }
+
+/** Can this login do the driver's part of a round? */
+export const drives = (s: Session | null | undefined) =>
+  !!s && (s.role === 'driver' || (!!s.canDrive && (s.role === 'admin' || s.role === 'user')));
 
 /*
  * Signing in (tester's findings, 10 Oct 2026, point 18): the server sets an

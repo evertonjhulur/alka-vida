@@ -112,11 +112,22 @@ function secret(): string {
 export async function userAccess(
   db: Db, userId: string,
 ): Promise<'ok' | 'gone' | 'disabled'> {
-  const row = await db.maybeOne<{ active: boolean }>(
-    `SELECT active FROM users WHERE id = $1`, [userId],
+  return (await userAccessDetail(db, userId)).access;
+}
+
+/**
+ * userAccess plus "Can also drive" (18 Nov 2026), read in the same query on
+ * every request so ticking it on the Users screen takes effect at once,
+ * without the person signing in again.
+ */
+export async function userAccessDetail(
+  db: Db, userId: string,
+): Promise<{ access: 'ok' | 'gone' | 'disabled'; canDrive: boolean }> {
+  const row = await db.maybeOne<{ active: boolean; can_drive: boolean }>(
+    `SELECT active, can_drive FROM users WHERE id = $1`, [userId],
   );
-  if (row == null) return 'gone';
-  return row.active ? 'ok' : 'disabled';
+  if (row == null) return { access: 'gone', canDrive: false };
+  return { access: row.active ? 'ok' : 'disabled', canDrive: !!row.can_drive };
 }
 
 const b64url = (b: Buffer) => b.toString('base64url');
@@ -169,9 +180,9 @@ export async function login(
   const address = (email ?? '').trim();
 
   const user = await db.maybeOne<{
-    id: string; name: string; role: Role; password_hash: string; active: boolean;
+    id: string; name: string; role: Role; password_hash: string; active: boolean; can_drive: boolean;
   }>(
-    `SELECT id, name, role, password_hash, active FROM users WHERE lower(email) = lower($1)`,
+    `SELECT id, name, role, password_hash, active, can_drive FROM users WHERE lower(email) = lower($1)`,
     [address],
   );
   if (!user || !user.active) return null;
@@ -188,6 +199,7 @@ export async function login(
   const session = {
     id: user.id, name: user.name, role: user.role,
     customerId: customer?.id ?? null,
+    canDrive: !!user.can_drive,
   };
   return { token: signToken(session), session };
 }

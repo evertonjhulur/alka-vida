@@ -202,7 +202,11 @@ export async function runAlerts(db: Db): Promise<AlertRun> {
        AND NOT EXISTS (SELECT 1 FROM staff_alerts_sent x WHERE x.kind = 'load' AND x.ref_id = a.id)
      LIMIT 50`, [since],
   );
-  const wantsLoad = new Set((await usersInRoles(db, ['driver'])).filter((u) => u.notify_load).map((u) => u.id));
+  // Drivers, and office/admin logins that can also drive (18 Nov 2026).
+  const wantsLoad = new Set((await db.query<{ id: string }>(
+    `SELECT id FROM users WHERE active AND notify_load
+       AND (role = 'driver' OR (can_drive AND role IN ('admin','user')))`,
+  )).map((u) => u.id));
   for (const a of added) {
     if (!(await claim(db, 'load', a.id))) continue;
     if (!wantsLoad.has(a.driver)) continue;

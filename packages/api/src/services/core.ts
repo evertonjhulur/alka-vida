@@ -8,6 +8,28 @@ export interface Actor {
   id: string;
   name: string;
   role: Role;
+  /**
+   * An office or administrator login that can also drive (18 Nov 2026).
+   * Read from the database on every request, so ticking or unticking it
+   * takes effect without signing in again.
+   */
+  canDrive?: boolean;
+}
+
+/** Can this person do the driver's part of a round? Driver logins, plus office/admin logins ticked "Can also drive". */
+export function canDrive(actor: Actor): boolean {
+  return actor.role === 'driver'
+    || (!!actor.canDrive && (actor.role === 'admin' || actor.role === 'user'));
+}
+
+/** Throw unless the actor can do the driver's part of a round. */
+export function requireDriver(actor: Actor): void {
+  if (!canDrive(actor)) {
+    throw new ForbiddenError(
+      `only the driver can do this; ${actor.name} is not a driver. `
+      + 'An administrator can tick "Can also drive" on their login under Settings › Users.',
+    );
+  }
 }
 
 export type AuditAction =

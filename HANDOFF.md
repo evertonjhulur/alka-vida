@@ -3030,3 +3030,41 @@ address typed", or "Not looked up yet" - filter pills, a link to each
 customer, and Export to Excel. GET /api/settings/approximate-pins/missing
 (admin) -> approxpins.missingPins. These are the stops that still go last
 when a round is sorted. Test: approxpins.test.ts. API 655.
+
+## Office staff and administrators who also drive (18 Nov 2026)
+His question: can office staff also be a driver? A login has one role, and an
+email can only have one login, so before this they needed a second (driver)
+login. His rulings: allow one person to both log the load and confirm it as
+the driver (the 10 Oct dual-accountability check), but flag the round; offer
+the tick on administrator logins as well as office staff.
+
+- users.can_drive (migration 042). Settings › Users: "Can also drive" tick
+  on office/admin logins (add and edit), an "also drives" chip in the list.
+  users.createUser/updateUser take canDrive; refused on driver and customer
+  logins; unticking is refused while they are the driver on an open round.
+- The server reads can_drive on every request (lib/auth.userAccessDetail, in
+  the same query as active), so the tick works without signing in again;
+  Actor.canDrive; core.canDrive(actor) / requireDriver(actor). The web asks
+  /api/auth/me once per sign-in to pick up a change (App.tsx) and
+  lib/api.drives(session).
+- What a ticked login gets: listed in the round's driver drop-down as
+  "Name (office)" (routing.listDrivers returns `office`); assignDriver
+  accepts them; My route in the office menu under Deliveries; confirm-load
+  and load-additions/:id/confirm are open to admin/user at the route and
+  checked in the service (requireDriver). confirmLoad claims the round with
+  assignDriver(..., { asDriver: true }) so an office login confirming never
+  takes over a round assigned to another driver. "Changes to my load" push
+  alerts (push.ALERT_KINDS load, alerts.ts, NotificationsCard.kindFits).
+  Their office rights are unchanged; the office "start without a loading"
+  path is unchanged.
+- The flag: trucks.sameAsLoader(confirmedBy, loggedBy, loaderIds) - the
+  person who confirmed as driver also logged it (loaded_by / added_by) or was
+  named as its loader. getLoad/truckPosition -> samePerson (name or null,
+  load or any confirmed addition); each addition -> samePerson; loadingsReport
+  and reports.roundsReport -> samePerson (SQL). Shown by
+  components/Truck.SamePersonFlag on the round page (step 2 chip + The
+  truck panel), the settlement's truck panel, the End of day and Rounds
+  report tables (and their Excel exports), the loadings report, and a note
+  in the End of day PDF. The audit entry carries samePerson: true and reads
+  "... Flag: loaded and confirmed by the same person." Nothing is blocked.
+- Tests: candrive.test.ts (12). API 667, shared 80, web 16.
