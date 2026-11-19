@@ -3163,3 +3163,35 @@ anything after settlement comes to an admin for approval.
   credit note; admin after settlement; loaded round leaves stock; fulls
   follow 5-gallon; refusals). API 677, shared 80, web 16. Walked as office
   staff on the settlement page of a local copy.
+
+## Delivered emails go at settlement (19 Nov 2026)
+
+Everton: confirmations and invoices should go when the round is settled, not
+when the driver marks the stop delivered. Seen on Broadbent Constant Spring,
+19 Nov: the email went at 11:23 with the invoice saying "To pay $200" (a
+$400 credit had just been applied) though the driver took $600 - a driver's
+cash only reaches the invoice at settlement.
+
+- server.ts POST /api/stops/:id/outcome no longer calls sendDeliveredEmail.
+  The "moved to another day" email still goes at once.
+- POST /api/delivery-sheets/:id/settle, after settleRoute succeeds, calls
+  new `messaging.sendRoundDeliveredEmails(db, sheetId)` (fire and forget):
+  every Delivered stop with an order on that round, one at a time, through
+  sendDeliveredEmail - so the same switch (Settings › Automatic emails,
+  order_delivered_emails), the customer's own "orders" tick, part-delivered
+  wording and the once-per-stop key (`${order}@${stopId}`) all still apply.
+  Stops emailed under the old timing are not emailed again.
+- Order-placed emails unchanged (at order time).
+- AutoEmails.tsx wording: "... sent once the round is settled, so the
+  invoice shows the money collected".
+- Test: deliveredemail.test.ts (server-level: recording sends nothing,
+  settling sends one showing "Paid, thank you", a second run sends none).
+  API 678, shared 80, web 16.
+
+Broadbent clean-up (to confirm with him, nothing done yet): the
+"Payment after delivery of SO-001222" $600 payment-only stop on the 19 Nov
+West St. Andrew round duplicates the $600 the driver recorded at the stop -
+take it off before settling. Optional tidy: RCT-001191 ($400, 13 Nov) was
+reversed and RCT-001231 ($400 "cash", dated 22 Oct) entered to replace the
+deleted QuickBooks opening credit; moving RCT-001191 to INV-016514 instead
+would keep cash-by-day right.

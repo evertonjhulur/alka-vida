@@ -224,6 +224,29 @@ export async function emailOrderConfirmation(
   return { sentTo: r.sentTo!, orderNumber: o.order_number };
 }
 
+/**
+ * Every delivered stop on a round that has just been settled gets its
+ * "delivered" (or "part delivered") email with the invoice (Everton,
+ * 19 Nov 2026). Sent at settlement, not when the driver records the stop, so
+ * the invoice carries the money collected and shows "Paid, thank you" or what
+ * is really left. One at a time; each is sent once (a stop already emailed
+ * under the old timing is not emailed again).
+ */
+export async function sendRoundDeliveredEmails(db: Db, sheetId: string): Promise<{ sent: number; skipped: number }> {
+  const stops = await db.query<{ id: string }>(
+    `SELECT st.id FROM delivery_stops st
+     WHERE st.delivery_sheet_id = $1 AND st.stop_outcome = 'Delivered' AND st.order_id IS NOT NULL
+     ORDER BY st.sequence_no, st.id`, [sheetId]);
+  let sent = 0; let skipped = 0;
+  for (const s of stops) {
+    try {
+      const r = await sendDeliveredEmail(db, s.id);
+      if (r.sent) sent += 1; else skipped += 1;
+    } catch { skipped += 1; }
+  }
+  return { sent, skipped };
+}
+
 /** "Your water was delivered", with the invoice attached when there is one. */
 export async function sendDeliveredEmail(db: Db, stopId: string): Promise<{ sent: boolean; reason?: string }> {
   if (!mailConfigured()) return { sent: false, reason: 'email is not set up' };

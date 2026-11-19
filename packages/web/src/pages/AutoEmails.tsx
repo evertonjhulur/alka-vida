@@ -72,7 +72,7 @@ function OrderingSettings({ isAdmin }: { isAdmin: boolean }) {
         <label className="check"><input type="checkbox" checked={o.orderPlacedEmails} onChange={(e) => set('orderPlacedEmails', e.target.checked)} />
           When an order is placed (portal or office)</label>
         <label className="check"><input type="checkbox" checked={o.orderDeliveredEmails} onChange={(e) => set('orderDeliveredEmails', e.target.checked)} />
-          When it is delivered, with the invoice attached</label>
+          When it is delivered, with the invoice attached: sent once the round is settled, so the invoice shows the money collected</label>
         <label className="check"><input type="checkbox" checked={o.signupConfirmEmails} onChange={(e) => set('signupConfirmEmails', e.target.checked)} />
           When somebody opens an account with an email and password: a link to confirm their address</label>
         <div className="muted small">A customer can turn these off for themselves in their portal profile, or the office on their Details tab.</div>

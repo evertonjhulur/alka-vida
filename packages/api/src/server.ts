@@ -1213,7 +1213,9 @@ export async function buildServer(db: Db) {
         ...(req.body as delivery.MarkStopInput),
         stopId: (req.params as { id: string }).id,
       });
-      if (r.outcome === 'Delivered') void messaging.sendDeliveredEmail(db, r.stopId).catch(() => {});
+      // The "your order was delivered" email (with the invoice) now goes when
+      // the round is settled, not here (Everton, 19 Nov 2026): by then the
+      // driver's cash is on the invoice, so "To pay" is right.
       // The new date and why (7 Oct 2026, point 8).
       if (r.outcome === 'Rescheduled' && r.rescheduledTo) {
         void messaging.sendRescheduledEmail(db, r.stopId).catch(() => {});
@@ -1275,8 +1277,13 @@ export async function buildServer(db: Db) {
     });
 
   app.post('/api/delivery-sheets/:id/settle', { preHandler: allow('admin', 'user') },
-    async (req) => settlement.settleRoute(db, actorOf(req),
-      (req.params as { id: string }).id, req.body as never));
+    async (req) => {
+      const sheetId = (req.params as { id: string }).id;
+      const r = await settlement.settleRoute(db, actorOf(req), sheetId, req.body as never);
+      // Each delivered stop's confirmation and invoice, now that the money is in (19 Nov 2026).
+      void messaging.sendRoundDeliveredEmails(db, sheetId).catch(() => {});
+      return r;
+    });
 
   /* ---------------- invoices ---------------- */
 
