@@ -62,7 +62,8 @@ describe('One round per order', () => {
       requestedDeliveryDate: day, lines: [{ productId: f.fiveGalProductId, looseBottles: 1 }] });
     const sheet = (await stopsOf(other.id))[0].sheet;
     const w = await waitingForDecision(day);
-    await addOrderToSheet(f.db, f.office, sheet, w.order.id);
+    // The first test left the same items on a round two days away: confirmed past that warning.
+    await addOrderToSheet(f.db, f.office, sheet, w.order.id, { confirmed: true });
     // As on live data from before this fix: the request still pending.
     await f.db.query(`UPDATE approval_requests SET status = 'Pending' WHERE id = $1`, [w.requestId]);
     const stop = await f.db.one<{ id: string }>(`SELECT id FROM delivery_stops WHERE order_id = $1`, [w.order.id]);

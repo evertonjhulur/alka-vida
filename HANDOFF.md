@@ -3068,3 +3068,98 @@ the tick on administrator logins as well as office staff.
   in the End of day PDF. The audit entry carries samePerson: true and reads
   "... Flag: loaded and confirmed by the same person." Nothing is blocked.
 - Tests: candrive.test.ts (12). API 667, shared 80, web 16.
+
+## Warnings before adding an order to a round by hand (19 Nov 2026)
+
+Everton: 360 Degrees ordered 4 x 5-gallon + 2 cs 280 ml for Tue 17 Nov
+(SO-001269, made a weekly standing order). Tuesday's stop was recorded
+Delivered in full though the 2 cases did not go; on Wed 18 Nov next
+Tuesday's standing-order run SO-001270 (for 24 Nov) was put on Wednesday's
+round by hand to carry them, and recorded delivered in full - invoiced twice
+(INV-016705, voided by him 19 Nov), 4 fulls / 2 empties counted twice, and
+24 Nov left with no order. Audit in project doc
+claude/360-degrees-double-delivery-nov-2026.md. Sweep of all orders: no
+other account customer with the same items delivered twice within 3 days.
+
+- `delivery.addOrderWarnings(t, sheetId, orderId)` -> string[]:
+  - the order is booked for a LATER day than the round: strong wording when
+    it is a standing order's run (`parent_recurring_id`) - that week is left
+    with no order; lighter wording otherwise (customer wants it early);
+  - the same customer has the same items (same product + total bottles on
+    every line) on a round within 2 days either side, Delivered or still to
+    go. Walk-in customers are not compared.
+- `delivery.addOrderToSheet(..., { confirmed })`: with warnings and no
+  `confirmed: true` it refuses (RuleViolation). Returns `warnings`; the audit
+  entry carries `warningsOverridden` and reads "... added to the ... round by
+  hand, after a warning: ...".
+- API: `GET /api/delivery-sheets/:id/add-order-check?orderId=` -> { warnings };
+  `POST .../add-order` takes `confirmed`.
+- Round page (RouteDetail): "Add to round" asks the check first; warnings
+  show in a yellow box with "Add it anyway" (green outline) and "Don't add
+  it". Walked in a browser on a local copy.
+- Tests: new addwarnings.test.ts (4, incl. the 360 Degrees case);
+  rounds.test.ts confirms past the new warning where its fixture reuses the
+  same items. API 665, shared 80, web 16.
+- Live data fixed 19 Nov (through the app's screens): SO-001270's Wed stop
+  corrected to 0 fulls out / 0 empties back (their bottles now 4 out, 2 back,
+  2 held; empties stock -2); SO-001328 entered for Tue 24 Nov (4 empties
+  expected). Not changed: finished goods - 2 cs 280 ml were taken twice
+  (Tue shelf + Wed truck); 5-gallon depends on what physically went on
+  Wednesday's truck - next stock count puts both right. 360 Degrees has no
+  delivery zone, so its orders never auto-route.
+
+## Part delivered, put right in the office; who applies stop corrections (19 Nov 2026)
+
+Everton: the office must be able to correct a driver's stop errors at
+settlement - above all Delivered pressed for a whole order when part stayed
+behind (360 Degrees, 17 Nov). Rulings: existing rules generally apply;
+office staff correct the driver's stop errors at settlement themselves;
+anything after settlement comes to an admin for approval.
+
+- Who applies a stop correction now (`settlement.requestStopCorrection`):
+  admin - at once, always; office - at once while the round is not settled,
+  EXCEPT a change to the cash the driver recorded (amount or method), which
+  still goes to Needs a decision (the collusion guard pinned by api.test.ts);
+  office after settlement - to Needs a decision. Cash on a settled stop is
+  still refused (Payments received). The "is part of settling it" reading of
+  his ruling for cash is to confirm with him.
+- New: correcting WHAT WAS HANDED OVER (`changes.deliveredLines` + new
+  `changes.restOn`), allowed before and after settlement
+  (`settlement.correctHandedOver`, inside applyStopCorrection):
+  - only on a Delivered stop with an order; each line between 0 and what the
+    order has left for this stop (ordered less other Delivered stops);
+    nothing left at all is refused (Undo is for that);
+  - stop lines rewritten; order delivered figures recounted
+    (recomputeDelivered) and status refreshed;
+  - invoice the stop raised rebuilt from the stop's lines at the order's
+    prices via new `invoices.editInvoiceIn(t, ...)` (editInvoice is now a
+    wrapper: admin check + tx); paid above the new total -> the automatic
+    credit note, as with any edit. A weekly/monthly customer with a cycle
+    invoice already raised for the order is refused (edit that invoice);
+  - stock: no round_loads row -> the difference goes back on (or off) the
+    shelf, ledger 'Adjustment' dated the round's day; loaded round -> left
+    alone (counted back with the truck's returns);
+  - full 5-gallons out move with the returnable lines unless the correction
+    gives bottlesDeliveredFull;
+  - left on the order -> `delivery.sendRemainder(..., { allowNoRound: true })`
+    (now exported): "Rest of order" on that day's round; a customer with no
+    zone has it waiting for that day. `restOn` is required when something is
+    left.
+  - Office requests after settlement carry `quantitiesSummary`
+    ("handed over Alka Vida 280 ml: 2 cs → 0 cs") for Needs a decision /
+    Approvals; deliveredLines are not shown raw.
+  - Audit: 'adjust' DeliveryStop with `handedOver` {orderStatus, restOn,
+    invoiceNumber, creditNoteId, stockBack, fullsChange}; reads "... corrected
+    [after settlement] by X. What was handed over changed; invoice N rebuilt;
+    the rest goes out D." (the old wording said "after settlement" always).
+- Screens: new components/HandedOverFix.tsx ("What was handed over": per
+  line Handed over / Of, "The rest goes out on", Why). On the stop page
+  inside Correct this delivery (Delivered stops), above "Bottles, cash and
+  the note"; on the settlement page as "Part delivered? Correct what was
+  handed over" in each delivered stop's panel. Button wording follows who
+  applies it (Save / Send for approval).
+- Tests: new partcorrection.test.ts (6: the 360 Degrees case end to end incl.
+  the rest delivered and billed once in all; after settlement -> approval ->
+  credit note; admin after settlement; loaded round leaves stock; fulls
+  follow 5-gallon; refusals). API 677, shared 80, web 16. Walked as office
+  staff on the settlement page of a local copy.

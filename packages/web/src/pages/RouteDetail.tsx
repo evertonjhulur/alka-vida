@@ -80,6 +80,8 @@ export default function RouteDetail({ session }: { session: Session }) {
   const [drivers, setDrivers] = useState<Driver[]>([]);
   const [candidates, setCandidates] = useState<Candidate[]>([]);
   const [pick, setPick] = useState('');
+  /** Warnings about the picked order (19 Nov 2026), shown before it is added. */
+  const [pickWarnings, setPickWarnings] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -135,10 +137,31 @@ export default function RouteDetail({ session }: { session: Session }) {
     return 'Route started.';
   });
 
-  const addOrder = () => act(async () => {
-    await api.post(`/api/delivery-sheets/${sheetId}/add-order`, { orderId: pick });
+  /**
+   * Adding an order by hand (19 Nov 2026). First ask what to warn about - an
+   * order booked for a later day (above all a standing order's next run), or
+   * the same items already going to the same customer - and show it here.
+   * Only "Add it anyway" then adds it.
+   */
+  async function addOrder() {
+    setBusy(true); setError(null); setMsg(null);
+    try {
+      const r = await api.get<{ warnings: string[] }>(
+        `/api/delivery-sheets/${sheetId}/add-order-check?orderId=${encodeURIComponent(pick)}`);
+      setBusy(false);
+      if (r.warnings.length) { setPickWarnings(r.warnings); return; }
+    } catch (e) {
+      setBusy(false);
+      setError(e instanceof Error ? e.message : 'That did not work');
+      return;
+    }
+    await reallyAdd(false);
+  }
+  const reallyAdd = (confirmed: boolean) => act(async () => {
+    await api.post(`/api/delivery-sheets/${sheetId}/add-order`, { orderId: pick, confirmed });
     const added = candidates.find((c) => c.id === pick);
     setPick('');
+    setPickWarnings([]);
     return `${added?.order_number ?? 'Order'} added to this route.`;
   });
 
@@ -416,7 +439,7 @@ export default function RouteDetail({ session }: { session: Session }) {
               <label htmlFor="cand">Add an order waiting for delivery</label>
               <div className="row" style={{ alignItems: 'center' }}>
                 <select id="cand" value={pick} style={{ flex: '1 1 320px' }}
-                        onChange={(e) => setPick(e.target.value)}>
+                        onChange={(e) => { setPick(e.target.value); setPickWarnings([]); }}>
                   <option value="">{candidates.length ? 'Choose an order…' : 'Every waiting order is already on a round'}</option>
                   {candidates.map((c) => (
                     <option key={c.id} value={c.id}>
@@ -427,8 +450,21 @@ export default function RouteDetail({ session }: { session: Session }) {
                     </option>
                   ))}
                 </select>
-                <button type="button" disabled={busy || !pick} onClick={addOrder}>Add to round</button>
+                <button type="button" disabled={busy || !pick || pickWarnings.length > 0} onClick={addOrder}>Add to round</button>
               </div>
+              {pickWarnings.length > 0 && (
+                <div className="notice warn" role="alert" style={{ marginTop: 8 }}>
+                  <strong>Check before adding {candidates.find((c) => c.id === pick)?.order_number ?? 'this order'}:</strong>
+                  <ul style={{ margin: '6px 0 8px', paddingLeft: 20 }}>
+                    {pickWarnings.map((w) => <li key={w}>{w}</li>)}
+                  </ul>
+                  <div className="row" style={{ gap: 8 }}>
+                    <button type="button" className="approve-soft" disabled={busy} onClick={() => reallyAdd(true)}>Add it anyway</button>
+                    <button type="button" className="secondary" disabled={busy}
+                            onClick={() => { setPickWarnings([]); setPick(''); }}>Don't add it</button>
+                  </div>
+                </div>
+              )}
               <p className="muted small" style={{ margin: '6px 0 0' }}>
                 Any order not already on an open round, whatever its zone or date: yesterday's missed drop belongs here too.
               </p>

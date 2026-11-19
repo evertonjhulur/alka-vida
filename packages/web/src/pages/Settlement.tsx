@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { api, type Session } from '../lib/api';
 import { money, toCents, date, when } from '../lib/format';
+import HandedOverFix from '../components/HandedOverFix';
 import { ReturnsPanel, SamePersonFlag, TruckTable, KIND_WORDS, collectionSummary, type Collection, type Truck } from '../components/Truck';
 
 interface Allocation {
@@ -91,6 +92,8 @@ export default function Settlement({ session }: { session: Session }) {
   });
   const [error, setError] = useState<string | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
+  /** The stop whose "What was handed over" correction is open (19 Nov 2026). */
+  const [handedFor, setHandedFor] = useState<string | null>(null);
   const [done, setDone] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   /** The truck and the collection stops (10 Oct 2026, points 3 and 4). */
@@ -381,11 +384,25 @@ export default function Settlement({ session }: { session: Session }) {
    */
   const correctionPanel = (s: StopRow, bottlesOnly = false) => (
     <>
+      {s.outcome === 'Delivered' && s.orderRef && (
+        <div style={{ marginTop: 16 }}>
+          {handedFor === s.stopId ? (
+            <HandedOverFix stopId={s.stopId} onCancel={() => setHandedFor(null)}
+                           onDone={async (m) => { setHandedFor(null); setMsg(`${s.customerName}: ${m}`); await load(); }} />
+          ) : (
+            <button type="button" className="secondary" onClick={() => setHandedFor(s.stopId)}>
+              Part delivered? Correct what was handed over
+            </button>
+          )}
+        </div>
+      )}
       <h3 style={{ marginTop: 20, marginBottom: 4 }}>{bottlesOnly ? 'Correct the bottles' : 'Confirm or correct what was recorded'}</h3>
       <p className="muted small" style={{ marginTop: 0 }}>
         {isAdmin
           ? 'As an administrator your correction applies immediately.'
-          : 'Your correction is sent to an administrator to approve — nothing changes until they do.'}
+          : bottlesOnly
+            ? 'The round is settled, so your correction is sent to an administrator to approve — nothing changes until they do.'
+            : 'Bottles apply at once. A change to the cash collected is sent to an administrator to approve.'}
         {bottlesOnly && ' The cash on a settled stop is corrected on Payments received (reverse or edit the payment). A change to the empties moves the empties in stock by the difference.'}
       </p>
       <div className="row" style={{ alignItems: 'flex-end' }}>
@@ -424,7 +441,7 @@ export default function Settlement({ session }: { session: Session }) {
       </div>
       <button type="button" disabled={busy || !fix.reason.trim()}
               onClick={() => submitCorrection(s, bottlesOnly)}>
-        {isAdmin ? 'Apply correction' : 'Send correction for approval'}
+        {isAdmin || (!bottlesOnly && toCents(fix.collected) === s.collectedCents) ? 'Apply correction' : 'Send correction for approval'}
       </button>
     </>
   );

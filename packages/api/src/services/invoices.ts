@@ -247,8 +247,21 @@ export async function editInvoice(
   },
 ): Promise<{ invoice: InvoiceLedgerRow; creditNoteId: string | null }> {
   requireRole(actor, 'admin');
+  return db.tx((t) => editInvoiceIn(t, actor, invoiceId, changes));
+}
 
-  return db.tx(async (t) => {
+/**
+ * The edit itself, inside a transaction the caller already holds. Used by
+ * editInvoice (an admin's own edit) and by a stop correction that changes
+ * what was handed over (19 Nov 2026), whose own rules decide who may make it.
+ */
+export async function editInvoiceIn(
+  t: Queryable,
+  actor: Actor,
+  invoiceId: string,
+  changes: Parameters<typeof editInvoice>[3],
+): Promise<{ invoice: InvoiceLedgerRow; creditNoteId: string | null }> {
+  {
     const before = await getInvoiceLedger(t, invoiceId);
     if (!before) throw new RuleViolation(`invoice ${invoiceId} not found`);
     if (before.isCreditNote) throw new RuleViolation('a credit note cannot be edited');
@@ -428,7 +441,7 @@ export async function editInvoice(
     });
 
     return { invoice: after!, creditNoteId };
-  });
+  }
 }
 
 /**

@@ -1230,9 +1230,17 @@ export async function buildServer(db: Db) {
       return { ok: true };
     });
 
+  // What to warn about before adding it (19 Nov 2026): a later day, or the same goods twice.
+  app.get('/api/delivery-sheets/:id/add-order-check', { preHandler: allow('admin', 'user') },
+    async (req) => ({ warnings: await delivery.addOrderWarnings(db,
+      (req.params as { id: string }).id, String((req.query as { orderId?: string }).orderId ?? '')) }));
+
   app.post('/api/delivery-sheets/:id/add-order', { preHandler: allow('admin', 'user') },
-    async (req) => delivery.addOrderToSheet(db, actorOf(req),
-      (req.params as { id: string }).id, (req.body as { orderId: string }).orderId));
+    async (req) => {
+      const body = req.body as { orderId: string; confirmed?: boolean };
+      return delivery.addOrderToSheet(db, actorOf(req), (req.params as { id: string }).id, body.orderId,
+        { confirmed: body.confirmed === true });
+    });
 
   app.post('/api/delivery-sheets/:id/resequence', { preHandler: allow('admin', 'user') },
     async (req) => {
@@ -1256,11 +1264,12 @@ export async function buildServer(db: Db) {
       return { ok: true };
     });
 
-  // Correcting the RECORDED DATA is Admin-only, to prevent collusion.
+  // Correcting the RECORDED DATA: an admin applies it; office staff apply it
+  // while the round is being settled, except a change to the cash the driver
+  // recorded; after settlement theirs waits for an admin (19 Nov 2026).
   app.post('/api/stops/:id/correct', { preHandler: allow('admin', 'user') },
     async (req) => {
       const body = req.body as { changes: Record<string, unknown>; reason: string };
-      // An admin correction applies at once; an office one waits for approval.
       return settlement.requestStopCorrection(db, actorOf(req),
         (req.params as { id: string }).id, body.changes as never, body.reason);
     });

@@ -76,13 +76,18 @@ const FIELD_LABEL: Record<string, string> = {
   bottlesEmptiesPickedUp: 'Empties collected',
   bottlesLostDamaged: 'Lost or damaged',
   paymentMethod: 'Method',
+  restOn: 'Rest goes out on',
+  notes: 'Note',
 };
 const PAYMENT_TERMS = ['Cash on delivery', 'Net 15', 'Net 30', 'Net 60', 'Net 90'];
 
 function describe(payload: Record<string, number | string> | null): string {
   if (!payload) return 'no changes recorded';
+  // What was handed over (19 Nov 2026) arrives as lines; the server words them in quantitiesSummary.
   return Object.entries(payload)
-    .map(([k, v]) => `${FIELD_LABEL[k] ?? k}: ${k === 'paymentAmountCents' ? money(Number(v)) : String(v)}`)
+    .filter(([k]) => k !== 'deliveredLines')
+    .map(([k, v]) => (k === 'quantitiesSummary' ? String(v)
+      : `${FIELD_LABEL[k] ?? k}: ${k === 'paymentAmountCents' ? money(Number(v)) : String(v)}`))
     .join(' · ');
 }
 

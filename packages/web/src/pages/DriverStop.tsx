@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import StopLocation from '../components/StopLocation';
+import HandedOverFix from '../components/HandedOverFix';
 import { api, getSession } from '../lib/api';
 import { payMethods, useTakeCard } from '../lib/payments';
 import { money, toCents } from '../lib/format';
@@ -672,12 +673,25 @@ export default function DriverStop() {
           </button>
           {fixOpen && (() => {
             const moneyOpen = roundOpen;
+            // Office staff put the driver's errors right at settlement straight away;
+            // after settlement, or a change to the cash, it waits for an administrator (19 Nov 2026).
+            const cashChanged = moneyOpen && (toCents(fix.how ? (fix.cash || '0') : '0') !== Number(stop.payment_amount_cents ?? 0)
+              || (fix.how || null) !== (stop.payment_method || null));
+            const appliesNow = isAdmin || (moneyOpen && !cashChanged);
             return (
               <div style={{ marginTop: 10 }}>
+                {stop.stop_outcome === 'Delivered' && (
+                  <HandedOverFix stopId={stop.id} onDone={async (m) => {
+                    setSaved(m); setFixOpen(false); window.scrollTo({ top: 0, behavior: 'smooth' }); await load();
+                  }} />
+                )}
+                <h3 style={{ margin: '18px 0 4px' }}>Bottles, cash and the note</h3>
                 <p className="muted small" style={{ marginTop: 0 }}>
-                  {isAdmin ? 'Your correction applies at once.' : 'Your correction goes to an administrator to approve.'}
+                  {appliesNow ? 'Your correction applies at once.'
+                    : moneyOpen ? 'A change to the cash goes to an administrator to approve.'
+                    : 'The round is settled, so your correction goes to an administrator to approve.'}
                   {' '}A change to the empties moves the empties in stock by the difference.
-                  {!moneyOpen && ' The round is settled, so the cash is put right on Payments received (reverse or edit the payment), and the quantities by editing the invoice.'}
+                  {!moneyOpen && ' The cash on a settled round is put right on Payments received (reverse or edit the payment).'}
                 </p>
                 <div className="two">
                   <div className="field"><label htmlFor="fx-full">Full bottles out</label>
@@ -711,7 +725,7 @@ export default function DriverStop() {
                          placeholder="e.g. 12 empties came back, driver recorded none"
                          onChange={(e) => setFix({ ...fix, reason: e.target.value })} /></div>
                 <button type="button" disabled={busy || !fix.reason.trim()} onClick={saveFix}>
-                  {busy ? 'Saving…' : isAdmin ? 'Save the correction' : 'Send for approval'}
+                  {busy ? 'Saving…' : appliesNow ? 'Save the correction' : 'Send for approval'}
                 </button>
               </div>
             );

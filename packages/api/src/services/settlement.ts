@@ -27,9 +27,9 @@ import { audit, requireRole, num } from './core.ts';
 import type { Cents } from '@alka/shared';
 import { planPayments, validateAllocation, RuleViolation } from '@alka/shared';
 import { insertPayment } from './payments.ts';
-import { amountOwedForStop } from './delivery.ts';
-import { recomputeDelivered } from './orders.ts';
-import { openInvoicesForCustomer } from './invoices.ts';
+import { amountOwedForStop, sendRemainder } from './delivery.ts';
+import { recomputeDelivered, refreshOrderStatus } from './orders.ts';
+import { editInvoiceIn, openInvoicesForCustomer } from './invoices.ts';
 import { collectedEmpties, settleCollections } from './collections.ts';
 import { unconfirmedAdditions } from './trucks.ts';
 import { moveEmpties } from './bottles.ts';
@@ -312,6 +312,14 @@ export interface StopCorrection {
   bottlesEmptiesPickedUp?: number;
   bottlesLostDamaged?: number;
   deliveredLines?: Array<{ orderLineId: string; cases: number; looseBottles: number }>;
+  /**
+   * Part delivered, put right in the office (19 Nov 2026): the day what was
+   * not handed over goes out. Needed whenever the corrected quantities leave
+   * something on the order.
+   */
+  restOn?: string | null;
+  /** Words for Needs a decision, e.g. "2 cs Alka Vida 280 ml → 0". Set by the server. */
+  quantitiesSummary?: string;
   /** The driver's note on the stop. */
   notes?: string | null;
 }
@@ -358,10 +366,10 @@ function checkCorrection(now: StopNow, changes: StopCorrection): void {
       && Math.round(Number(changes.paymentAmountCents)) !== num(now.payment_amount_cents);
     const howChanged = changes.paymentMethod !== undefined && (changes.paymentMethod || null) !== (now.payment_method || null)
       && num(now.payment_amount_cents) > 0;
-    if (cashChanged || howChanged || (changes.deliveredLines ?? []).length > 0) {
+    if (cashChanged || howChanged) {
       throw new RuleViolation(
         'this stop is settled, so its money is on the account already: put the cash right on ' +
-        'Payments received (reverse or edit the payment). Bottles and the note can still be corrected here.',
+        'Payments received (reverse or edit the payment). Bottles, what was handed over and the note can still be corrected here.',
       );
     }
   }
@@ -436,32 +444,211 @@ export async function applyStopCorrection(
     }
   }
 
-  // What THIS stop handed over is corrected, and the order's delivered
-  // figures recounted from all its stops (an order can go out in parts).
-  for (const l of changes.deliveredLines ?? []) {
-    await t.query(
-      `INSERT INTO delivery_stop_lines (stop_id, order_line_id, product_id, cases, loose_bottles, total_bottles)
-       SELECT $1, oli.id, oli.product_id, $3, $4, $3 * p.bottles_per_case + $4
-       FROM order_line_items oli JOIN products p ON p.id = oli.product_id WHERE oli.id = $2
-       ON CONFLICT (stop_id, order_line_id) DO UPDATE
-         SET cases = EXCLUDED.cases, loose_bottles = EXCLUDED.loose_bottles,
-             total_bottles = EXCLUDED.total_bottles`,
-      [stopId, l.orderLineId, l.cases, l.looseBottles],
-    );
-  }
+  // What THIS stop handed over (19 Nov 2026): the invoice, the stock, the
+  // order and the rest all follow - see correctHandedOver.
+  let handedOver: Awaited<ReturnType<typeof correctHandedOver>> | null = null;
   if ((changes.deliveredLines ?? []).length > 0) {
-    const o = await t.maybeOne<{ order_id: string | null }>(
-      `SELECT order_id FROM delivery_stops WHERE id = $1`, [stopId],
-    );
-    if (o?.order_id) await recomputeDelivered(t, o.order_id);
+    handedOver = await correctHandedOver(t, actor, stopId, before, changes, reason);
   }
 
   await audit(t, actor, 'adjust', 'DeliveryStop', stopId, before.customer_name, {
     reason, before, changes, correctedBy: actor.name, afterSettlement: !!before.settled_at,
+    ...(handedOver ? { handedOver } : {}),
   });
 }
 
 const checkCorrectionAllowed = checkCorrection;
+
+/** "2 cs Alka Vida 280 ml: 2 → 0" for each line that changes, for Needs a decision. */
+async function describeHandedOver(
+  t: Queryable, stopId: string, lines: NonNullable<StopCorrection['deliveredLines']>,
+): Promise<string> {
+  const rows = await t.query<{ id: string; name: string; bpc: number; cases: number | null; loose: number | null }>(
+    `SELECT oli.id, p.name, p.bottles_per_case AS bpc, sl.cases, sl.loose_bottles AS loose
+     FROM order_line_items oli JOIN products p ON p.id = oli.product_id
+     LEFT JOIN delivery_stop_lines sl ON sl.order_line_id = oli.id AND sl.stop_id = $1
+     WHERE oli.id = ANY($2::uuid[])`, [stopId, lines.map((l) => l.orderLineId)]);
+  const words: string[] = [];
+  for (const l of lines) {
+    const r = rows.find((x) => x.id === l.orderLineId);
+    if (!r) continue;
+    const cased = num(r.bpc) > 0;
+    const was = cased ? num(r.cases) : num(r.loose);
+    const now = cased ? num(l.cases) : num(l.looseBottles);
+    if (was !== now) words.push(`${r.name}: ${was}${cased ? ' cs' : ''} → ${now}${cased ? ' cs' : ''}`);
+  }
+  return words.length ? `handed over ${words.join(', ')}` : 'handed over: no change';
+}
+
+/**
+ * The driver recorded more (or less) handed over than really went - above
+ * all, "Delivered" pressed when part of the order stayed on the truck
+ * (Everton, 19 Nov 2026: 360 Degrees' 2 cases on 17 Nov). Putting the
+ * quantities right puts everything that follows from them right:
+ *
+ *  - the stop's lines, and the order's delivered figures (recounted from all
+ *    its stops, as an order can go out in parts);
+ *  - the invoice this stop raised is rebuilt from what went out, at the
+ *    order's prices. Money already paid above the new total becomes a credit
+ *    note, as with any invoice edit. A weekly/monthly customer's cycle invoice
+ *    already raised is not touched: that is edited on the invoice;
+ *  - stock: on a round with no truck loading the goods came off the shelf, so
+ *    the difference goes back on it (or comes off). On a loaded round they
+ *    are counted back with the truck's returns, so stock is left alone;
+ *  - full 5-gallon bottles out move with the 5-gallon lines, unless the
+ *    correction gives that figure itself;
+ *  - anything left on the order goes on the round for the day chosen, as
+ *    "Rest of order", like the driver's own Part delivered. A customer with
+ *    no delivery zone has it left waiting for that day, to add by hand.
+ */
+async function correctHandedOver(
+  t: Queryable, actor: Actor, stopId: string, now: StopNow, changes: StopCorrection, reason: string,
+): Promise<{ orderStatus: string; restOn: string | null; invoiceNumber: string | null; creditNoteId: string | null;
+             stockBack: Array<{ productId: string; bottles: number }>; fullsChange: number }> {
+  const stop = await t.one<{ order_id: string | null; customer_id: string; invoice_id: string | null; order_number: string | null }>(
+    `SELECT st.order_id, st.customer_id, st.invoice_id, o.order_number
+     FROM delivery_stops st LEFT JOIN customer_orders o ON o.id = st.order_id WHERE st.id = $1`, [stopId]);
+  if (!stop.order_id) throw new RuleViolation('this stop has no order, so there is nothing handed over to correct');
+  if (now.stop_outcome !== 'Delivered') {
+    throw new RuleViolation('only a stop recorded as delivered can have what was handed over corrected');
+  }
+  const orderId = stop.order_id;
+
+  // What each line could have handed over at this stop: ordered, less what
+  // other stops of the order delivered.
+  const caps = await t.query<{
+    id: string; product_id: string; cases: number; loose_bottles: number; bpc: number;
+    is_returnable: boolean; is_bottle_charge: boolean; other_cases: number; other_loose: number;
+    here_cases: number | null; here_loose: number | null; here_total: number | null;
+  }>(
+    `SELECT oli.id, oli.product_id, oli.cases, oli.loose_bottles, p.bottles_per_case AS bpc,
+            p.is_returnable, p.is_bottle_charge,
+            COALESCE(o.cases, 0)::int AS other_cases, COALESCE(o.loose, 0)::int AS other_loose,
+            h.cases AS here_cases, h.loose_bottles AS here_loose, h.total_bottles AS here_total
+     FROM order_line_items oli JOIN products p ON p.id = oli.product_id
+     LEFT JOIN delivery_stop_lines h ON h.order_line_id = oli.id AND h.stop_id = $2
+     LEFT JOIN (
+       SELECT sl.order_line_id, SUM(sl.cases) AS cases, SUM(sl.loose_bottles) AS loose
+       FROM delivery_stop_lines sl JOIN delivery_stops st ON st.id = sl.stop_id
+       WHERE st.order_id = $1 AND st.stop_outcome = 'Delivered' AND st.id <> $2
+       GROUP BY sl.order_line_id
+     ) o ON o.order_line_id = oli.id
+     WHERE oli.order_id = $1`, [orderId, stopId]);
+
+  const whole = (n: unknown) => Number.isInteger(Number(n)) && Number(n) >= 0;
+  const delta = new Map<string, number>();
+  let fullsChange = 0;
+  for (const l of changes.deliveredLines ?? []) {
+    const c = caps.find((x) => x.id === l.orderLineId);
+    if (!c) throw new RuleViolation('a line in the correction is not on this order');
+    if (!whole(l.cases) || !whole(l.looseBottles)) throw new RuleViolation('quantities must be whole numbers, not below nothing');
+    const bpc = num(c.bpc);
+    const cases = bpc > 0 ? Math.round(Number(l.cases)) : 0;
+    const loose = bpc > 0 ? 0 : Math.round(Number(l.looseBottles));
+    const maxCases = num(c.cases) - num(c.other_cases);
+    const maxLoose = num(c.loose_bottles) - num(c.other_loose);
+    if (bpc > 0 ? cases > maxCases : loose > maxLoose) {
+      throw new RuleViolation(`more than the order has left was entered for one of the lines (at most ${bpc > 0 ? `${maxCases} cs` : maxLoose})`);
+    }
+    const total = bpc > 0 ? cases * bpc : loose;
+    await t.query(
+      `INSERT INTO delivery_stop_lines (stop_id, order_line_id, product_id, cases, loose_bottles, total_bottles)
+       VALUES ($1,$2,$3,$4,$5,$6)
+       ON CONFLICT (stop_id, order_line_id) DO UPDATE
+         SET cases = EXCLUDED.cases, loose_bottles = EXCLUDED.loose_bottles, total_bottles = EXCLUDED.total_bottles`,
+      [stopId, c.id, c.product_id, cases, loose, total]);
+    const change = total - num(c.here_total);
+    if (change !== 0 && !c.is_bottle_charge) {
+      delta.set(c.product_id, (delta.get(c.product_id) ?? 0) + change);
+      if (c.is_returnable) fullsChange += change;
+    }
+  }
+  const left = await t.one<{ n: number }>(
+    `SELECT COALESCE(SUM(total_bottles), 0)::int AS n FROM delivery_stop_lines WHERE stop_id = $1`, [stopId]);
+  if (num(left.n) === 0) {
+    throw new RuleViolation('that leaves nothing handed over at this stop. If nothing went, an administrator '
+      + 'uses Undo - delivered in error on the order instead.');
+  }
+
+  await recomputeDelivered(t, orderId);
+  const orderStatus = await refreshOrderStatus(t, orderId);
+
+  // Full 5-gallon bottles out follow the 5-gallon lines, unless given.
+  if (fullsChange !== 0 && (changes.bottlesDeliveredFull === undefined || changes.bottlesDeliveredFull === null)) {
+    await t.query(
+      `UPDATE delivery_stops SET bottles_delivered_full = GREATEST(bottles_delivered_full + $2, 0) WHERE id = $1`,
+      [stopId, fullsChange]);
+  }
+
+  // Stock: back on the shelf (or off it) only where the shelf is where it came from.
+  const loaded = await t.maybeOne(`SELECT 1 FROM round_loads WHERE delivery_sheet_id = $1`, [now.sheet_id]);
+  const stockBack: Array<{ productId: string; bottles: number }> = [];
+  if (!loaded) {
+    for (const [productId, change] of delta) {
+      const back = -change;
+      const p = await t.one<{ name: string }>(`SELECT name FROM products WHERE id = $1`, [productId]);
+      await t.query(
+        `INSERT INTO finished_goods_stock (product_id, quantity_on_hand) VALUES ($1, $2)
+         ON CONFLICT (product_id) DO UPDATE
+           SET quantity_on_hand = finished_goods_stock.quantity_on_hand + EXCLUDED.quantity_on_hand`,
+        [productId, back]);
+      await t.query(
+        `INSERT INTO inventory_transactions (item_type, item_id, item_name, quantity, direction, reference, reference_type, notes, txn_date)
+         VALUES ('FinishedGoods',$1,$2,$3,$4,$5,'Adjustment',$6, ($7::text || 'T12:00:00-05:00')::timestamptz)`,
+        [productId, p.name, Math.abs(back), back > 0 ? 'in' : 'out', stop.order_number ?? `Stop ${stopId}`,
+         back > 0
+           ? `Not handed over on the ${now.sheet_date} round after all (stop corrected): back on the shelf`
+           : `More handed over on the ${now.sheet_date} round than recorded (stop corrected)`,
+         now.sheet_date]);
+      stockBack.push({ productId, bottles: back });
+    }
+  }
+
+  // The invoice this stop raised, rebuilt from what went out.
+  let invoiceNumber: string | null = null;
+  let creditNoteId: string | null = null;
+  const inv = stop.invoice_id ? await t.maybeOne<{ invoice_number: string; lifecycle: string }>(
+    `SELECT invoice_number, lifecycle FROM invoices WHERE id = $1`, [stop.invoice_id]) : null;
+  if (inv && inv.lifecycle !== 'Cancelled') {
+    const lines = await t.query<{
+      product_id: string; cases: number; loose_bottles: number; price_per_case_cents: number; price_per_bottle_cents: number;
+    }>(
+      `SELECT sl.product_id, sl.cases, sl.loose_bottles, oli.price_per_case_cents, oli.price_per_bottle_cents
+       FROM delivery_stop_lines sl JOIN order_line_items oli ON oli.id = sl.order_line_id
+       WHERE sl.stop_id = $1 AND sl.total_bottles > 0`, [stopId]);
+    const r = await editInvoiceIn(t, actor, stop.invoice_id!, {
+      lines: lines.map((l) => ({
+        productId: l.product_id, cases: num(l.cases), looseBottles: num(l.loose_bottles),
+        pricePerCaseCents: num(l.price_per_case_cents), pricePerBottleCents: num(l.price_per_bottle_cents),
+        orderId, reference: stop.order_number,
+      })),
+      reason: `What was handed over on the ${now.sheet_date} round corrected: ${reason}`,
+    });
+    invoiceNumber = inv.invoice_number;
+    creditNoteId = r.creditNoteId;
+  } else if (!stop.invoice_id) {
+    const onCycleInvoice = await t.maybeOne<{ invoice_number: string }>(
+      `SELECT i.invoice_number FROM invoices i
+       WHERE NOT i.is_credit_note AND i.lifecycle <> 'Cancelled' AND i.id IN (
+         SELECT invoice_id FROM invoice_orders WHERE order_id = $1
+         UNION SELECT invoice_id FROM invoice_line_items WHERE order_id = $1)
+       LIMIT 1`, [orderId]);
+    if (onCycleInvoice) {
+      throw new RuleViolation(`this delivery is already on ${onCycleInvoice.invoice_number}. `
+        + 'An administrator edits that invoice, then corrects the stop.');
+    }
+  }
+
+  // The rest goes on the day chosen.
+  let restOn: string | null = null;
+  if (orderStatus === 'Partially Delivered') {
+    if (!changes.restOn) throw new RuleViolation('choose the day the rest goes out');
+    restOn = await sendRemainder(t, stopId, orderId, stop.customer_id, String(now.sheet_date), changes.restOn,
+      { allowNoRound: true });
+  }
+
+  return { orderStatus, restOn, invoiceNumber, creditNoteId, stockBack, fullsChange };
+}
 
 /**
  * Correct what a stop recorded, or ask an admin to.
@@ -491,9 +678,23 @@ export async function requestStopCorrection(
     if (!stop) throw new RuleViolation('that stop no longer exists');
     checkCorrectionAllowed((await stopNow(t, stopId))!, changes);
 
-    if (actor.role === 'admin') {
+    // An admin's applies at once. So does the office's while the round is
+    // still being settled - putting right what the driver recorded handing
+    // over, the bottles and the note is part of settling it (Everton,
+    // 19 Nov 2026). Two things still wait for an administrator: anything
+    // once the round is settled, and a change to the cash the driver
+    // recorded taking, the figure someone would alter to cover a shortfall.
+    const now = (await stopNow(t, stopId))!;
+    const settled = !!now.settled_at || now.sheet_status === 'Completed';
+    const cashChanged = (changes.paymentAmountCents !== undefined
+        && Math.round(Number(changes.paymentAmountCents)) !== num(now.payment_amount_cents))
+      || (changes.paymentMethod !== undefined && (changes.paymentMethod || null) !== (now.payment_method || null));
+    if (actor.role === 'admin' || (!settled && !cashChanged)) {
       await applyStopCorrection(t, actor, stopId, changes, reason);
       return { applied: true, requestId: null };
+    }
+    if ((changes.deliveredLines ?? []).length > 0) {
+      changes = { ...changes, quantitiesSummary: await describeHandedOver(t, stopId, changes.deliveredLines!) };
     }
 
     const req = await t.one<{ id: string }>(

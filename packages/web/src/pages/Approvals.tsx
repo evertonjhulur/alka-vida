@@ -29,7 +29,10 @@ const FIELD_LABEL: Record<string, string> = {
 function describe(payload: Record<string, number | string> | null): string {
   if (!payload) return 'no changes recorded';
   return Object.entries(payload)
+    .filter(([k]) => k !== 'deliveredLines')
     .map(([k, v]) => {
+      if (k === 'quantitiesSummary') return String(v);
+      if (k === 'restOn') return `Rest goes out on: ${String(v)}`;
       const label = FIELD_LABEL[k] ?? k;
       const value = k === 'paymentAmountCents' ? money(Number(v)) : String(v);
       return `${label}: ${value}`;

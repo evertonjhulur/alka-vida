@@ -29,6 +29,7 @@ import { deliversFromTruck, truckPosition } from './trucks.ts';
 import { listCollections } from './collections.ts';
 import { computeTotals, computeLineTotal } from '@alka/shared';
 import { businessToday } from './core.ts';
+import { weekdayOf } from '@alka/shared';
 
 export interface DeliveredLineInput {
   orderLineId: string;
@@ -323,8 +324,9 @@ async function rescheduleStop(
  * the driver chose (made if there is none), and the order's delivery date
  * moves to it so the customer's screen says when.
  */
-async function sendRemainder(
+export async function sendRemainder(
   t: Queryable, stopId: string, orderId: string, customerId: string, fromDate: string, to: string,
+  opts: { allowNoRound?: boolean } = {},
 ): Promise<string> {
   const day = String(to).slice(0, 10);
   if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) throw new RuleViolation('choose the day the rest should go');
@@ -343,6 +345,9 @@ async function sendRemainder(
   const placed = there ? { stopId: there.id }
     : await placeOnDeliverySheet(t, orderId, customerId, day, order.address_id);
   if (!placed.stopId) {
+    // A correction made in the office (19 Nov 2026) leaves the rest waiting
+    // for that day instead: the office adds it to a round by hand.
+    if (opts.allowNoRound) return day;
     throw new RuleViolation('the rest could not be put on a round: the customer has no delivery zone. '
       + 'Set one on the customer and add the order to that day\'s round.');
   }
@@ -918,12 +923,91 @@ export async function getStopForDriver(db: Db, stopId: string) {
 }
 
 /** Manually add an order onto an OPEN sheet that auto-routing missed. */
+const MONTH_WORDS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+/** 'Tue 24 Nov' for a calendar date. */
+function shortDay(d: unknown): string {
+  const iso = String(d ?? '').slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(iso)) return iso;
+  const [, m, day] = iso.split('-').map(Number);
+  return `${weekdayOf(iso)} ${day} ${MONTH_WORDS[m - 1]}`;
+}
+
+/**
+ * What to warn about before an order goes on a round by hand (Everton,
+ * 19 Nov 2026). On 18 Nov next Tuesday's standing order for 360 Degrees was
+ * put on Wednesday's round to carry 2 cases left over from Tuesday: the whole
+ * order was delivered and invoiced a second time, and 24 Nov was left with
+ * no order. Two checks, either of which can be overridden by the office:
+ *
+ *  - the order is booked for a LATER day than the round - worded strongly
+ *    when it is a standing order's run, since that week then has no order;
+ *  - the same customer had the same items (same products, same quantities)
+ *    on a round within two days either side, delivered or still to go.
+ *
+ * Walk-in sales share one customer record, so they are not compared.
+ */
+export async function addOrderWarnings(t: Queryable, sheetId: string, orderId: string): Promise<string[]> {
+  const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  if (!uuid.test(sheetId) || !uuid.test(orderId)) throw new RuleViolation('choose an order to add');
+  const sheet = await t.one<{ day: string }>(
+    `SELECT delivery_date::text AS day FROM delivery_sheets WHERE id = $1`, [sheetId]);
+  const order = await t.one<{
+    order_number: string; customer_id: string; requested: string | null;
+    standing: boolean; customer_name: string; is_walk_in: boolean;
+  }>(
+    `SELECT o.order_number, o.customer_id, o.requested_delivery_date::text AS requested,
+            (o.parent_recurring_id IS NOT NULL) AS standing, c.name AS customer_name, c.is_walk_in
+     FROM customer_orders o JOIN customers c ON c.id = o.customer_id WHERE o.id = $1`, [orderId]);
+  const warnings: string[] = [];
+
+  if (order.requested && order.requested > sheet.day) {
+    warnings.push(order.standing
+      ? `${order.order_number} is a standing order due ${shortDay(order.requested)}, `
+        + `not ${shortDay(sheet.day)}. Delivering it now uses up that week's delivery: `
+        + `there will be no order for ${shortDay(order.requested)} unless you enter one.`
+      : `${order.order_number} is booked for ${shortDay(order.requested)}, later than this round `
+        + `(${shortDay(sheet.day)}). Only add it if the customer wants it early.`);
+  }
+
+  if (!order.is_walk_in) {
+    const same = await t.maybeOne<{ order_number: string; day: string; outcome: string; invoice_number: string | null }>(
+      `WITH mine AS (
+         SELECT string_agg(product_id::text || ':' || total_bottles, ',' ORDER BY product_id, total_bottles) AS k
+         FROM order_line_items WHERE order_id = $2)
+       SELECT o.order_number, ds.delivery_date::text AS day, st.stop_outcome AS outcome, i.invoice_number
+       FROM delivery_stops st
+       JOIN delivery_sheets ds ON ds.id = st.delivery_sheet_id
+       JOIN customer_orders o ON o.id = st.order_id
+       LEFT JOIN invoices i ON i.id = st.invoice_id
+       WHERE o.customer_id = $1 AND o.id <> $2 AND o.status <> 'Cancelled'
+         AND st.stop_outcome IN ('Delivered', 'Pending')
+         AND ds.delivery_date BETWEEN $3::date - 2 AND $3::date + 2
+         AND (SELECT string_agg(product_id::text || ':' || total_bottles, ',' ORDER BY product_id, total_bottles)
+              FROM order_line_items WHERE order_id = o.id) = (SELECT k FROM mine)
+       ORDER BY (st.stop_outcome = 'Delivered') DESC, ds.delivery_date DESC
+       LIMIT 1`,
+      [order.customer_id, orderId, sheet.day]);
+    if (same) {
+      const items = await summariseOrderLines(t, orderId);
+      warnings.push(same.outcome === 'Delivered'
+        ? `${order.customer_name} already had the same items (${items}) delivered on ${shortDay(same.day)}: `
+          + `${same.order_number}${same.invoice_number ? `, invoice ${same.invoice_number}` : ''}. `
+          + 'Check this is not the same goods going out, and being invoiced, twice. '
+          + 'If that delivery went out short, send only what is left, not a whole order.'
+        : `${order.customer_name} already has the same items (${items}) on the round for ${shortDay(same.day)}: `
+          + `${same.order_number}. Check this is not the same order entered twice.`);
+    }
+  }
+  return warnings;
+}
+
 export async function addOrderToSheet(
   db: Db,
   actor: Actor,
   sheetId: string,
   orderId: string,
-): Promise<{ stopId: string }> {
+  opts: { confirmed?: boolean } = {},
+): Promise<{ stopId: string; warnings: string[] }> {
   requireRole(actor, 'admin', 'user');
   return db.tx(async (t) => {
     const sheet = await t.one<{ status: string }>(
@@ -959,6 +1043,13 @@ export async function addOrderToSheet(
         `${elsewhere.delivery_date}. Take it off that route first.`,
       );
     }
+    // Booked for a later day, or the same goods already going out (19 Nov 2026):
+    // the screen shows these first; going ahead needs the office to confirm.
+    const warnings = await addOrderWarnings(t, sheetId, orderId);
+    if (warnings.length && !opts.confirmed) {
+      throw new RuleViolation(`${warnings.join(' ')} To add it anyway, confirm on the round page.`);
+    }
+
     const customer = await deliveryTarget(t, order.customer_id, order.address_id);
     // Waiting for a same-day / special-day decision? Putting it on a round decides it.
     const sheetInfo = await t.one<{ zone: string; day: string }>(
@@ -982,8 +1073,9 @@ export async function addOrderToSheet(
     );
     await audit(t, actor, 'update', 'DeliverySheet', sheetId, sheetId, {
       addedOrderId: orderId, manual: true,
+      ...(warnings.length ? { warningsOverridden: warnings } : {}),
     });
-    return { stopId: stop.id };
+    return { stopId: stop.id, warnings };
   });
 }
 

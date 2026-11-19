@@ -186,7 +186,9 @@ function sentence(r: Row, L: Lookups): string {
       if (d.assignedDriverId || d.driverName) return `${d.driverName ?? 'A driver'} assigned to the ${round}.`;
       if (d.unassigned) return `Driver taken off the ${round}.`;
       if (d.started) return `The ${round} was started.`;
-      if (d.addedOrderId) { const o = L.order.get(d.addedOrderId); return `Order ${o?.number ?? ''} (${o?.customer ?? 'a customer'}) added to the ${round} by hand.`; }
+      if (d.addedOrderId) { const o = L.order.get(d.addedOrderId); return `Order ${o?.number ?? ''} (${o?.customer ?? 'a customer'}) added to the ${round} by hand`
+        + (Array.isArray(d.warningsOverridden) && d.warningsOverridden.length
+          ? `, after a warning: ${(d.warningsOverridden as string[]).join(' ')}` : '.'); }
       if (d.resequenced || d.order) return `The stop order on the ${round} was changed.`;
       if (d.paymentOnlyStop) return `Payment-only stop recorded for ${r.entity_label}: ${cash(d.amountCents)} ${String(d.method ?? '').toLowerCase()}, nothing delivered. It counts once the round is settled.`;
       if (d.collectPaymentStop) return `"Collect payment" stop planned for ${r.entity_label}.`;
@@ -219,7 +221,15 @@ function sentence(r: Row, L: Lookups): string {
         return `At settlement, the money taken at ${order} (${who})${where} was split: ${parts.join(', ') || 'nothing'}.`;
       }
       if (d.removedFromRoute) return `${order} (${who}) taken off the round${where ? `: ${st?.round}` : ''}.`;
-      if (d.before && d.changes) return `Delivery at ${order} (${who})${where} corrected after settlement by ${d.correctedBy ?? r.user_name}.${why}`;
+      if (d.before && d.changes) {
+        // What was handed over, corrected (19 Nov 2026).
+        const h = d.handedOver as { restOn?: string | null; invoiceNumber?: string | null; orderStatus?: string } | undefined;
+        const handed = h
+          ? ` What was handed over changed${h.invoiceNumber ? `; invoice ${h.invoiceNumber} rebuilt` : ''}`
+            + `${h.restOn ? `; the rest goes out ${h.restOn}` : ''}.`
+          : '';
+        return `Delivery at ${order} (${who})${where} corrected${d.afterSettlement ? ' after settlement' : ''} by ${d.correctedBy ?? r.user_name}.${handed}${why}`;
+      }
       if ('bottlesWas' in d) return `5-gallon bottles at ${order} (${who}) changed from ${d.bottlesWas} to ${d.bottlesNow}.${why}`;
       break;
     }
