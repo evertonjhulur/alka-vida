@@ -124,9 +124,14 @@ function validateProduct(input: ProductInput): void {
 /* Price tiers                                                         */
 /* ------------------------------------------------------------------ */
 
+/**
+ * A new price list. `copyFrom` starts it with every rate of another list
+ * (Everton, 19 Nov 2026): a new standard "Retail" made as a copy of the
+ * renamed "Retail - held", then only the 5-gallon rate changed.
+ */
 export async function createPriceTier(
-  db: Db, actor: Actor, name: string,
-): Promise<{ id: string }> {
+  db: Db, actor: Actor, name: string, opts: { copyFrom?: string | null } = {},
+): Promise<{ id: string; ratesCopied: number }> {
   requireRole(actor, 'admin', 'user');
   if (!name?.trim()) throw new RuleViolation('a price tier needs a name');
 
@@ -136,22 +141,72 @@ export async function createPriceTier(
     );
     if (existing) throw new RuleViolation(`a price tier called "${name.trim()}" already exists`);
 
+    const source = opts.copyFrom
+      ? await t.maybeOne<{ id: string; name: string }>(`SELECT id, name FROM price_tiers WHERE id = $1`, [opts.copyFrom])
+      : null;
+    if (opts.copyFrom && !source) throw new RuleViolation('the price list to copy from was not found');
+
     const row = await t.one<{ id: string }>(
       `INSERT INTO price_tiers (name) VALUES ($1) RETURNING id`, [name.trim()],
     );
-    await audit(t, actor, 'create', 'PriceTier', row.id, name.trim(), {});
-    return { id: row.id };
+    let ratesCopied = 0;
+    if (source) {
+      const r = await t.query<{ id: string }>(
+        `INSERT INTO price_lists (price_tier_id, product_id, price_per_case_cents, price_per_bottle_cents)
+         SELECT $1, product_id, price_per_case_cents, price_per_bottle_cents FROM price_lists WHERE price_tier_id = $2
+         RETURNING id`, [row.id, source.id]);
+      ratesCopied = r.length;
+    }
+    await audit(t, actor, 'create', 'PriceTier', row.id, name.trim(),
+      source ? { copiedFrom: source.name, ratesCopied } : {});
+    return { id: row.id, ratesCopied };
   });
 }
 
+/**
+ * Renaming keeps every customer and rate on the list. The portal's sign-up
+ * puts homes on the list NAMED "Retail" and businesses on "Corporate", so
+ * renaming one of those changes where new sign-ups land (19 Nov 2026).
+ */
 export async function renamePriceTier(
   db: Db, actor: Actor, tierId: string, name: string,
 ): Promise<void> {
   requireRole(actor, 'admin', 'user');
   if (!name?.trim()) throw new RuleViolation('a price tier needs a name');
   await db.tx(async (t) => {
+    const was = await t.maybeOne<{ name: string }>(`SELECT name FROM price_tiers WHERE id = $1`, [tierId]);
+    if (!was) throw new RuleViolation('that price list was not found');
+    const clash = await t.maybeOne(
+      `SELECT id FROM price_tiers WHERE lower(name) = lower($1) AND id <> $2`, [name.trim(), tierId]);
+    if (clash) throw new RuleViolation(`a price tier called "${name.trim()}" already exists`);
     await t.query(`UPDATE price_tiers SET name = $2 WHERE id = $1`, [tierId, name.trim()]);
-    await audit(t, actor, 'update', 'PriceTier', tierId, name.trim(), {});
+    await audit(t, actor, 'update', 'PriceTier', tierId, name.trim(), { renamedFrom: was.name });
+  });
+}
+
+/**
+ * Everyone on one price list moves to another (19 Nov 2026) - for ending a
+ * held price: "move everyone on Retail - held to Retail". Inactive customers
+ * move too, so nobody is left behind on the old list. Orders already taken
+ * keep their prices; standing orders take the new list from their next run.
+ * Administrators only: it changes what many customers pay.
+ */
+export async function moveTierCustomers(
+  db: Db, actor: Actor, fromTierId: string, toTierId: string,
+): Promise<{ moved: number }> {
+  requireRole(actor, 'admin');
+  if (fromTierId === toTierId) throw new RuleViolation('choose a different price list to move them to');
+  return db.tx(async (t) => {
+    const from = await t.maybeOne<{ name: string }>(`SELECT name FROM price_tiers WHERE id = $1`, [fromTierId]);
+    const to = await t.maybeOne<{ name: string }>(`SELECT name FROM price_tiers WHERE id = $1`, [toTierId]);
+    if (!from || !to) throw new RuleViolation('that price list was not found');
+    const moved = await t.query<{ id: string }>(
+      `UPDATE customers SET price_tier_id = $2, updated_at = now() WHERE price_tier_id = $1 RETURNING id`,
+      [fromTierId, toTierId]);
+    await audit(t, actor, 'update', 'PriceTier', fromTierId, from.name, {
+      movedCustomersTo: to.name, movedCount: moved.length,
+    });
+    return { moved: moved.length };
   });
 }
 

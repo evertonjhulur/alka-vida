@@ -3195,3 +3195,120 @@ take it off before settling. Optional tidy: RCT-001191 ($400, 13 Nov) was
 reversed and RCT-001231 ($400 "cash", dated 22 Oct) entered to replace the
 deleted QuickBooks opening credit; moving RCT-001191 to INV-016514 instead
 would keep cash-by-day right.
+
+## Held 5-gallon price for current Retail customers; price-list tools (19 Nov 2026)
+
+Everton: 5-gallon is the only product where Individual and Corporate prices
+differ. Hold today's Retail customers on their 5-gallon price (J$434.78 + GCT
+= J$500), open-ended until announced to customers; every new customer
+(portal or office) gets the standard Retail price, which is the same as the
+Corporate rate today (J$521.74 + GCT = J$600, also the product's list price),
+unless staff change it as now.
+
+How it is done (his steps once live, Settings › Products & pricing):
+1. Rename "Retail" to e.g. "Retail - held" (all ~160 stay on it).
+2. Add price list "Retail", "Copy the rates of Retail - held".
+3. Set the new Retail's 5-gallon rate to 521.74.
+Ending the hold: "Move everyone…" on Retail - held → Retail.
+
+Built:
+- pricing.createPriceTier(db, actor, name, { copyFrom }) copies every
+  price_lists row of the source; returns ratesCopied. POST /api/price-tiers
+  takes copyFrom.
+- pricing.renamePriceTier: refuses a name in use (case-insensitive),
+  audits renamedFrom. NOTE: signup.ts puts homes on the tier NAMED "Retail"
+  and businesses on "Corporate"; the screen says so after renaming either.
+- pricing.moveTierCustomers(db, actor, from, to): admin only; moves every
+  customer on the list, inactive too; audit movedCustomersTo/movedCount.
+  POST /api/price-tiers/:id/move-customers { toTierId }.
+- auditwords: PriceTier sentences (renamed, created as a copy, moved, deleted).
+- Pricing.tsx: "Start empty / Copy the rates of X" beside Add price list;
+  each list chip has Rename (office + admin) and, for admins on a list with
+  customers, "Move everyone…" opening a small panel (drop-down + Move them
+  + confirm).
+- CustomerForm.tsx: on a NEW customer, choosing "A person" fills the price
+  list with the list named "Retail", "A business" with "Corporate", unless
+  the price list was already picked by hand.
+- Tests: heldprices.test.ts (3: rename/copy/re-rate keeps the existing
+  customer at 43478 and puts a new sign-up on the new Retail at 52174;
+  move-everyone incl. inactive, admin only; rename clash). API 681, shared
+  80, web 16. Walked on a local copy.
+
+Live, done 19 Nov through the screens: Everton Jhulur (Individual, on
+Distributor for cases) got a 5-gallon special price 434.78; INV-016732
+re-priced J$1,200 → J$1,000 and INV-016675 J$1,800 → J$1,500 ("5-gallon at
+Retail rate ... cases stay at Distributor"). INV-016534 (5 L case) left.
+Other tier/type mismatches reported to him, not changed: ALAN WILES
+(Individual/Wholesale), Alex Brown (Individual/Corporate), Brandon Thomas
+(Individual/Distributor), Dr. Kevin Harvey, Lennox Turner, Luckie Matias
+(Individual, no tier = list price), ICS (Corporate/Retail).
+
+## Discounts need an administrator; walk-in prices (19 Nov 2026)
+
+Everton: "the discounts need approval from admin". Before this only a
+discount added to an invoice already raised was queued; a discount on the
+ORDER (New sale, edit order, counter sale) went straight onto its invoice. On
+19 Nov Collin rang up three walk-in sales at 16.7% off that way (SO-001332
+to SO-001334): the New sale screen showed walk-ins the LIST price (J$600)
+while the sale charged the Cash Walk-In record's Retail price (J$500), so the
+"discount" took them to J$416.50. The cash taken was ~J$500 a jug; the extra
+J$1,332.80 sits as credit on Cash Walk-In. Removing those three discounts is
+offered to him, not done.
+
+Walk-ins (his ruling): stay on the current Retail prices, held with the
+batch until officially changed (Cash Walk-In is on Retail, so renaming
+Retail -> "Retail - held" keeps it there).
+- GET /api/products?for=walkin now returns the Cash Walk-In record's prices
+  (its special prices, then its price list) in price_per_case/bottle_cents;
+  New sale says "Walk-in prices." for a walk-in.
+- customers.createCustomer: a walk-in put on file (isWalkIn) with no price
+  list takes Cash Walk-In's (before: none = list price).
+
+Discount approvals:
+- Migration 043: customer_orders.discount_status Approved|Pending|Rejected,
+  default Approved (everything on file, FOC arrangements included).
+- createOrder: discount > 0 -> Approved if an admin set it; a standing
+  order's run inherits its schedule's status (no request per run); otherwise
+  Pending + approval_requests row ('Discount', entity_type 'CustomerOrder',
+  amount, percent/fixed, reason = new input discountReason). Warning returned.
+- editOrder: a changed discount by office -> Pending + new request (older
+  pending request for the order closed as "replaced"); taken off, or an
+  admin's change -> Approved, pending requests closed.
+- Invoices from orders (delivery.invoiceFromDelivery, counter's invoice,
+  cycles) pass discountStatus Pending while the order's is pending: billed
+  in full, discount recorded, not counted (existing createInvoice behaviour).
+  A weekly/monthly invoice waits if any order on it is pending.
+- approvals.reviewApproval -> decideOrderDiscount: Approved -> order + its
+  pending runs Approved; their pending invoices get the discount
+  (single-order: applyDiscountToInvoice with the invoice's own pct/fixed;
+  multi-order: per-order discount on its own lines, once none is pending).
+  Rejected -> discount off the order(s), totals recomputed, invoices'
+  discount_status Rejected (they were already full).
+- Other ways to charge less, office staff refused (admins fine):
+  resolveLines({ pricedBy }) - a typed line price below the customer's own
+  (special > list > product) on orders, order edits and quotes (quote
+  conversion and standing-order runs skip it: already authorised);
+  customers.setSpecialPrice below their price list rate.
+- Screens: New sale shows a yellow note + "Why the discount" box for office
+  staff when a discount is entered; Orders edit panel note; Orders list chip
+  "discount waiting"; Needs a decision explains an order discount.
+- Note: a walk-in pays the discounted amount at the counter, so Cash Walk-In
+  shows the difference owing until the admin approves.
+- Tests: discountapproval.test.ts (9); quotations/revisions tests that had
+  office staff pricing below the rate now act as an admin. API 690, shared
+  80, web 16. Walked on a local copy (office New sale walk-in -> admin Needs
+  a decision).
+
+## Customers list: sort by heading + Export to Excel (20 Nov 2026)
+
+Everton asked for the Customers screen to sort by column heading and for
+the customer list to be downloadable.
+- pages/Customers.tsx only (no API change). Uses ListTools useSort/SortTh
+  like Invoices and Payments: Name, Contact (sorts by phone, else email),
+  Zone, Route #, Tier, Balance. Unsorted until a heading is clicked.
+- "Export to Excel (n)" button beside the search count: lib/csv downloadCsv
+  of the list as found and sorted on screen, file customers-YYYY-MM-DD.csv.
+  Columns: Name, Phone, Email, Delivery address, Zone, Delivery days (own,
+  else the zone's run days), Route #, Customer type, Price tier (or "List
+  price"), Billing, Payment terms, GCT exempt, Balance (dollars).
+- Active customers only (listSelectableCustomers); web tsc + build clean.

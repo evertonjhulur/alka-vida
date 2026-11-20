@@ -26,6 +26,8 @@ interface Order {
   status: string; delivery_mode: string; grand_total_cents: number;
   discount_percent: number; source: string;
   discount_fixed_cents?: number; gct_exempt?: boolean;
+  /** Approved, or waiting for an administrator (19 Nov 2026). */
+  discount_status?: 'Approved' | 'Pending' | 'Rejected';
   is_recurring: boolean; recurrence_pattern: string | null; parent_recurring_id: string | null;
   customer_zone: string | null; today: string; lines_summary: string | null;
   stop_id: string | null; stop_outcome: string | null; sheet_id: string | null;
@@ -695,6 +697,7 @@ export default function Orders() {
                 <input id="dp" type="number" min="0" max={discountAs === '%' ? 100 : undefined} step="0.01"
                        style={{ width: 100 }} value={discount}
                        onChange={(e) => setDiscount(e.target.value)} />
+                {!isAdmin && <div className="muted small">A change to the discount goes to an administrator to approve.</div>}
               </div>
               <label className="check">
                 <input type="checkbox" checked={chargeGct} onChange={(e) => setChargeGct(e.target.checked)} />
@@ -928,7 +931,9 @@ export default function Orders() {
                         );
                       })()}
                     </td>
-                    <td data-label="Total" className="num">{money(Number(o.grand_total_cents))}</td>
+                    <td data-label="Total" className="num">{money(Number(o.grand_total_cents))}
+                      {o.discount_status === 'Pending' && <div><span className="chip warn" title="The discount is waiting for an administrator">discount waiting</span></div>}
+                    </td>
                     <td className="num order-actions">
                       {pending ? (
                         <>

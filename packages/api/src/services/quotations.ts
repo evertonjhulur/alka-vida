@@ -60,11 +60,13 @@ function portalBaseUrl(): string {
 }
 export const quoteAcceptLink = (token: string) => `${portalBaseUrl()}/#/quote/${token}`;
 
-async function priceQuote(t: Queryable, input: QuotationInput) {
+async function priceQuote(t: Queryable, input: QuotationInput, actor: Actor) {
   if (!input.lines || input.lines.length === 0) {
     throw new RuleViolation('a quotation needs at least one line');
   }
-  const lines = await resolveLines(t, input.customerId, input.lines);
+  // Office staff may not quote below the customer's own price (19 Nov 2026):
+  // the quote's prices carry onto the order as they are.
+  const lines = await resolveLines(t, input.customerId, input.lines, { pricedBy: actor });
   const cust = await t.one<{ gct_exempt: boolean }>(
     `SELECT gct_exempt FROM customers WHERE id = $1`, [input.customerId],
   );
@@ -98,7 +100,7 @@ export async function createQuotation(
   requireRole(actor, 'admin', 'user');
 
   return db.tx(async (t) => {
-    const { lines, totals, gctExempt, fixed, pct } = await priceQuote(t, input);
+    const { lines, totals, gctExempt, fixed, pct } = await priceQuote(t, input, actor);
     const quoteNumber = await nextNumber(t, 'quote_number_seq', 'QT');
 
     const quote = await t.one<{ id: string }>(
@@ -142,7 +144,7 @@ export async function updateQuotation(
       throw new RuleViolation(`quotation ${q.quote_number} is ${q.status.toLowerCase()} and can no longer be changed`);
     }
     const { lines, totals, gctExempt, fixed, pct } = await priceQuote(t,
-      { ...input, customerId: input.customerId || q.customer_id });
+      { ...input, customerId: input.customerId || q.customer_id }, actor);
     await t.query(
       `UPDATE quotations SET customer_id = $2, valid_until = $3, notes = $4, subtotal_cents = $5,
          discount_percent = $6, discount_amount_cents = $7, grand_total_cents = $8,

@@ -148,6 +148,78 @@ async function applyDiscountToInvoice(
   );
 }
 
+/**
+ * An order's discount decided (19 Nov 2026). The order and any of its
+ * standing-order runs still waiting on it take the decision; invoices already
+ * raised from them are put right:
+ *  - approved: each invoice's discount starts to count (on a weekly/monthly
+ *    invoice, once no order on it is still waiting);
+ *  - turned down: the discount comes off the order(s) and their invoices.
+ */
+async function decideOrderDiscount(
+  t: Parameters<typeof audit>[0], orderId: string, decision: 'Approved' | 'Rejected',
+): Promise<void> {
+  const orders = (await t.query<{ id: string }>(
+    `SELECT id FROM customer_orders
+     WHERE id = $1 OR (parent_recurring_id = $1 AND discount_status = 'Pending')`, [orderId])).map((r) => r.id);
+
+  if (decision === 'Approved') {
+    await t.query(`UPDATE customer_orders SET discount_status = 'Approved' WHERE id = ANY($1::uuid[])`, [orders]);
+  } else {
+    // Off the order, its totals worked out again without it.
+    for (const id of orders) {
+      const o = await t.one<{ gct_exempt: boolean }>(`SELECT gct_exempt FROM customer_orders WHERE id = $1`, [id]);
+      const lines = await t.query<{ line_total: number }>(
+        `SELECT CASE WHEN p.bottles_per_case > 0 THEN oli.cases * oli.price_per_case_cents
+                     ELSE oli.loose_bottles * oli.price_per_bottle_cents END AS line_total
+         FROM order_line_items oli JOIN products p ON p.id = oli.product_id WHERE oli.order_id = $1`, [id]);
+      const totals = computeTotals(lines.map((l) => ({ lineTotal: num(l.line_total) })), 0, !o.gct_exempt, 0);
+      await t.query(
+        `UPDATE customer_orders
+         SET discount_status = 'Rejected', discount_percent = 0, discount_fixed_cents = 0,
+             subtotal_cents = $2, discount_amount_cents = 0, gct_cents = $3, grand_total_cents = $4
+         WHERE id = $1`, [id, totals.subtotal, totals.gct, totals.grandTotal]);
+    }
+  }
+
+  const invoices = await t.query<{
+    id: string; discount_percent: number; discount_fixed_cents: number; orders: number;
+  }>(
+    `SELECT i.id, i.discount_percent, i.discount_fixed_cents,
+            (SELECT COUNT(*)::int FROM invoice_orders x WHERE x.invoice_id = i.id) AS orders
+     FROM invoices i
+     WHERE NOT i.is_credit_note AND i.lifecycle <> 'Cancelled' AND i.discount_status = 'Pending'
+       AND i.id IN (SELECT invoice_id FROM invoice_orders WHERE order_id = ANY($1::uuid[]))`, [orders]);
+  for (const inv of invoices) {
+    if (num(inv.orders) <= 1) {
+      if (decision === 'Approved') {
+        await applyDiscountToInvoice(t, inv.id, num(inv.discount_percent), num(inv.discount_fixed_cents));
+      } else {
+        await t.query(
+          `UPDATE invoices SET discount_status = 'Rejected', discount_percent = 0, discount_fixed_cents = 0
+           WHERE id = $1`, [inv.id]);
+      }
+      continue;
+    }
+    // A weekly/monthly invoice: each order's own discount on its own lines.
+    const parts = await t.query<{ status: string; pct: number; fixed: number; sub: number }>(
+      `SELECT o.discount_status AS status, o.discount_percent AS pct, o.discount_fixed_cents AS fixed,
+              COALESCE(SUM(li.line_total_cents), 0)::bigint AS sub
+       FROM invoice_orders io
+       JOIN customer_orders o ON o.id = io.order_id
+       LEFT JOIN invoice_line_items li ON li.invoice_id = io.invoice_id AND li.order_id = o.id
+       WHERE io.invoice_id = $1
+       GROUP BY o.id, o.discount_status, o.discount_percent, o.discount_fixed_cents`, [inv.id]);
+    if (parts.some((p) => p.status === 'Pending' && (num(p.pct) > 0 || num(p.fixed) > 0))) continue;
+    let discount = 0;
+    for (const p of parts) {
+      if (p.status !== 'Approved') continue;
+      discount += num(p.fixed) > 0 ? Math.min(num(p.fixed), num(p.sub)) : Math.round(num(p.sub) * (num(p.pct) / 100));
+    }
+    await applyDiscountToInvoice(t, inv.id, 0, discount);
+  }
+}
+
 /** Everything awaiting an Admin, newest request last. */
 export async function listPendingApprovals(db: Db): Promise<PendingApproval[]> {
   const rows = await db.query<Record<string, unknown>>(
@@ -200,11 +272,11 @@ export async function reviewApproval(
 
   return db.tx(async (t) => {
     const req = await t.one<{
-      id: string; request_type: string; entity_id: string; status: string;
+      id: string; request_type: string; entity_id: string; status: string; entity_type: string;
       discount_percent: number | null; amount_cents: number;
       payload: StopCorrection | null; reason: string | null; discount_fixed_cents: number | null;
     }>(
-      `SELECT id, request_type, entity_id, status, discount_percent, amount_cents,
+      `SELECT id, request_type, entity_id, entity_type, status, discount_percent, amount_cents,
               payload, reason, discount_fixed_cents
        FROM approval_requests WHERE id = $1 FOR UPDATE`, [requestId],
     );
@@ -213,7 +285,10 @@ export async function reviewApproval(
     }
 
     let orderCancelled = false;
-    if (req.request_type === 'SameDayOrder' || req.request_type === 'SpecialDayOrder') {
+    if (req.request_type === 'Discount' && req.entity_type === 'CustomerOrder') {
+      // A discount put on an order by office staff (19 Nov 2026).
+      await decideOrderDiscount(t, req.entity_id, decision);
+    } else if (req.request_type === 'SameDayOrder' || req.request_type === 'SpecialDayOrder') {
       if (opts.cancel) {
         await cancelWaitingOrder(t, actor, req.entity_id, reviewNotes ?? null);
         orderCancelled = true;

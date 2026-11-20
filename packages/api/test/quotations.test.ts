@@ -33,7 +33,7 @@ describe('Quotations', () => {
 
   test('a GCT-exempt customer is quoted without GCT', async () => {
     await f.db.query(`UPDATE customers SET gct_exempt = true WHERE id = $1`, [f.otherCustomerId]);
-    const q = await createQuotation(f.db, f.office, {
+    const q = await createQuotation(f.db, f.admin, {
       customerId: f.otherCustomerId,
       lines: [{ productId: f.casedProductId, cases: 1, pricePerCaseCents: 100_000 }],
     });
@@ -43,7 +43,7 @@ describe('Quotations', () => {
   });
 
   test('accept estimate prices that differ from the customer tier', async () => {
-    const q = await createQuotation(f.db, f.office, {
+    const q = await createQuotation(f.db, f.admin, {
       customerId: f.customerId,
       lines: [{ productId: f.casedProductId, cases: 5, pricePerCaseCents: 99_000 }],
     });
@@ -52,7 +52,7 @@ describe('Quotations', () => {
 
   test('honour the case-vs-bottle rule like every other document', async () => {
     await assert.rejects(
-      createQuotation(f.db, f.office, {
+      createQuotation(f.db, f.admin, {
         customerId: f.customerId,
         lines: [{ productId: f.casedProductId, cases: 0, looseBottles: 5 }],
       }),
@@ -61,7 +61,7 @@ describe('Quotations', () => {
   });
 
   test('convert into a real order that DOES calculate GCT', async () => {
-    const q = await createQuotation(f.db, f.office, {
+    const q = await createQuotation(f.db, f.admin, {
       customerId: f.customerId,
       lines: [{ productId: f.casedProductId, cases: 10, pricePerCaseCents: 120_000 }],
     });
@@ -82,7 +82,7 @@ describe('Quotations', () => {
   });
 
   test('carry quoted prices through to the invoice raised at delivery', async () => {
-    const q = await createQuotation(f.db, f.office, {
+    const q = await createQuotation(f.db, f.admin, {
       customerId: f.customerId,
       // Quoted well below the customer's usual Corporate rate.
       lines: [{ productId: f.casedProductId, cases: 4, pricePerCaseCents: 100_000 }],
@@ -106,7 +106,7 @@ describe('Quotations', () => {
   });
 
   test('cannot be converted twice', async () => {
-    const q = await createQuotation(f.db, f.office, {
+    const q = await createQuotation(f.db, f.admin, {
       customerId: f.customerId,
       lines: [{ productId: f.fiveGalProductId, looseBottles: 5 }],
     });

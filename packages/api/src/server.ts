@@ -894,12 +894,35 @@ export async function buildServer(db: Db) {
     const where = s.role === 'customer'
       ? (s.customerId ? `AND ${productAvailableSql('p', '$1')}` : 'AND false')
       : q.for === 'walkin' ? `AND ${ownProductSql('p')}` : '';
-    return db.query(
+    const rows = await db.query<Record<string, unknown>>(
       `SELECT p.*, b.name AS brand_name, b.type AS brand_type
        FROM products p LEFT JOIN brands b ON b.id = p.brand_id
        WHERE p.active ${where} ORDER BY p.name`,
       s.role === 'customer' && s.customerId ? [s.customerId] : [],
     );
+    // A walk-in is charged the Cash Walk-In record's prices (its special
+    // prices, then its price list), so the New sale screen shows those - not
+    // the list price (19 Nov 2026: it showed J$600 for a J$500 sale).
+    if (q.for === 'walkin') {
+      const walkIn = await db.maybeOne<{ id: string; price_tier_id: string | null }>(
+        `SELECT id, price_tier_id FROM customers WHERE is_walk_in AND active
+         ORDER BY (lower(name) = 'cash walk-in') DESC, created_at LIMIT 1`);
+      if (walkIn) {
+        const rates = await db.query<{ product_id: string; c: number; b: number }>(
+          `SELECT product_id, price_per_case_cents AS c, price_per_bottle_cents AS b
+           FROM price_lists WHERE price_tier_id = $1`, [walkIn.price_tier_id]);
+        const special = await db.query<{ product_id: string; c: number; b: number }>(
+          `SELECT product_id, price_per_case_cents AS c, price_per_bottle_cents AS b
+           FROM customer_prices WHERE customer_id = $1`, [walkIn.id]);
+        const byId = new Map(rates.map((r) => [r.product_id, r]));
+        for (const sp of special) byId.set(sp.product_id, sp);
+        for (const r of rows) {
+          const own = byId.get(String(r.id));
+          if (own) { r.price_per_case_cents = own.c; r.price_per_bottle_cents = own.b; }
+        }
+      }
+    }
+    return rows;
   });
 
   app.get('/api/price-tiers', { preHandler: allow('admin', 'user') }, async () =>
@@ -922,8 +945,15 @@ export async function buildServer(db: Db) {
     });
 
   app.post('/api/price-tiers', { preHandler: allow('admin', 'user') },
-    async (req) => pricing.createPriceTier(db, actorOf(req),
-      (req.body as { name: string }).name));
+    async (req) => {
+      const b = req.body as { name: string; copyFrom?: string | null };
+      return pricing.createPriceTier(db, actorOf(req), b.name, { copyFrom: b.copyFrom ?? null });
+    });
+
+  // Everyone on one price list to another, e.g. ending a held price (19 Nov 2026).
+  app.post('/api/price-tiers/:id/move-customers', { preHandler: allow('admin') },
+    async (req) => pricing.moveTierCustomers(db, actorOf(req),
+      (req.params as { id: string }).id, (req.body as { toTierId: string }).toTierId));
 
   app.patch('/api/price-tiers/:id', { preHandler: allow('admin', 'user') },
     async (req) => {

@@ -92,7 +92,7 @@ describe('Customers', () => {
   });
 
   test('a special price beats the price list, and is what the order charges', async () => {
-    await setSpecialPrice(f.db, f.office, f.otherCustomerId, f.casedProductId, 110_000);
+    await setSpecialPrice(f.db, f.admin, f.otherCustomerId, f.casedProductId, 110_000);
     const prices = await customerPrices(f.db, f.otherCustomerId) as Array<Record<string, unknown>>;
     const p = prices.find((x) => x.product_id === f.casedProductId)!;
     assert.equal(Number(p.price_per_case_cents), 110_000);
@@ -109,7 +109,7 @@ describe('Customers', () => {
       lines: [{ productId: f.casedProductId, cases: 2 }],
     });
     assert.equal(o2.subtotalCents, 240_000);
-    await setSpecialPrice(f.db, f.office, f.otherCustomerId, f.casedProductId, null);
+    await setSpecialPrice(f.db, f.admin, f.otherCustomerId, f.casedProductId, null);
   });
 
   test('a second delivery address has its own zone, and the order goes on that round', async () => {
@@ -165,21 +165,21 @@ describe('Orders and invoices: GCT and discounts', () => {
   });
 
   test('GCT can be taken off one order, and a fixed-amount discount carries to the invoice', async () => {
-    const o = await createOrder(f.db, f.office, {
+    const o = await createOrder(f.db, f.admin, {
       customerId: f.customerId, deliveryMode: 'Pickup', gctExempt: true, discountFixedCents: 20_000,
       lines: [{ productId: f.casedProductId, cases: 1 }],
     });
     assert.equal(o.grandTotalCents, 100_000);
-    const c = await collectOrder(f.db, f.office, { orderId: o.id });
+    const c = await collectOrder(f.db, f.admin, { orderId: o.id });
     assert.equal(c.grandTotalCents, 100_000);
 
-    await editOrder(f.db, f.office, (await createOrder(f.db, f.office, {
+    await editOrder(f.db, f.admin, (await createOrder(f.db, f.admin, {
       customerId: f.customerId, deliveryMode: 'Pickup', lines: [{ productId: f.casedProductId, cases: 1 }],
     })).id, { discountFixedCents: 10_000 });
   });
 
   test('an admin can take GCT off an invoice after the fact', async () => {
-    const sale = await counterSale(f.db, f.office, {
+    const sale = await counterSale(f.db, f.admin, {
       customerId: f.customerId, lines: [{ productId: f.casedProductId, cases: 1 }],
     });
     assert.equal(sale.grandTotalCents, 138_000);

@@ -85,6 +85,8 @@ export interface CounterSaleInput {
   lines: OrderLineInput[];
   discountPercent?: number;
   discountFixedCents?: Cents;
+  /** Why the discount, for the administrator who approves it (19 Nov 2026). */
+  discountReason?: string | null;
   gctExempt?: boolean | null;
   /**
    * What is paid now. A walk-in must pay in full (left out, it is taken as
@@ -146,6 +148,7 @@ export async function counterSale(
     deliveryMode: 'Counter',
     discountPercent: input.discountPercent ?? 0,
     discountFixedCents: input.discountFixedCents ?? 0,
+    discountReason: input.discountReason ?? null,
     gctExempt: input.gctExempt ?? null,
     paymentMethod: input.method === 'Cheque' || input.method === 'Other'
       ? null : (input.method ?? 'Cash'),
@@ -224,8 +227,8 @@ async function invoiceAndTakePayment(
   );
 
   // The discount and GCT decided on the order are the ones billed.
-  const order = await t.one<{ discount_percent: number; discount_fixed_cents: number; gct_exempt: boolean }>(
-    `SELECT discount_percent, discount_fixed_cents, gct_exempt FROM customer_orders WHERE id = $1`,
+  const order = await t.one<{ discount_percent: number; discount_fixed_cents: number; gct_exempt: boolean; discount_status: string }>(
+    `SELECT discount_percent, discount_fixed_cents, gct_exempt, discount_status FROM customer_orders WHERE id = $1`,
     [args.orderId],
   );
   const invoice = await createInvoice(t, actor, {
@@ -234,6 +237,8 @@ async function invoiceAndTakePayment(
     invoiceDate: args.on ?? null,
     discountPercent: num(order.discount_percent),
     discountFixedCents: num(order.discount_fixed_cents),
+    // Waiting for an administrator: billed in full until approved (19 Nov 2026).
+    discountStatus: order.discount_status === 'Pending' ? 'Pending' : 'Approved',
     gctExempt: order.gct_exempt,
     notes: args.notes,
     lines: lines.map((l) => ({
@@ -471,6 +476,7 @@ export async function recordPastDelivery(
     requestedDeliveryDate: on,
     discountPercent: input.discountPercent ?? 0,
     discountFixedCents: input.discountFixedCents ?? 0,
+    discountReason: input.discountReason ?? null,
     gctExempt: input.gctExempt ?? null,
     paymentMethod: input.method === 'Cheque' || input.method === 'Other' ? null : (input.method ?? 'Cash'),
     notes,

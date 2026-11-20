@@ -40,6 +40,8 @@ export interface PendingDelivery {
   date: string;
   discountPercent: number;
   discountFixedCents: number;
+  /** The order's discount is still waiting for an administrator (19 Nov 2026). */
+  discountPending: boolean;
   gctExempt: boolean;
   lines: Array<InvoiceLineInput & { productName: string; lineTotal: number; bottlesPerCase: number }>;
   subtotalCents: number;
@@ -52,7 +54,7 @@ export async function pendingDeliveries(
   const stops = await t.query<Record<string, unknown>>(
     `SELECT s.id AS stop_id, s.customer_id, c.name AS customer_name, c.invoice_cycle,
             o.id AS order_id, o.order_number, ds.delivery_date::text AS date,
-            o.discount_percent, o.discount_fixed_cents, o.gct_exempt
+            o.discount_percent, o.discount_fixed_cents, o.gct_exempt, o.discount_status
      FROM delivery_stops s
      JOIN delivery_sheets ds ON ds.id = s.delivery_sheet_id
      JOIN customers c ON c.id = s.customer_id
@@ -66,7 +68,7 @@ export async function pendingDeliveries(
     `SELECT NULL AS stop_id, o.customer_id, c.name AS customer_name, c.invoice_cycle,
             o.id AS order_id, o.order_number,
             COALESCE(o.fulfilled_on, o.requested_delivery_date, o.order_date)::text AS date,
-            o.discount_percent, o.discount_fixed_cents, o.gct_exempt
+            o.discount_percent, o.discount_fixed_cents, o.gct_exempt, o.discount_status
      FROM customer_orders o
      JOIN customers c ON c.id = o.customer_id
      -- A delivery recorded after the day (no round, 23 Oct 2026) waits like a collection.
@@ -129,6 +131,7 @@ export async function pendingDeliveries(
       date: r.date as string,
       discountPercent: num(r.discount_percent),
       discountFixedCents: num(r.discount_fixed_cents),
+      discountPending: r.discount_status === 'Pending',
       gctExempt: !!r.gct_exempt,
       lines: priced,
       subtotalCents: priced.reduce((a, l) => a + l.lineTotal, 0),
@@ -237,6 +240,10 @@ export async function raiseCycleInvoices(
         orderIds: [...new Set(items.map((it) => it.orderId))],
         lines: items.flatMap((it) => it.lines),
         discountFixedCents: discount,
+        // Any order's discount still waiting for an administrator: the whole
+        // discount waits, and counts once every one is decided (19 Nov 2026).
+        discountStatus: items.some((it) => it.discountPending
+          && (it.discountPercent > 0 || it.discountFixedCents > 0)) ? 'Pending' : 'Approved',
         gctExempt,
         // A closed week or month is dated its LAST day (Everton, 27 Oct 2026),
         // so October's deliveries are October's sales even though the invoice

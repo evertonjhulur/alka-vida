@@ -200,6 +200,8 @@ export default function NewOrder() {
   const [emptiesBack, setEmptiesBack] = useState('');
   const [discount, setDiscount] = useState('0');
   const [discountAs, setDiscountAs] = useState<'%' | '$'>('%');
+  /** Why the discount: shown to the administrator who approves it (19 Nov 2026). */
+  const [discountWhy, setDiscountWhy] = useState('');
   const [chargeGct, setChargeGct] = useState(true);
   const [note, setNote] = useState('');
   const [noteOpen, setNoteOpen] = useState(false);
@@ -478,6 +480,7 @@ export default function NewOrder() {
     setEmptiesBack('');
     setDiscount('0');
     setDiscountAs('%');
+    setDiscountWhy('');
     setNote('');
     setNoteOpen(false);
     setRepeat(false);
@@ -515,7 +518,8 @@ export default function NewOrder() {
         : 'How many 5-gallon empties did they hand in? Put 0 if none.');
     }
     if (walkInShort) return fail(`A walk-in pays in full: ${money(totals.grandTotal)}. To take part payment, choose their customer account.`);
-    const money_ = { discountPercent: totals.pct, discountFixedCents: totals.fixed, gctExempt: !chargeGct };
+    const money_ = { discountPercent: totals.pct, discountFixedCents: totals.fixed, gctExempt: !chargeGct,
+      discountReason: discountWhy.trim() || null };
     const older_ = openOlder.filter((i) => older.includes(i.invoice_id))
       .map((i) => ({ invoiceId: i.invoice_id, amountCents: Number(i.balance_cents) }));
 
@@ -870,7 +874,7 @@ export default function NewOrder() {
         <section className="panel ns-products" aria-labelledby="ns-lines-h">
           <div className="ns-panel-head">
             <h2 id="ns-lines-h">Products</h2>
-            <span className="small muted">Product, then size.{isAccount ? ' Their prices.' : ' List prices.'}</span>
+            <span className="small muted">Product, then size.{isAccount ? ' Their prices.' : isWalkIn ? ' Walk-in prices.' : ' List prices.'}</span>
           </div>
           <div className="ns-lg ns-lg-head" aria-hidden="true">
             <span className="ns-hide-s">#</span><span>Product</span><span>Size</span><span>Qty</span>
@@ -1019,6 +1023,14 @@ export default function NewOrder() {
             </span>
           </div>
           {totals.discountAmount > 0 && <div className="total-line muted"><span /><span className="num">−{money(totals.discountAmount)}</span></div>}
+          {totals.discountAmount > 0 && !isAdmin && (
+            <div className="notice warn small" style={{ margin: '6px 0' }}>
+              A discount needs an administrator's approval. Until it is approved, the invoice is for the full amount.
+              <input aria-label="Why the discount" placeholder="Why the discount (for the administrator)"
+                     style={{ display: 'block', width: '100%', boxSizing: 'border-box', marginTop: 6 }}
+                     value={discountWhy} onChange={(e) => setDiscountWhy(e.target.value)} />
+            </div>
+          )}
           <div className="total-line">
             <label className="check ns-inline-label">
               <input type="checkbox" checked={chargeGct} onChange={(e) => setChargeGct(e.target.checked)} /> GCT 15%

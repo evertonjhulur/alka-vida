@@ -147,6 +147,22 @@ export default function CustomerForm({
     api.get<Tier[]>('/api/price-tiers').then(setTiers).catch(() => {});
   }, []);
   useEffect(() => { setF(initial); }, [initial]);
+  /** The price list was picked by hand on this new customer, so the type no longer sets it. */
+  const [tierTouched, setTierTouched] = useState(false);
+
+  /**
+   * A NEW customer starts on the price list for their kind (19 Nov 2026):
+   * a person on "Retail", a business on "Corporate" - the same lists the
+   * portal's sign-up uses, found by name, so a renamed "Retail - held" is
+   * left to the customers already on it. Staff can still pick another.
+   */
+  function chooseType(k: 'Corporate' | 'Individual') {
+    const listFor = tiers.find((t) => t.name.trim().toLowerCase() === (k === 'Individual' ? 'retail' : 'corporate'));
+    setF((v) => ({
+      ...v, accountType: k,
+      ...(isNew && !tierTouched && listFor ? { priceTierId: listFor.id } : {}),
+    }));
+  }
 
   const set = <K extends keyof CustomerFormValues>(k: K, v: CustomerFormValues[K]) =>
     setF((cur) => ({ ...cur, [k]: v }));
@@ -180,7 +196,7 @@ export default function CustomerForm({
         <div className="seg" role="group" aria-label="Customer type">
           {([['Corporate', 'A business'], ['Individual', 'A person']] as const).map(([k, label]) => (
             <button key={k} type="button" className={f.accountType === k ? 'active' : ''}
-                    aria-pressed={f.accountType === k} onClick={() => set('accountType', k)}>
+                    aria-pressed={f.accountType === k} onClick={() => chooseType(k)}>
               {label}
             </button>
           ))}
@@ -331,7 +347,7 @@ export default function CustomerForm({
             <div className="row">
               <div className="field">
                 <label htmlFor="cf-tier">Price list</label>
-                <select id="cf-tier" value={f.priceTierId} onChange={(e) => set('priceTierId', e.target.value)}>
+                <select id="cf-tier" value={f.priceTierId} onChange={(e) => { setTierTouched(true); set('priceTierId', e.target.value); }}>
                   <option value="">List price</option>
                   {tiers.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
                 </select>

@@ -32,6 +32,10 @@ export default function Pricing({ session }: { session: Session }) {
   const [showProduct, setShowProduct] = useState(false);
   const [np, setNp] = useState({ ...NEW_PRODUCT });
   const [newTier, setNewTier] = useState('');
+  /** A new price list can start as a copy of another one's rates (19 Nov 2026). */
+  const [copyFrom, setCopyFrom] = useState('');
+  /** The "Move everyone on this list to…" panel, when open. */
+  const [moving, setMoving] = useState<{ from: string; to: string } | null>(null);
   const [brands, setBrands] = useState<Brand[]>([]);
   const [nb, setNb] = useState<{ name: string; type: string }>({ name: '', type: CO_PACK });
 
@@ -76,12 +80,50 @@ export default function Pricing({ session }: { session: Session }) {
     e.preventDefault();
     setBusy(true); setError(null);
     try {
-      await api.post('/api/price-tiers', { name: newTier });
-      setMsg(`Price list "${newTier}" created. Set its rates in the grid below.`);
-      setNewTier('');
+      const r = await api.post<{ ratesCopied: number }>('/api/price-tiers', { name: newTier, copyFrom: copyFrom || null });
+      const src = matrix?.tiers.find((t) => t.id === copyFrom)?.name;
+      setMsg(src
+        ? `Price list "${newTier}" created with ${r.ratesCopied} rates copied from ${src}. Change any rate in the grid below.`
+        : `Price list "${newTier}" created. Set its rates in the grid below.`);
+      setNewTier(''); setCopyFrom('');
       await load();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not create the price list');
+    } finally { setBusy(false); }
+  }
+
+  async function renameTier(t: Tier) {
+    const name = await askText(`Rename the ${t.name} price list`, {
+      label: 'New name', value: t.name, confirmLabel: 'Rename',
+    });
+    if (!name || name.trim() === t.name) return;
+    setBusy(true); setError(null);
+    try {
+      await api.patch(`/api/price-tiers/${t.id}`, { name: name.trim() });
+      setMsg(`${t.name} is now "${name.trim()}". Its customers and rates stay with it.`
+        + (/^(retail|corporate)$/i.test(t.name) ? ` New sign-ups go to the list named "${t.name}", so make a new one with that name if they should keep landing there.` : ''));
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not rename the price list');
+    } finally { setBusy(false); }
+  }
+
+  /** Everyone on one list to another - e.g. ending a held price (19 Nov 2026). */
+  async function moveEveryone() {
+    const t = matrix!.tiers.find((x) => x.id === moving?.from);
+    const to = matrix!.tiers.find((x) => x.id === moving?.to);
+    if (!t || !to) return;
+    if (!(await ask(`Move all ${t.customerCount} customer${t.customerCount === 1 ? '' : 's'} on ${t.name} to ${to.name}? `
+      + 'Inactive customers on it move too. New orders, quotes and standing-order runs use the new prices; '
+      + 'orders already taken keep theirs.', { confirmLabel: `Move them to ${to.name}` }))) return;
+    setBusy(true); setError(null);
+    try {
+      const r = await api.post<{ moved: number }>(`/api/price-tiers/${t.id}/move-customers`, { toTierId: to.id });
+      setMsg(`${r.moved} customer${r.moved === 1 ? '' : 's'} moved from ${t.name} to ${to.name}.`);
+      setMoving(null);
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not move them');
     } finally { setBusy(false); }
   }
 
@@ -322,8 +364,14 @@ export default function Pricing({ session }: { session: Session }) {
           <h2 style={{ marginTop: 0 }}>Price lists</h2>
           <form onSubmit={addTier} className="row" style={{ marginBottom: 0 }}>
             <div className="field" style={{ marginBottom: 0 }}>
-              <input value={newTier} placeholder="e.g. Wholesale"
+              <input value={newTier} placeholder="e.g. Wholesale" aria-label="Name of the new price list"
                      onChange={(e) => setNewTier(e.target.value)} />
+            </div>
+            <div className="field" style={{ marginBottom: 0 }}>
+              <select value={copyFrom} aria-label="Start it as a copy of" onChange={(e) => setCopyFrom(e.target.value)}>
+                <option value="">Start empty</option>
+                {matrix.tiers.map((t) => <option key={t.id} value={t.id}>Copy the rates of {t.name}</option>)}
+              </select>
             </div>
             <button disabled={busy || !newTier.trim()}>Add price list</button>
           </form>
@@ -332,6 +380,12 @@ export default function Pricing({ session }: { session: Session }) {
           {matrix.tiers.map((t) => (
             <span key={t.id} className="chip neutral" style={{ padding: '6px 12px' }}>
               {t.name} — {t.customerCount} customer{t.customerCount === 1 ? '' : 's'}
+              <button type="button" className="link-button" style={{ marginLeft: 8, fontSize: 12, color: 'var(--brand)' }}
+                      disabled={busy} onClick={() => renameTier(t)}>Rename</button>
+              {session.role === 'admin' && t.customerCount > 0 && matrix.tiers.length > 1 && (
+                <button type="button" className="link-button" style={{ marginLeft: 8, fontSize: 12, color: 'var(--brand)' }}
+                        disabled={busy} onClick={() => setMoving({ from: t.id, to: '' })}>Move everyone…</button>
+              )}
               {session.role === 'admin' && t.customerCount === 0 && (
                 <button className="danger-soft"
                         style={{ marginLeft: 8, padding: '1px 7px', fontSize: 12 }}
@@ -343,6 +397,23 @@ export default function Pricing({ session }: { session: Session }) {
             <span className="muted">No price lists yet — everyone pays list price.</span>
           )}
         </div>
+        {moving && (() => {
+          const t = matrix.tiers.find((x) => x.id === moving.from);
+          if (!t) return null;
+          return (
+            <div className="row" style={{ marginTop: 12, alignItems: 'flex-end' }}>
+              <div className="field" style={{ marginBottom: 0 }}>
+                <label htmlFor="move-to">Move everyone on {t.name} to</label>
+                <select id="move-to" value={moving.to} onChange={(e) => setMoving({ ...moving, to: e.target.value })}>
+                  <option value="">Choose a price list…</option>
+                  {matrix.tiers.filter((x) => x.id !== t.id).map((x) => <option key={x.id} value={x.id}>{x.name}</option>)}
+                </select>
+              </div>
+              <button type="button" disabled={busy || !moving.to} onClick={moveEveryone}>Move them</button>
+              <button type="button" className="secondary" disabled={busy} onClick={() => setMoving(null)}>Cancel</button>
+            </div>
+          );
+        })()}
       </div>
 
       <div className="panel">

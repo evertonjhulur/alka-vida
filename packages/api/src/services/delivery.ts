@@ -451,8 +451,9 @@ async function invoiceFromDelivery(
 
   const order = await t.one<{
     discount_percent: number; order_number: string; discount_fixed_cents: number; gct_exempt: boolean;
+    discount_status: string;
   }>(
-    `SELECT discount_percent, order_number, discount_fixed_cents, gct_exempt
+    `SELECT discount_percent, order_number, discount_fixed_cents, gct_exempt, discount_status
      FROM customer_orders WHERE id = $1`, [orderId],
   );
   const invoicedBefore = await t.maybeOne(
@@ -465,6 +466,8 @@ async function invoiceFromDelivery(
     orderIds: [orderId],
     discountPercent: num(order.discount_percent),
     discountFixedCents: invoicedBefore ? 0 : num(order.discount_fixed_cents),
+    // Waiting for an administrator: billed in full until approved (19 Nov 2026).
+    discountStatus: order.discount_status === 'Pending' ? 'Pending' : 'Approved',
     gctExempt: order.gct_exempt,
     notes: invoicedBefore ? `Delivery of ${order.order_number} (the rest)` : `Delivery of ${order.order_number}`,
     lines: lines.map((l) => ({

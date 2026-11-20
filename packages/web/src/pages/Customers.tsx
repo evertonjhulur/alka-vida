@@ -2,6 +2,8 @@ import { useEffect, useState } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { api, type Session } from '../lib/api';
 import { money } from '../lib/format';
+import { downloadCsv, dollars } from '../lib/csv';
+import { SortTh, useSort } from '../components/ListTools';
 import CustomerForm, { BLANK_CUSTOMER, formToPayload, type CustomerFormValues } from '../components/CustomerForm';
 
 interface Customer {
@@ -9,7 +11,29 @@ interface Customer {
   delivery_zone: string | null; route_sequence: number;
   delivery_address: string | null; price_tier: string | null;
   balance_cents: number | null;
+  account_type?: string | null; delivery_days?: string[] | null;
+  invoice_cycle?: string | null; payment_terms?: string | null;
+  gct_exempt?: boolean | null; zone_run_days?: string[] | string | null;
 }
+
+/** The days they are delivered: their own, else their zone's. */
+function deliveryDays(c: Customer): string {
+  if (Array.isArray(c.delivery_days) && c.delivery_days.length) return c.delivery_days.join(', ');
+  if (Array.isArray(c.zone_run_days)) return c.zone_run_days.join(', ');
+  return c.zone_run_days ?? '';
+}
+
+const BILLING: Record<string, string> = { PerDelivery: 'Per delivery', Weekly: 'Weekly', Monthly: 'Monthly' };
+
+/* Sorting by any heading (Everton, 11 Oct and 20 Nov 2026). Contact sorts by phone. */
+const SORT_ON = {
+  name: (c: Customer) => c.name,
+  contact: (c: Customer) => c.phone || c.email,
+  zone: (c: Customer) => c.delivery_zone,
+  route: (c: Customer) => c.route_sequence,
+  tier: (c: Customer) => c.price_tier,
+  balance: (c: Customer) => Number(c.balance_cents ?? 0),
+};
 export default function Customers({ session }: { session: Session }) {
   const [rows, setRows] = useState<Customer[]>([]);
   const navigate = useNavigate();
@@ -33,6 +57,21 @@ export default function Customers({ session }: { session: Session }) {
   const found = needle === '' ? rows : rows.filter((c) => [
     c.name, c.phone, c.email, c.delivery_zone, c.delivery_address, c.price_tier,
   ].some((f) => (f ?? '').toLowerCase().includes(needle)));
+  const { sorted, sort, onSort } = useSort(found, SORT_ON);
+
+  /** The list as found and sorted on screen, for Excel (20 Nov 2026). */
+  function exportList() {
+    const today = new Date().toLocaleDateString('en-CA');
+    downloadCsv(`customers-${today}`, [
+      ['Name', 'Phone', 'Email', 'Delivery address', 'Zone', 'Delivery days', 'Route #',
+        'Customer type', 'Price tier', 'Billing', 'Payment terms', 'GCT exempt', 'Balance'],
+      ...sorted.map((c) => [
+        c.name, c.phone, c.email, c.delivery_address, c.delivery_zone, deliveryDays(c), c.route_sequence,
+        c.account_type, c.price_tier ?? 'List price', BILLING[c.invoice_cycle ?? ''] ?? c.invoice_cycle,
+        c.payment_terms, c.gct_exempt ? 'Yes' : 'No', dollars(c.balance_cents ?? 0),
+      ]),
+    ]);
+  }
 
   async function load() {
     setRows(await api.get<Customer[]>('/api/customers'));
@@ -131,17 +170,29 @@ export default function Customers({ session }: { session: Session }) {
                     : `${rows.length} customer${rows.length === 1 ? '' : 's'}`}
                 </div>
               </div>
+              <div className="field" style={{ marginBottom: 0, marginLeft: 'auto' }}>
+                <button type="button" className="secondary" disabled={sorted.length === 0}
+                        title="Downloads the customers shown, in the order shown"
+                        onClick={exportList}>
+                  Export to Excel ({sorted.length})
+                </button>
+              </div>
             </div>
 
             <table>
               <thead>
                 <tr>
-                  <th>Name</th><th>Contact</th><th>Zone</th><th>Route #</th>
-                  <th>Tier</th><th className="num">Balance</th><th />
+                  <SortTh label="Name" k="name" sort={sort} onSort={onSort} />
+                  <SortTh label="Contact" k="contact" sort={sort} onSort={onSort} />
+                  <SortTh label="Zone" k="zone" sort={sort} onSort={onSort} />
+                  <SortTh label="Route #" k="route" sort={sort} onSort={onSort} />
+                  <SortTh label="Tier" k="tier" sort={sort} onSort={onSort} />
+                  <SortTh label="Balance" k="balance" sort={sort} onSort={onSort} className="num" />
+                  <th />
                 </tr>
               </thead>
               <tbody>
-                {found.map((c) => (
+                {sorted.map((c) => (
                   <tr key={c.id}>
                     <td>
                       {/* The name opens the record. A customer is something you

@@ -33,6 +33,8 @@ export interface CreateOrderInput {
   discountPercent?: number;
   /** A discount as an amount rather than a percentage (wins over percent). */
   discountFixedCents?: Cents;
+  /** Why the discount, for whoever approves it (19 Nov 2026). */
+  discountReason?: string | null;
   /** No GCT on this order. Defaults to the customer's own exemption. */
   gctExempt?: boolean | null;
   /** One of the customer's extra delivery addresses; blank = main address. */
@@ -115,7 +117,16 @@ export async function resolveLines(
   t: Queryable,
   customerId: string,
   lines: readonly OrderLineInput[],
-  opts: { alreadyOnIt?: readonly string[] } = {},
+  opts: {
+    alreadyOnIt?: readonly string[];
+    /**
+     * Who typed the prices (19 Nov 2026): office staff may not charge LESS
+     * than the customer's own price for a line - that is a discount, and
+     * discounts need an administrator. Left out where the price was already
+     * authorised (a quote being turned into an order, a standing order's run).
+     */
+    pricedBy?: Actor | null;
+  } = {},
 ): Promise<ResolvedLine[]> {
   if (lines.length === 0) throw new RuleViolation('an order must have at least one line');
 
@@ -161,6 +172,20 @@ export async function resolveLines(
         )
       : null;
 
+    // Below their own price, typed by office staff: refused (19 Nov 2026).
+    if (opts.pricedBy && opts.pricedBy.role !== 'admin') {
+      const usualCase = num(special?.price_per_case_cents ?? tierPrice?.price_per_case_cents ?? product.price_per_case_cents);
+      const usualBottle = num(special?.price_per_bottle_cents ?? tierPrice?.price_per_bottle_cents ?? product.price_per_bottle_cents);
+      const cased = num(product.bottles_per_case) > 0;
+      const typed = cased ? line.pricePerCaseCents : line.pricePerBottleCents;
+      const usual = cased ? usualCase : usualBottle;
+      if (typed !== undefined && typed !== null && num(typed) < usual) {
+        throw new RuleViolation(
+          `${product.name} is ${(usual / 100).toFixed(2)} for ${customer.name}. Only an administrator can `
+          + 'charge less. Leave their price and add a discount instead: it goes to an administrator to approve.');
+      }
+    }
+
     // Precedence: explicit override > customer special price > customer tier
     // rate > product list price.
     const pricePerCaseCents = num(line.pricePerCaseCents
@@ -203,6 +228,36 @@ function readableDay(iso: string | null | undefined): string {
     : d.toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short', timeZone: 'UTC' });
 }
 
+/**
+ * Put an order's discount under Needs a decision (19 Nov 2026). Any earlier
+ * request for the same order still waiting is closed: the latest wins.
+ */
+export async function requestOrderDiscount(
+  t: Queryable, actor: Actor,
+  a: { orderId: string; orderNumber: string; customerId: string; pct: number; fixed: number;
+       amountCents: number; reason: string | null },
+): Promise<string> {
+  await closeOrderDiscountRequests(t, actor, a.orderId, 'replaced by a later change to the discount');
+  const r = await t.one<{ id: string }>(
+    `INSERT INTO approval_requests
+       (request_type, entity_type, entity_id, entity_label, customer_id,
+        amount_cents, discount_percent, discount_fixed_cents, reason, requested_by_id)
+     VALUES ('Discount','CustomerOrder',$1,$2,$3,$4,$5,$6,$7,$8) RETURNING id`,
+    [a.orderId, a.orderNumber, a.customerId, a.amountCents, a.pct, a.fixed,
+     a.reason?.trim() || `Discount on order ${a.orderNumber}`, actor.id]);
+  return r.id;
+}
+
+/** Close an order's waiting discount request(s) without deciding them. */
+export async function closeOrderDiscountRequests(
+  t: Queryable, actor: Actor, orderId: string, note: string,
+): Promise<void> {
+  await t.query(
+    `UPDATE approval_requests SET status = 'Rejected', reviewed_by_id = $2, reviewed_date = now(), review_notes = $3
+     WHERE request_type = 'Discount' AND entity_type = 'CustomerOrder' AND entity_id = $1 AND status = 'Pending'`,
+    [orderId, actor.id, note]);
+}
+
 export async function createOrder(
   db: Db,
   actor: Actor,
@@ -213,7 +268,9 @@ export async function createOrder(
     const empties = input.emptiesExpected == null || (input.emptiesExpected as unknown) === ''
       ? null : Math.max(0, Math.round(Number(input.emptiesExpected) || 0));
     const lines = await resolveLines(t, input.customerId,
-      await withBottleShortfall(t, input.lines, empties));
+      await withBottleShortfall(t, input.lines, empties),
+      // A quote's prices and a standing order's run were authorised already.
+      { pricedBy: input.quotationId || input.parentRecurringId ? null : actor });
 
     const cust = await t.one<{ gct_exempt: boolean }>(
       `SELECT gct_exempt FROM customers WHERE id = $1`, [input.customerId],
@@ -239,6 +296,16 @@ export async function createOrder(
     const totals = computeTotals(lines, pct, !gctExempt, fixed);
     const orderNumber = await nextNumber(t, 'order_number_seq', 'SO');
 
+    // A discount needs an administrator (Everton, 19 Nov 2026). A standing
+    // order's run carries its schedule's decision; an admin's own is approved.
+    const hasDiscount = pct > 0 || fixed > 0;
+    const inherited = input.parentRecurringId
+      ? (await t.maybeOne<{ discount_status: string }>(
+          `SELECT discount_status FROM customer_orders WHERE id = $1`, [input.parentRecurringId]))?.discount_status ?? null
+      : null;
+    const discountStatus = !hasDiscount ? 'Approved'
+      : inherited ?? (actor.role === 'admin' ? 'Approved' : 'Pending');
+
     const order = await t.one<{ id: string }>(
       `INSERT INTO customer_orders
          (order_number, customer_id, order_date, requested_delivery_date, notes,
@@ -246,11 +313,13 @@ export async function createOrder(
           source, delivery_mode, discount_percent,
           subtotal_cents, discount_amount_cents, gct_cents, grand_total_cents,
           discount_fixed_cents, gct_exempt, address_id, quotation_id,
-          customer_po, needs_review, empties_expected, pay_when, review_reason, seen_at)
+          customer_po, needs_review, empties_expected, pay_when, review_reason, seen_at,
+          discount_status)
        VALUES ($1,$2,COALESCE($3::date, business_today()),$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,
                $17,$18,$19,$20,$21,$22,$23,$24,$25,
                -- An online order is new to the office until someone sees it.
-               CASE WHEN $10 = 'Portal' THEN NULL ELSE now() END)
+               CASE WHEN $10 = 'Portal' THEN NULL ELSE now() END,
+               $26)
        RETURNING id`,
       [
         orderNumber, input.customerId, input.orderDate ?? null,
@@ -264,8 +333,17 @@ export async function createOrder(
         input.payWhen === 'Now' || input.payWhen === 'On delivery' || input.payWhen === 'On account'
           ? input.payWhen : null,
         input.needsReview ? (input.reviewReason === 'SpecialDay' ? 'SpecialDay' : 'SameDay') : null,
+        discountStatus,
       ],
     );
+    if (discountStatus === 'Pending' && !inherited) {
+      await requestOrderDiscount(t, actor, {
+        orderId: order.id, orderNumber, customerId: input.customerId,
+        pct, fixed, amountCents: totals.discountAmount, reason: input.discountReason ?? null,
+      });
+      warnings.push(`The discount on ${orderNumber} is waiting for an administrator to approve it. `
+        + 'Until then its invoice is for the full amount.');
+    }
 
     for (const l of lines) {
       await t.query(
@@ -752,7 +830,7 @@ export async function editOrder(
           `SELECT product_id FROM order_line_items WHERE order_id = $1`, [orderId])).map((r) => r.product_id)
       : [];
     const lines = changes.lines
-      ? await resolveLines(t, order.customer_id, changes.lines, { alreadyOnIt: onIt })
+      ? await resolveLines(t, order.customer_id, changes.lines, { alreadyOnIt: onIt, pricedBy: actor })
       : null;
 
     if (lines) {
@@ -803,6 +881,25 @@ export async function editOrder(
        changes.notes ?? null, totals.subtotal, totals.discountAmount,
        totals.gct, totals.grandTotal, fixed, gctExempt],
     );
+
+    // A changed discount needs an administrator again (19 Nov 2026); taking
+    // it off, or an admin's own change, settles it.
+    const discountChanged = discountPercent !== num(order.discount_percent) || fixed !== num(order.discount_fixed_cents);
+    if (discountChanged) {
+      const hasDiscount = discountPercent > 0 || fixed > 0;
+      if (!hasDiscount || actor.role === 'admin') {
+        await t.query(`UPDATE customer_orders SET discount_status = 'Approved' WHERE id = $1`, [orderId]);
+        await closeOrderDiscountRequests(t, actor, orderId,
+          hasDiscount ? `discount set by ${actor.name}, an administrator` : 'discount taken off');
+      } else {
+        await t.query(`UPDATE customer_orders SET discount_status = 'Pending' WHERE id = $1`, [orderId]);
+        await requestOrderDiscount(t, actor, {
+          orderId, orderNumber: order.order_number, customerId: order.customer_id,
+          pct: discountPercent, fixed, amountCents: totals.discountAmount, reason: null,
+        });
+        warnings.push(`The discount on ${order.order_number} is waiting for an administrator to approve it.`);
+      }
+    }
 
     if (changes.customerPo !== undefined) {
       await t.query(`UPDATE customer_orders SET customer_po = $2 WHERE id = $1`,

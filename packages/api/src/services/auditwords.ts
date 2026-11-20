@@ -319,6 +319,17 @@ function sentence(r: Row, L: Lookups): string {
       // A run deleted or edited (11 Nov 2026) writes its own sentence.
       if ((d.deleted || d.edited) && typeof d.summary === 'string') return `${d.summary}${why}`;
       break;
+    case 'PriceTier': {
+      // Price lists (19 Nov 2026): renamed, copied, everyone moved.
+      const name = r.entity_label ?? 'a price list';
+      if (d.renamedFrom) return `Price list "${d.renamedFrom}" renamed to "${name}".`;
+      if (d.movedCustomersTo) return `${d.movedCount} customer(s) moved from the ${name} price list to ${d.movedCustomersTo}.`;
+      if (r.action === 'create') return d.copiedFrom
+        ? `Price list "${name}" created as a copy of ${d.copiedFrom} (${d.ratesCopied} rates).`
+        : `Price list "${name}" created.`;
+      if (r.action === 'delete') return `Price list "${name}" deleted.`;
+      break;
+    }
     default: break;
   }
   return '';

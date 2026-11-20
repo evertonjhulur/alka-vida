@@ -17,7 +17,7 @@ import type { PickerCustomer } from '../components/CustomerPicker';
  */
 
 interface Approval {
-  id: string; requestType: string; entityLabel: string | null;
+  id: string; requestType: string; entityLabel: string | null; entityType?: string;
   customerName: string | null; amountCents: number;
   discountPercent: number | null; reason: string | null;
   payload: Record<string, number | string> | null;
@@ -270,6 +270,11 @@ export default function Decisions({ session }: { session: Session }) {
         <div className="muted small">
           {r.reason ? `“${r.reason}” · ` : ''}asked by {r.requestedByName ?? 'someone'}, {when(r.requestedDate)}
         </div>
+        {r.requestType === 'Discount' && r.entityType === 'CustomerOrder' && (
+          <div className="small">A discount put on the order by office staff. Its invoice is for the full amount
+            until it is approved; approving it applies it there (and to a standing order's runs). Not approving
+            it takes it off the order.</div>
+        )}
         {r.requestType === 'StopCorrection' && (
           <div className="small">Change to: {describe(r.payload)}</div>
         )}

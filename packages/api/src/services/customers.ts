@@ -236,6 +236,18 @@ export async function createCustomer(
        RETURNING id`,
       values,
     );
+    // A walk-in put on file pays what every walk-in pays: the shared Cash
+    // Walk-In record's price list (Everton, 19 Nov 2026 - walk-ins stay on the
+    // held Retail prices with the rest until changed). Without this they had
+    // no list, which is the J$600 list price.
+    if (input.isWalkIn && !cols.price_tier_id) {
+      await t.query(
+        `UPDATE customers SET price_tier_id = (
+           SELECT price_tier_id FROM customers
+           WHERE is_walk_in AND active AND id <> $1 AND price_tier_id IS NOT NULL
+           ORDER BY (lower(name) = 'cash walk-in') DESC, created_at LIMIT 1)
+         WHERE id = $1`, [row.id]);
+    }
     await audit(t, actor, 'create', 'Customer', row.id, String(cols.name), {});
 
     const warnings: string[] = [];
@@ -449,6 +461,21 @@ export async function setSpecialPrice(
         throw new RuleViolation('a price must be zero or more');
       }
       const cased = num(p.bottles_per_case) > 0;
+      // Below their normal price is a standing discount, and discounts need
+      // an administrator (Everton, 19 Nov 2026).
+      if (actor.role !== 'admin') {
+        const usual = await t.one<{ c: number; b: number; who: string }>(
+          `SELECT COALESCE(pl.price_per_case_cents, pr.price_per_case_cents) AS c,
+                  COALESCE(pl.price_per_bottle_cents, pr.price_per_bottle_cents) AS b, c.name AS who
+           FROM customers c JOIN products pr ON pr.id = $2
+           LEFT JOIN price_lists pl ON pl.price_tier_id = c.price_tier_id AND pl.product_id = pr.id
+           WHERE c.id = $1`, [customerId, productId]);
+        const normal = num(cased ? usual.c : usual.b);
+        if (priceCents < normal) {
+          throw new RuleViolation(`${p.name} is ${(normal / 100).toFixed(2)} for ${usual.who} on their price list. `
+            + 'Only an administrator can set a special price below that.');
+        }
+      }
       await t.query(
         `INSERT INTO customer_prices (customer_id, product_id, price_per_case_cents, price_per_bottle_cents)
          VALUES ($1,$2,$3,$4)
