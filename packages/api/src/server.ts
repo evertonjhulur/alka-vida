@@ -1794,6 +1794,20 @@ export async function buildServer(db: Db) {
   app.put('/api/customers/:id/opening-bottles', { preHandler: allow('admin') },
     async (req) => bottles.setOpeningBottles(db, actorOf(req), (req.params as { id: string }).id, req.body as never));
 
+  /** Every line that moved a customer's bottle balance, with the running balance (20 Nov 2026). */
+  app.get('/api/customers/:id/bottle-moves', { preHandler: allow('admin', 'user', 'driver') },
+    async (req) => bottles.bottleMoves(db, (req.params as { id: string }).id));
+
+  /** Set what a customer actually holds of our bottles: the difference is recorded as an adjustment. */
+  app.post('/api/customers/:id/bottle-adjustments', { preHandler: allow('admin') },
+    async (req) => bottles.adjustBottleBalance(db, actorOf(req), (req.params as { id: string }).id, req.body as never));
+
+  app.post('/api/customers/:id/bottle-adjustments/:moveId/remove', { preHandler: allow('admin') },
+    async (req) => {
+      const p = req.params as { id: string; moveId: string };
+      return bottles.removeBottleAdjustment(db, actorOf(req), p.id, p.moveId, (req.body ?? {}) as never);
+    });
+
   /* ---------------- stock counts / audit ---------------- */
 
   app.get('/api/audits', { preHandler: allow('admin', 'user') },

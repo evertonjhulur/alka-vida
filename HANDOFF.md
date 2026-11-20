@@ -3312,3 +3312,32 @@ the customer list to be downloadable.
   else the zone's run days), Route #, Customer type, Price tier (or "List
   price"), Billing, Payment terms, GCT exempt, Balance (dollars).
 - Active customers only (listSelectableCustomers); web tsc + build clean.
+
+## Bottle movement per customer + adjust bottle balance (20 Nov 2026)
+
+Everton: "Can I see the bottle movement per client under their bottle
+details? also ability to edit their bottle balance if needs be?"
+- Customer page > Bottles tab: new "Bottle movement" table (components/
+  BottleHistory.tsx), newest first, latest 25 then "Show all": date, what
+  (opening balance / delivered on a round / counter or collected order /
+  empties collected / bought outright / balance adjusted, with lost and
+  bought noted), order, full out, empties back, change, ours with them after
+  (running balance). Export to Excel of the whole history.
+- "Adjust balance" (admins only): they actually have N, as at a date (not
+  future), reason required. Records the difference as one row in
+  customer_bottle_moves with `adjusted` (+/-) and created_by (migration
+  044_bottle_adjustments.sql; numbered after his 043_order_discount_approval).
+  Counts only towards what they hold of ours: not a delivery/return/loss/
+  sale, does not move the empties at the plant. Audit log 'adjust'.
+  Adjustment rows have a red Remove (admins, optional why; audit 'delete').
+- bottles.ts: CUSTOMER_MOVES carries `adjusted`; every holding sum adds it
+  (poolFigures, customerHoldings, bottleAccount, which also returns
+  `adjusted` for the window). New bottleMoves, adjustBottleBalance,
+  removeBottleAdjustment. Routes: GET /api/customers/:id/bottle-moves,
+  POST /api/customers/:id/bottle-adjustments,
+  POST /api/customers/:id/bottle-adjustments/:moveId/remove.
+- Bottles tab summary and the on-screen statement show an "Adjusted" figure
+  when there is one. The opening-balance form stays as it was.
+- Office staff can see the history but not adjust (same as opening balances).
+- Tests: bottleadjust.test.ts (4). API 694 pass on his local copy (which had
+  the 19 Nov discount-approval work not yet on GitHub). Walked on a local copy.

@@ -15,7 +15,7 @@ interface Entry {
 /** The 5-gallon bottles this customer is holding, over the same window. */
 interface BottleAccount {
   openingHolding: number; delivered: number; returned: number;
-  lost: number; closingHolding: number;
+  lost: number; closingHolding: number; adjusted?: number;
   /** Bought outright (fewer empties than full bottles): theirs now. */
   sold?: number;
 }
@@ -251,6 +251,11 @@ export function StatementView(
               {(bottles.sold ?? 0) > 0 && (
                 <div className="age">
                   <b>Bought (theirs)</b><span>−{bottles.sold}</span>
+                </div>
+              )}
+              {(bottles.adjusted ?? 0) !== 0 && (
+                <div className="age">
+                  <b>Adjusted</b><span>{bottles.adjusted! > 0 ? '+' : '−'}{Math.abs(bottles.adjusted!)}</span>
                 </div>
               )}
               <div className="age">

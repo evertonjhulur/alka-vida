@@ -18,12 +18,25 @@ import { looksLikeEmail, splitAddresses } from './compose.ts';
  * the survivor. The merged-away record is DEACTIVATED, never deleted, so its
  * history stays intact and auditable - it simply can no longer be selected
  * for new orders.
+ *
+ * Also moved (Everton, 20 Nov 2026 - Rose Green into "Maureen Williams/Rose
+ * Green": Maureen pays, both addresses on the one account, deliveries go
+ * separately): their extra addresses, 5-gallon bottle moves (so the bottle
+ * balance comes too), collections, reminders, website orders, sign-up
+ * applications, email and message history, and any special prices or own
+ * brands the survivor does not already have.
+ *
+ * With keepAddress (the default), the merged customer's main address becomes
+ * a delivery address on the survivor, labelled with their name, carrying
+ * their zone, route number, phone, map pin and delivery instructions; their
+ * orders that went to that main address - standing orders included - now go
+ * to it, so their deliveries carry on to the same door on their own round.
  */
 export async function mergeCustomers(
   db: Db,
   actor: Actor,
-  args: { survivorId: string; mergedId: string; reason?: string },
-): Promise<{ survivorId: string; moved: Record<string, number> }> {
+  args: { survivorId: string; mergedId: string; reason?: string; keepAddress?: boolean },
+): Promise<{ survivorId: string; moved: Record<string, number>; addressId: string | null }> {
   requireRole(actor, 'admin');
   if (args.survivorId === args.mergedId) {
     throw new RuleViolation('cannot merge a customer into itself');
@@ -33,14 +46,58 @@ export async function mergeCustomers(
     const survivor = await t.maybeOne<{ name: string; active: boolean }>(
       `SELECT name, active FROM customers WHERE id = $1`, [args.survivorId],
     );
-    const merged = await t.maybeOne<{ name: string; active: boolean }>(
-      `SELECT name, active FROM customers WHERE id = $1`, [args.mergedId],
+    const merged = await t.maybeOne<{
+      name: string; active: boolean; merged_into_id: string | null;
+      delivery_address: string | null; address_line1: string | null; address_line2: string | null;
+      city: string | null; parish: string | null; delivery_zone: string | null; route_sequence: number | null;
+      contact_person: string | null; phone: string | null; delivery_instructions: string | null;
+      lat: number | null; lng: number | null; location_accuracy_m: number | null; location_source: string | null;
+      location_set_at: string | null; location_set_by: string | null;
+      geocoded_text: string | null; geocoded_at: string | null;
+    }>(
+      `SELECT name, active, merged_into_id, delivery_address, address_line1, address_line2, city, parish,
+              delivery_zone, route_sequence, contact_person, phone, delivery_instructions,
+              lat, lng, location_accuracy_m, location_source, location_set_at, location_set_by,
+              geocoded_text, geocoded_at
+       FROM customers WHERE id = $1`, [args.mergedId],
     );
     if (!survivor) throw new RuleViolation('survivor customer not found');
     if (!merged) throw new RuleViolation('customer to merge not found');
     if (!survivor.active) throw new RuleViolation('the survivor must be an active customer');
+    if (merged.merged_into_id) throw new RuleViolation(`${merged.name} has already been merged into another customer`);
 
     const moved: Record<string, number> = {};
+
+    // Their main address, kept as a delivery address on the survivor.
+    let addressId: string | null = null;
+    const line1 = (merged.address_line1 ?? '').trim() || (merged.delivery_address ?? '').trim();
+    if (args.keepAddress !== false && line1) {
+      const row = await t.one<{ id: string }>(
+        `INSERT INTO customer_addresses
+           (customer_id, label, address_line1, address_line2, city, parish, is_billing, is_delivery,
+            delivery_zone, route_sequence, contact_person, phone, delivery_instructions,
+            lat, lng, location_accuracy_m, location_source, location_set_at, location_set_by,
+            geocoded_text, geocoded_at)
+         VALUES ($1,$2,$3,$4,$5,$6,false,true,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
+         RETURNING id`,
+        [args.survivorId, merged.name, line1,
+         merged.address_line1 ? merged.address_line2 : null,
+         merged.address_line1 ? merged.city : null,
+         merged.address_line1 ? merged.parish : null,
+         merged.delivery_zone, merged.route_sequence ?? 0,
+         (merged.contact_person ?? '').trim() || merged.name, merged.phone, merged.delivery_instructions,
+         merged.lat, merged.lng, merged.location_accuracy_m, merged.location_source,
+         merged.location_set_at, merged.location_set_by, merged.geocoded_text, merged.geocoded_at],
+      );
+      addressId = row.id;
+      const pointed = await t.query<{ id: string }>(
+        `UPDATE customer_orders SET address_id = $2
+         WHERE customer_id = $1 AND address_id IS NULL AND delivery_mode = 'Delivery' RETURNING id`,
+        [args.mergedId, addressId],
+      );
+      moved.orders_to_their_address = pointed.length;
+    }
+
     const reassign = async (table: string, column = 'customer_id') => {
       const rows = await t.query<{ id: string }>(
         `UPDATE ${table} SET ${column} = $1 WHERE ${column} = $2 RETURNING id`,
@@ -55,6 +112,50 @@ export async function mergeCustomers(
     await reassign('delivery_stops');
     await reassign('quotations');
     await reassign('approval_requests');
+    await reassign('customer_addresses');
+    // Only one opening bottle balance per customer: when both had one, theirs
+    // is added into the survivor's, so the combined account holds both.
+    const openings = await t.query<{ id: string; customer_id: string; delivered: number; moved_on: string }>(
+      `SELECT id, customer_id, delivered, moved_on::text AS moved_on FROM customer_bottle_moves
+       WHERE opening AND customer_id IN ($1, $2)`, [args.survivorId, args.mergedId]);
+    const theirs = openings.find((o) => o.customer_id === args.mergedId);
+    const ours = openings.find((o) => o.customer_id === args.survivorId);
+    if (theirs && ours) {
+      await t.query(
+        `UPDATE customer_bottle_moves
+         SET delivered = delivered + $2,
+             note = concat_ws(' · ', NULLIF(note, ''), $3::text)
+         WHERE id = $1`,
+        [ours.id, num(theirs.delivered),
+         `+${num(theirs.delivered)} from ${merged.name}'s opening balance (merged ${businessToday()})`]);
+      await t.query(`DELETE FROM customer_bottle_moves WHERE id = $1`, [theirs.id]);
+      moved.opening_bottles_added = num(theirs.delivered);
+    }
+    await reassign('customer_bottle_moves');
+    await reassign('round_collections');
+    await reassign('order_reminders');
+    await reassign('website_orders');
+    await reassign('customer_applications');
+    await reassign('auto_emails');
+    // Message history: moved unless the survivor got the same message too.
+    moved.broadcast_recipients = (await t.query<{ id: string }>(
+      `UPDATE broadcast_recipients m SET customer_id = $1
+       WHERE m.customer_id = $2
+         AND NOT EXISTS (SELECT 1 FROM broadcast_recipients s
+                         WHERE s.customer_id = $1 AND s.broadcast_id = m.broadcast_id)
+       RETURNING m.id`, [args.survivorId, args.mergedId])).length;
+
+    // Special prices and own brands: only where the survivor has none of its own.
+    moved.customer_prices = (await t.query<{ id: string }>(
+      `UPDATE customer_prices m SET customer_id = $1
+       WHERE m.customer_id = $2
+         AND NOT EXISTS (SELECT 1 FROM customer_prices s WHERE s.customer_id = $1 AND s.product_id = m.product_id)
+       RETURNING m.id`, [args.survivorId, args.mergedId])).length;
+    moved.customer_brands = (await t.query<{ brand_id: string }>(
+      `UPDATE customer_brands m SET customer_id = $1
+       WHERE m.customer_id = $2
+         AND NOT EXISTS (SELECT 1 FROM customer_brands s WHERE s.customer_id = $1 AND s.brand_id = m.brand_id)
+       RETURNING m.brand_id`, [args.survivorId, args.mergedId])).length;
 
     // Deactivated, not deleted. History stays; new orders cannot select it.
     await t.query(
@@ -71,10 +172,11 @@ export async function mergeCustomers(
       survivorName: survivor.name,
       reason: args.reason ?? null,
       recordsMoved: moved,
+      keptAddressAs: addressId,
       deleted: false,
     });
 
-    return { survivorId: args.survivorId, moved };
+    return { survivorId: args.survivorId, moved, addressId };
   });
 }
 

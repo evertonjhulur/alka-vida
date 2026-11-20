@@ -15,6 +15,7 @@ import { downloadCsv, dollars } from '../lib/csv';
 import { buildTransactions, type Tx } from '../lib/transactions';
 import { PaymentFixPanel, PaymentMenu, usePaymentFix, viewPaymentReceipt } from '../components/PaymentMenu';
 import { gctTotal } from '../lib/gct';
+import BottleHistory from '../components/BottleHistory';
 
 interface Customer {
   id: string; name: string; phone: string; email: string;
@@ -59,6 +60,8 @@ interface PickCustomer { id: string; name: string }
 interface Bottles {
   openingHolding: number; delivered: number; returned: number;
   lost: number; closingHolding: number; sold?: number;
+  /** Balance adjustments (20 Nov 2026), + or -. */
+  adjusted?: number;
   /** Opening balance of our bottles entered for them (28 Oct 2026). */
   openingEntered?: { quantity: number; asOf: string } | null;
 }
@@ -217,6 +220,8 @@ export default function CustomerRecord({ session }: { session: Session }) {
 
   const [h, setH] = useState<History | null>(null);
   const [bottles, setBottles] = useState<Bottles | null>(null);
+  /** Bumped when something on the Bottles tab changes, so its history reloads. */
+  const [bottleVersion, setBottleVersion] = useState(0);
   const [schedules, setSchedules] = useState<Schedule[]>([]);
   const [onAccountCents, setOnAccountCents] = useState(0);
   const [error, setError] = useState<string | null>(null);
@@ -1371,7 +1376,7 @@ export default function CustomerRecord({ session }: { session: Session }) {
       {tab === 'bottles' && (
         <div className="panel">
           <h2 style={{ marginTop: 0 }}>5-gallon bottles</h2>
-          {bottles && (bottles.closingHolding !== 0 || bottles.delivered > 0 || bottles.returned > 0 || bottles.openingEntered) ? (
+          {bottles && (bottles.closingHolding !== 0 || bottles.delivered > 0 || bottles.returned > 0 || bottles.openingEntered || bottles.adjusted) ? (
             <>
               <div className="aging" style={{ marginBottom: 12 }}>
                 {bottles.openingEntered && (
@@ -1381,12 +1386,16 @@ export default function CustomerRecord({ session }: { session: Session }) {
                 <div className="age"><b>Empties back</b><span>{bottles.returned}</span></div>
                 <div className="age"><b>Lost or damaged</b><span>{bottles.lost}</span></div>
                 {Number(bottles.sold) > 0 && <div className="age"><b>Bought (theirs)</b><span>{bottles.sold}</span></div>}
+                {Number(bottles.adjusted ?? 0) !== 0 && (
+                  <div className="age"><b>Adjusted</b><span>{Number(bottles.adjusted) > 0 ? '+' : '−'}{Math.abs(Number(bottles.adjusted))}</span></div>
+                )}
                 <div className="age"><b>Ours with them now</b><span>{bottles.closingHolding}</span></div>
               </div>
               <p className="muted small" style={{ margin: 0 }}>
                 {bottles.openingEntered
                   ? <>Their opening balance of our bottles as at {when(bottles.openingEntered.asOf)}, plus every delivery recorded since, less the empties back. </>
                   : <>From every delivery recorded for them. </>}
+                {Number(bottles.adjusted ?? 0) !== 0 && <>Adjustments are corrections entered by an administrator. </>}
                 Bottles lost or damaged are a business loss and are never charged to the customer. Bottles they bought are
                 theirs and are not counted. The statement shows the same count for any date range.{' '}
                 <Link to="/bottle-pool">Bottle pool</Link>
@@ -1398,13 +1407,20 @@ export default function CustomerRecord({ session }: { session: Session }) {
                           takeCard={takeCard} gctExempt={!!c.gct_exempt}
                           onSaved={() => {
                             api.get<Bottles>(`/api/customers/${customerId}/bottles`).then(setBottles).catch(() => undefined);
+                            setBottleVersion((v) => v + 1);
                             load().catch(() => undefined);
                           }} />
           )}
           {session.role === 'admin' && (
             <OpeningBottlesForm customerId={c.id} current={bottles?.openingEntered ?? null}
-                                onSaved={() => api.get<Bottles>(`/api/customers/${customerId}/bottles`).then(setBottles).catch(() => undefined)} />
+                                onSaved={() => {
+                                  api.get<Bottles>(`/api/customers/${customerId}/bottles`).then(setBottles).catch(() => undefined);
+                                  setBottleVersion((v) => v + 1);
+                                }} />
           )}
+          <BottleHistory customerId={c.id} customerName={c.name} isAdmin={session.role === 'admin'}
+                         held={bottles?.closingHolding ?? 0} version={bottleVersion}
+                         onChanged={() => api.get<Bottles>(`/api/customers/${customerId}/bottles`).then(setBottles).catch(() => undefined)} />
         </div>
       )}
 

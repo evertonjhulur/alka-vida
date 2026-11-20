@@ -46,6 +46,9 @@ export default function Customers({ session }: { session: Session }) {
 
   const [survivor, setSurvivor] = useState('');
   const [merged, setMerged] = useState('');
+  /** Keep the merged customer's address as a delivery address (20 Nov 2026). */
+  const [keepAddress, setKeepAddress] = useState(true);
+  const [confirmMerge, setConfirmMerge] = useState(false);
 
   const [search, setSearch] = useState('');
 
@@ -108,9 +111,19 @@ export default function Customers({ session }: { session: Session }) {
     setBusy(true);
     setError(null);
     try {
-      await api.post('/api/customers/merge', { survivorId: survivor, mergedId: merged });
-      setMsg('Merged. All history moved to the surviving record; the other was deactivated, not deleted.');
-      setSurvivor(''); setMerged('');
+      const keepName = rows.find((c) => c.id === survivor)?.name ?? 'the surviving record';
+      const goneName = rows.find((c) => c.id === merged)?.name ?? 'the other record';
+      const r = await api.post<{ addressId: string | null; moved: Record<string, number> }>(
+        '/api/customers/merge', { survivorId: survivor, mergedId: merged, keepAddress });
+      const bottles = r.moved.opening_bottles_added
+        ? ` Their opening bottle balance of ${r.moved.opening_bottles_added} was added to ${keepName}'s.` : '';
+      setMsg(`Merged ${goneName} into ${keepName}. Their orders, invoices, payments and bottles moved across`
+        + (r.addressId
+          ? `, and their address is now a delivery address on ${keepName}'s account named "${goneName}"`
+            + (r.moved.orders_to_their_address ? ` (${r.moved.orders_to_their_address} of their orders go there)` : '')
+          : '')
+        + `. ${goneName} was deactivated, not deleted.${bottles}`);
+      setSurvivor(''); setMerged(''); setConfirmMerge(false); setKeepAddress(true);
       await load();
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Could not merge');
@@ -228,14 +241,15 @@ export default function Customers({ session }: { session: Session }) {
         <div className="panel">
           <h2 style={{ marginTop: 0 }}>Merge duplicate customers</h2>
           <p className="muted small">
-            All orders, invoices and payments move to the survivor. The other record
-            is deactivated so its history stays intact.
+            All orders (standing orders too), invoices, payments, credit and 5-gallon bottles move to the
+            survivor. The other record is deactivated so its history stays intact. Use it for duplicates, or
+            to bring one person's deliveries under the account of whoever pays.
           </p>
           <div className="row">
             <div className="field" style={{ flex: '1 1 240px' }}>
               <label htmlFor="surv">Keep this record</label>
               <select id="surv" value={survivor} style={{ width: '100%' }}
-                      onChange={(e) => setSurvivor(e.target.value)}>
+                      onChange={(e) => { setSurvivor(e.target.value); setConfirmMerge(false); }}>
                 <option value="">Select…</option>
                 {rows.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
               </select>
@@ -243,16 +257,39 @@ export default function Customers({ session }: { session: Session }) {
             <div className="field" style={{ flex: '1 1 240px' }}>
               <label htmlFor="merg">Merge away this one</label>
               <select id="merg" value={merged} style={{ width: '100%' }}
-                      onChange={(e) => setMerged(e.target.value)}>
+                      onChange={(e) => { setMerged(e.target.value); setConfirmMerge(false); }}>
                 <option value="">Select…</option>
                 {rows.filter((c) => c.id !== survivor)
                      .map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
               </select>
             </div>
             <div className="field">
-              <button className="danger-soft" disabled={busy || !survivor || !merged} onClick={merge}>Merge</button>
+              <button className="danger-soft" disabled={busy || !survivor || !merged}
+                      onClick={() => setConfirmMerge(true)}>Merge</button>
             </div>
           </div>
+          {merged && (
+            <label className="small" style={{ display: 'flex', gap: 8, alignItems: 'flex-start', marginTop: 4 }}>
+              <input type="checkbox" checked={keepAddress} onChange={(e) => setKeepAddress(e.target.checked)} />
+              <span>
+                Keep {rows.find((c) => c.id === merged)?.name}'s address on the account as a delivery address,
+                with their zone, pin and phone; their orders keep going there on its own round.
+                <span className="muted"> Untick for a true duplicate at the same address.</span>
+              </span>
+            </label>
+          )}
+          {confirmMerge && survivor && merged && (
+            <div className="notice" style={{ marginTop: 10 }}>
+              <p style={{ marginTop: 0 }}>
+                Merge <strong>{rows.find((c) => c.id === merged)?.name}</strong> into{' '}
+                <strong>{rows.find((c) => c.id === survivor)?.name}</strong>? This can't be undone from the screen.
+              </p>
+              <div className="row" style={{ gap: 8 }}>
+                <button className="danger-soft" disabled={busy} onClick={merge}>Yes, merge</button>
+                <button className="secondary" disabled={busy} onClick={() => setConfirmMerge(false)}>Cancel</button>
+              </div>
+            </div>
+          )}
         </div>
       )}
     </>

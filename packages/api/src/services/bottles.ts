@@ -117,7 +117,7 @@ export async function poolFigures(db: Queryable): Promise<PoolFigures> {
      ORDER BY p.name`,
   );
   const acc = await db.one<{ holding: number; lost: number; sold: number }>(
-    `SELECT COALESCE(SUM(m.opening + m.delivered - m.returned - m.lost - m.sold), 0)::int AS holding,
+    `SELECT COALESCE(SUM(m.opening + m.delivered - m.returned - m.lost - m.sold + m.adjusted), 0)::int AS holding,
             COALESCE(SUM(m.lost), 0)::int AS lost,
             COALESCE(SUM(m.sold), 0)::int AS sold
      FROM (${CUSTOMER_MOVES}) m`,
@@ -259,13 +259,13 @@ export async function scrapJugs(
 const CUSTOMER_MOVES = `
   SELECT s.customer_id, sh.delivery_date AS day,
          s.bottles_delivered_full AS delivered, s.bottles_empties_picked_up AS returned,
-         s.bottles_lost_damaged AS lost, 0 AS sold, 0 AS opening
+         s.bottles_lost_damaged AS lost, 0 AS sold, 0 AS opening, 0 AS adjusted
   FROM delivery_stops s JOIN delivery_sheets sh ON sh.id = s.delivery_sheet_id
   WHERE s.stop_outcome = 'Delivered'
   UNION ALL
   SELECT m.customer_id, m.moved_on,
          CASE WHEN m.opening THEN 0 ELSE m.delivered END, m.returned, m.lost, m.sold,
-         CASE WHEN m.opening THEN m.delivered ELSE 0 END
+         CASE WHEN m.opening THEN m.delivered ELSE 0 END, m.adjusted
   FROM customer_bottle_moves m`;
 
 /**
@@ -304,17 +304,19 @@ export async function customerHoldings(db: Db) {
             COALESCE(SUM(s.lost), 0)::int        AS lost,
             COALESCE(SUM(s.sold), 0)::int        AS sold,
             COALESCE(SUM(s.opening), 0)::int     AS opening,
+            COALESCE(SUM(s.adjusted), 0)::int    AS adjusted,
             (COALESCE(SUM(s.opening), 0)
              + COALESCE(SUM(s.delivered), 0)
              - COALESCE(SUM(s.returned), 0)
              - COALESCE(SUM(s.lost), 0)
-             - COALESCE(SUM(s.sold), 0))::int    AS holding,
+             - COALESCE(SUM(s.sold), 0)
+             + COALESCE(SUM(s.adjusted), 0))::int AS holding,
             MAX(s.day)::text AS last_moved
      FROM customers c
      JOIN (${CUSTOMER_MOVES}) s ON s.customer_id = c.id
      GROUP BY c.id, c.name, c.phone, c.delivery_zone
      HAVING COALESCE(SUM(s.delivered), 0) > 0 OR COALESCE(SUM(s.returned), 0) > 0
-         OR COALESCE(SUM(s.opening), 0) > 0
+         OR COALESCE(SUM(s.opening), 0) > 0 OR COALESCE(SUM(s.adjusted), 0) <> 0
      ORDER BY holding DESC, c.name`,
   );
 }
@@ -362,6 +364,8 @@ export async function bottleAccount(
   lost: number;
   /** Bought outright: theirs, so not part of what they hold of ours. */
   sold: number;
+  /** Balance adjustments in the period (20 Nov 2026), + or -. */
+  adjusted: number;
   closingHolding: number;
   /** The opening balance entered for them (28 Oct 2026), if any: part of openingHolding when it falls in or before the window. */
   openingEntered: { quantity: number; asOf: string } | null;
@@ -370,13 +374,13 @@ export async function bottleAccount(
   const to = opts.to ?? null;
 
   const row = await db.one<{
-    opening: string; delivered: string; returned: string; lost: string; sold: string; closing: string;
+    opening: string; delivered: string; returned: string; lost: string; sold: string; adjusted: string; closing: string;
   }>(
     `SELECT
        -- everything BEFORE the window, so the period reads as a movement
        (COALESCE(SUM(
          CASE WHEN $2::date IS NOT NULL AND m.day < $2::date
-              THEN m.opening + m.delivered - m.returned - m.lost - m.sold ELSE 0 END), 0)
+              THEN m.opening + m.delivered - m.returned - m.lost - m.sold + m.adjusted ELSE 0 END), 0)
        -- an opening balance dated inside the window is brought forward too:
        -- it is what they had, not something delivered in the period
         + COALESCE(SUM(CASE WHEN w.inWindow THEN m.opening ELSE 0 END), 0))::text AS opening,
@@ -384,10 +388,11 @@ export async function bottleAccount(
        COALESCE(SUM(CASE WHEN w.inWindow THEN m.returned ELSE 0 END), 0)::text AS returned,
        COALESCE(SUM(CASE WHEN w.inWindow THEN m.lost ELSE 0 END), 0)::text AS lost,
        COALESCE(SUM(CASE WHEN w.inWindow THEN m.sold ELSE 0 END), 0)::text AS sold,
+       COALESCE(SUM(CASE WHEN w.inWindow THEN m.adjusted ELSE 0 END), 0)::text AS adjusted,
        -- what they hold now, counting everything up to the end of the window
        COALESCE(SUM(
          CASE WHEN $3::date IS NULL OR m.day <= $3::date
-              THEN m.opening + m.delivered - m.returned - m.lost - m.sold ELSE 0 END), 0)::text AS closing
+              THEN m.opening + m.delivered - m.returned - m.lost - m.sold + m.adjusted ELSE 0 END), 0)::text AS closing
      FROM (${CUSTOMER_MOVES}) m
      CROSS JOIN LATERAL (
        SELECT ($2::date IS NULL OR m.day >= $2::date)
@@ -407,6 +412,7 @@ export async function bottleAccount(
     returned: num(row.returned),
     lost: num(row.lost),
     sold: num(row.sold),
+    adjusted: num(row.adjusted),
     closingHolding: num(row.closing),
     openingEntered: entered ? { quantity: num(entered.delivered), asOf: entered.moved_on } : null,
   };
@@ -664,4 +670,157 @@ export async function uploadOpeningBottles(db: Db, actor: Actor, input: OpeningU
     }
   });
   return { ...summary, done: results.length };
+}
+
+/* ------------------------------------------------------------------ */
+/* Movement history and balance adjustments (Everton, 20 Nov 2026)     */
+/* ------------------------------------------------------------------ */
+
+export interface BottleMove {
+  /** 'stop' rows are deliveries on a round; 'move' rows everything else. */
+  source: 'stop' | 'move';
+  id: string;
+  day: string;
+  kind: 'Opening' | 'Delivery' | 'Counter' | 'Collection' | 'Bought' | 'Adjustment' | 'Other';
+  what: string;
+  detail: string | null;
+  orderId: string | null;
+  orderNumber: string | null;
+  delivered: number; returned: number; lost: number; sold: number;
+  /** What this line did to the bottles of ours they hold. */
+  change: number;
+  /** Ours with them after this line. */
+  balance: number;
+  by: string | null;
+}
+
+/**
+ * Every line that moved one customer's balance of our 5-gallon bottles,
+ * oldest first, with the running balance: the same figures the Bottles tab
+ * and statement add up, one row at a time.
+ */
+export async function bottleMoves(db: Queryable, customerId: string): Promise<BottleMove[]> {
+  const rows = await db.query<{
+    source: 'stop' | 'move'; id: string; day: string; delivered: number; returned: number; lost: number;
+    sold: number; opening: boolean; adjusted: number; order_id: string | null; order_number: string | null;
+    reference: string | null; note: string | null; zone: string | null; at: string | null; by: string | null;
+  }>(
+    `SELECT 'stop' AS source, s.id::text AS id, sh.delivery_date::text AS day,
+            s.bottles_delivered_full AS delivered, s.bottles_empties_picked_up AS returned,
+            s.bottles_lost_damaged AS lost, 0 AS sold, false AS opening, 0 AS adjusted,
+            s.order_id::text AS order_id, o.order_number, NULL::text AS reference, NULL::text AS note,
+            sh.zone, COALESCE(s.settled_at, sh.created_at)::text AS at, NULL::text AS by
+     FROM delivery_stops s
+     JOIN delivery_sheets sh ON sh.id = s.delivery_sheet_id
+     LEFT JOIN customer_orders o ON o.id = s.order_id
+     WHERE s.customer_id = $1 AND s.stop_outcome = 'Delivered'
+       AND (s.bottles_delivered_full <> 0 OR s.bottles_empties_picked_up <> 0 OR s.bottles_lost_damaged <> 0)
+     UNION ALL
+     SELECT 'move', m.id::text, m.moved_on::text, m.delivered, m.returned, m.lost, m.sold, m.opening, m.adjusted,
+            m.order_id::text, o.order_number, m.reference, m.note, NULL, m.created_at::text, u.name
+     FROM customer_bottle_moves m
+     LEFT JOIN customer_orders o ON o.id = m.order_id
+     LEFT JOIN users u ON u.id = m.created_by
+     WHERE m.customer_id = $1`,
+    [customerId],
+  );
+
+  const sorted = [...rows].sort((a, b) => (a.day < b.day ? -1 : a.day > b.day ? 1
+    : (a.opening ? 0 : 1) - (b.opening ? 0 : 1) || String(a.at ?? '').localeCompare(String(b.at ?? ''))));
+
+  let balance = 0;
+  return sorted.map((r) => {
+    const delivered = num(r.delivered); const returned = num(r.returned);
+    const lost = num(r.lost); const sold = num(r.sold); const adjusted = num(r.adjusted);
+    let kind: BottleMove['kind']; let what: string; let detail: string | null = null;
+    let change: number;
+    if (r.opening) {
+      kind = 'Opening'; what = 'Opening balance'; change = delivered; detail = r.note;
+      return finish(0, 0, 0, 0);
+    }
+    change = delivered - returned - lost - sold + adjusted;
+    if (r.source === 'stop') {
+      kind = 'Delivery'; what = `Delivered${r.zone ? `, ${r.zone} round` : ''}`;
+    } else if (adjusted !== 0) {
+      kind = 'Adjustment'; what = 'Balance adjusted'; detail = r.note;
+    } else if (sold > 0) {
+      kind = 'Bought'; what = 'Bought outright (theirs now)'; detail = r.note;
+    } else if ((r.reference ?? '').startsWith('Empties collected')) {
+      kind = 'Collection'; what = 'Empties collected'; detail = r.reference;
+    } else if (r.order_id) {
+      kind = 'Counter'; what = r.note ?? 'At the counter / collected order';
+    } else {
+      kind = 'Other'; what = r.reference ?? 'Bottle movement'; detail = r.note;
+    }
+    return finish(delivered, returned, lost, sold);
+
+    function finish(d: number, ret: number, l: number, so: number): BottleMove {
+      balance += change;
+      return {
+        source: r.source, id: r.id, day: r.day, kind, what, detail,
+        orderId: r.order_id, orderNumber: r.order_number,
+        delivered: d, returned: ret, lost: l, sold: so, change, balance,
+        by: r.by,
+      };
+    }
+  });
+}
+
+/**
+ * Set what a customer actually holds of our bottles, as at a day: records
+ * the difference from what is on record as an adjustment. Administrators
+ * only, with a reason. Does not move the empties at the plant.
+ */
+export async function adjustBottleBalance(
+  db: Db, actor: Actor, customerId: string,
+  args: { holding: unknown; asOf?: string | null; reason?: string | null },
+): Promise<{ was: number; now: number; change: number; asOf: string }> {
+  requireRole(actor, 'admin');
+  const target = wholeBottles(args.holding);
+  if (target === null) throw new RuleViolation('enter how many of our bottles they have as a whole number, 0 or more');
+  const asOf = (args.asOf ?? '').trim() || businessToday();
+  if (!ISO_DAY.test(asOf)) throw new RuleViolation('the "as at" date is not a date');
+  if (asOf > businessToday()) throw new RuleViolation('an adjustment cannot be dated in the future');
+  const reason = (args.reason ?? '').trim();
+  if (!reason) throw new RuleViolation('a reason is required when adjusting a bottle balance');
+  return db.tx(async (t) => {
+    const c = await t.maybeOne<{ id: string; name: string }>(
+      `SELECT id, name FROM customers WHERE id = $1 FOR UPDATE`, [customerId]);
+    if (!c) throw new RuleViolation('customer not found');
+    const held = await t.one<{ n: string }>(
+      `SELECT COALESCE(SUM(m.opening + m.delivered - m.returned - m.lost - m.sold + m.adjusted), 0)::text AS n
+       FROM (${CUSTOMER_MOVES}) m WHERE m.customer_id = $1 AND m.day <= $2::date`, [customerId, asOf]);
+    const was = num(held.n);
+    const change = target - was;
+    if (change === 0) return { was, now: target, change: 0, asOf };
+    const move = await t.one<{ id: string }>(
+      `INSERT INTO customer_bottle_moves (customer_id, moved_on, adjusted, reference, note, created_by)
+       VALUES ($1, $2::date, $3, 'Balance adjusted', $4, $5) RETURNING id`,
+      [customerId, asOf, change, reason, actor.id],
+    );
+    await audit(t, actor, 'adjust', 'Customer', c.id, c.name, {
+      bottleBalanceWas: was, bottleBalanceNow: target, change, asOf, reason, moveId: move.id,
+    });
+    return { was, now: target, change, asOf };
+  });
+}
+
+/** Take back a balance adjustment entered in error. Administrators only. */
+export async function removeBottleAdjustment(
+  db: Db, actor: Actor, customerId: string, moveId: string, args: { reason?: string | null } = {},
+): Promise<{ removed: number }> {
+  requireRole(actor, 'admin');
+  return db.tx(async (t) => {
+    const m = await t.maybeOne<{ adjusted: number; moved_on: string; note: string | null; name: string }>(
+      `SELECT m.adjusted, m.moved_on::text AS moved_on, m.note, c.name
+       FROM customer_bottle_moves m JOIN customers c ON c.id = m.customer_id
+       WHERE m.id = $1 AND m.customer_id = $2 FOR UPDATE OF m`, [moveId, customerId]);
+    if (!m || num(m.adjusted) === 0) throw new RuleViolation('that is not a balance adjustment on this customer');
+    await t.query(`DELETE FROM customer_bottle_moves WHERE id = $1`, [moveId]);
+    await audit(t, actor, 'delete', 'Customer', customerId, m.name, {
+      bottleAdjustmentRemoved: num(m.adjusted), asOf: m.moved_on, originalReason: m.note,
+      reason: (args.reason ?? '').trim() || null,
+    });
+    return { removed: num(m.adjusted) };
+  });
 }
