@@ -19,7 +19,7 @@
 import type { Db, Queryable } from '../db/index.ts';
 import type { Actor } from './core.ts';
 import { audit, businessToday, getSetting, num, requireRole, siteUrl } from './core.ts';
-import { RuleViolation, addDays } from '@alka/shared';
+import { RuleViolation, addDays, composeAddress } from '@alka/shared';
 import { whatsappDigits, whatsappLink } from './messaging.ts';
 import { mailConfigured, sendMail } from './documents.ts';
 import { customerEmail, customerWants } from './emailkit.ts';
@@ -27,8 +27,20 @@ import { customerEmail, customerWants } from './emailkit.ts';
 /** Longest reminder template (point 8): one WhatsApp message, readable on a phone. */
 export const MAX_TEMPLATE = 500;
 
-export const DEFAULT_TEMPLATE =
-  'Good day {name}, our truck is in {zone} {when}. {ask} Reply here or order online: {link}';
+/**
+ * Everton's wording (25 Nov 2026): the place(s) the truck is coming to and
+ * the date rather than the zone, which many customers don't know; signed
+ * with the sender's first name. Line breaks are kept.
+ */
+export const DEFAULT_TEMPLATE = [
+  'Good day {name}, it\'s {staff} from Alka Vida.',
+  '',
+  'Our truck will be in your area {when}, delivering to {place}. {ask}',
+  '',
+  'Please reply here with your order, or order online: {link}',
+  '',
+  'If you\'ve already sent in your order, thank you! You\'re all set and we\'ll see you then.',
+].join('\n');
 
 const WEEKDAY = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const MONTH = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
@@ -68,6 +80,8 @@ export interface ReminderRow {
   name: string;
   contactPerson: string | null;
   zone: string | null;
+  /** The addresses due that day, as the message names them ("Head office, 12 Hope Road, Kingston 6"). */
+  places: string[];
   phone: string | null;
   whatsapp: string | null;
   email: string | null;
@@ -115,14 +129,49 @@ async function usualOrder(t: Queryable, customerId: string): Promise<{ text: str
   return { text: parts.length ? parts.join(', ') : null, on: last.on_day };
 }
 
+/**
+ * Fill the blanks. Spaces left doubled by an empty blank are tidied, but line
+ * breaks stay (25 Nov 2026), at most one blank line in a row.
+ */
 export function fillTemplate(template: string, v: Record<string, string>): string {
-  return template.replace(/\{(\w+)\}/g, (m, k: string) => (k in v ? v[k] : m)).replace(/\s{2,}/g, ' ').trim();
+  return template
+    .replace(/\r\n?/g, '\n')
+    .replace(/\{(\w+)\}/g, (m, k: string) => (k in v ? v[k] : m))
+    .split('\n').map((l) => l.replace(/[ \t]{2,}/g, ' ').trim()).join('\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+/** "A", "A and B", "A, B and C". */
+export function joinPlaces(list: readonly string[]): string {
+  if (list.length <= 1) return list[0] ?? 'your address';
+  return `${list.slice(0, -1).join(', ')} and ${list[list.length - 1]}`;
+}
+
+/** "Head office, 12 Hope Road, Kingston 6"; just the address with no label; the label alone with no address. */
+function placeWords(label: string | null, address: string | null): string {
+  const l = label?.trim() || '';
+  const a = address?.trim() || '';
+  if (l && a) return `${l}, ${a}`;
+  return l || a || 'your address';
+}
+
+/** Whoever sends the reminder signs it with their first name. */
+function firstName(actor: Actor | null | undefined): string {
+  const n = String(actor?.name ?? '').trim().split(/\s+/)[0];
+  return n || 'the team';
 }
 
 /**
  * Who to remind for a delivery day (default: tomorrow), with their message.
+ *
+ * By address (25 Nov 2026). A customer's main address is due on their own
+ * delivery days, or, with none set, the days their zone's round runs. An
+ * extra delivery address is due on the days ticked on it. An address with an
+ * order for that day is not asked about again. A customer with any address
+ * still to ask about gets ONE message naming every such address.
  */
-export async function remindersFor(db: Db, opts: { date?: string | null } = {}) {
+export async function remindersFor(db: Db, opts: { date?: string | null; actor?: Actor | null } = {}) {
   const today = businessToday();
   const date = reminderDay(opts.date);
   const wd = weekdayOf(date);
@@ -135,33 +184,65 @@ export async function remindersFor(db: Db, opts: { date?: string | null } = {}) 
   const customers = await db.query<{
     id: string; name: string; contact_person: string | null; delivery_zone: string | null;
     phone: string | null; whatsapp: string | null; email: string | null; service_emails: boolean;
-    balance_cents: number;
+    balance_cents: number; address_label: string | null; delivery_address: string | null;
+    main_due: boolean; main_ordered: boolean;
   }>(
     `SELECT c.id, c.name, c.contact_person, c.delivery_zone, c.phone, c.whatsapp, c.email,
-            c.service_emails, COALESCE(b.balance_cents, 0)::bigint AS balance_cents
+            c.service_emails, COALESCE(b.balance_cents, 0)::bigint AS balance_cents,
+            c.address_label, c.delivery_address,
+            -- Their own delivery days, or (none set) the days their zone's round runs.
+            (CASE WHEN cardinality(c.delivery_days) > 0 THEN $2 = ANY(c.delivery_days)
+                  ELSE $2 = ANY(COALESCE(z.run_days, '{}')) END) AS main_due,
+            EXISTS (
+              SELECT 1 FROM customer_orders o
+              WHERE o.customer_id = c.id AND o.status <> 'Cancelled' AND o.delivery_mode <> 'Counter'
+                AND o.requested_delivery_date = $1::date
+                AND (o.address_id IS NULL OR NOT EXISTS (
+                  SELECT 1 FROM customer_addresses x WHERE x.id = o.address_id AND x.is_delivery
+                    AND $2 = ANY(x.delivery_days)))) AS main_ordered
      FROM customers c
      LEFT JOIN delivery_zones z ON z.name = c.delivery_zone
      LEFT JOIN customer_balances b ON b.customer_id = c.id
      WHERE c.active AND NOT c.is_walk_in
-       -- Their own delivery days, or (none set) the days their zone's round runs.
-       AND (CASE WHEN cardinality(c.delivery_days) > 0 THEN $2 = ANY(c.delivery_days)
-                 ELSE $2 = ANY(COALESCE(z.run_days, '{}')) END)
-       -- Not already ordered for that day.
-       AND NOT EXISTS (
-         SELECT 1 FROM customer_orders o
-         WHERE o.customer_id = c.id AND o.status <> 'Cancelled'
-           AND o.delivery_mode <> 'Counter' AND o.requested_delivery_date = $1::date)
      ORDER BY c.delivery_zone NULLS LAST, c.route_sequence, c.name`,
     [date, wd],
   );
+
+  // Extra delivery addresses due that day with no order going there yet.
+  const extras = await db.query<{
+    customer_id: string; label: string; address_line1: string | null; address_line2: string | null;
+    city: string | null; parish: string | null;
+  }>(
+    `SELECT ca.customer_id, ca.label, ca.address_line1, ca.address_line2, ca.city, ca.parish
+     FROM customer_addresses ca
+     WHERE ca.active AND ca.is_delivery AND $2 = ANY(ca.delivery_days)
+       AND NOT EXISTS (
+         SELECT 1 FROM customer_orders o
+         WHERE o.address_id = ca.id AND o.status <> 'Cancelled' AND o.delivery_mode <> 'Counter'
+           AND o.requested_delivery_date = $1::date)
+     ORDER BY ca.route_sequence, ca.label`,
+    [date, wd],
+  );
+  const extrasOf = new Map<string, string[]>();
+  for (const a of extras) {
+    const line = composeAddress({ addressLine1: a.address_line1, addressLine2: a.address_line2, city: a.city, parish: a.parish });
+    const list = extrasOf.get(a.customer_id) ?? [];
+    list.push(placeWords(a.label, line));
+    extrasOf.set(a.customer_id, list);
+  }
 
   const sent = await db.query<{ customer_id: string; channel: string; sent_at: string }>(
     `SELECT customer_id, channel, sent_at FROM order_reminders WHERE for_date = $1::date AND ok
      ORDER BY sent_at`, [date],
   );
 
+  const staff = firstName(opts.actor);
   const rows: ReminderRow[] = [];
   for (const c of customers) {
+    const places: string[] = [];
+    if (c.main_due && !c.main_ordered) places.push(placeWords(c.address_label, c.delivery_address));
+    places.push(...(extrasOf.get(c.id) ?? []));
+    if (places.length === 0) continue;
     const usual = await usualOrder(db, c.id);
     const message = fillTemplate(template, {
       name: c.contact_person?.trim() || c.name,
@@ -169,6 +250,8 @@ export async function remindersFor(db: Db, opts: { date?: string | null } = {}) 
       zone: c.delivery_zone ?? 'your area',
       when,
       day: dayWords(date),
+      place: joinPlaces(places),
+      staff,
       ask: usual.text ? `Would you like your usual ${usual.text}?` : 'Would you like us to bring you some water?',
       usual: usual.text ?? 'order',
       link: `${siteUrl()}/#/portal/order`,
@@ -180,6 +263,7 @@ export async function remindersFor(db: Db, opts: { date?: string | null } = {}) 
       name: c.name,
       contactPerson: c.contact_person,
       zone: c.delivery_zone,
+      places,
       phone: c.phone,
       whatsapp: whatsappDigits(wa),
       email: c.email?.trim() || null,
@@ -235,20 +319,21 @@ export async function emailReminders(
   requireRole(actor, 'admin', 'user');
   if (!mailConfigured()) throw new RuleViolation('email is not set up, so reminders can only go by WhatsApp');
   if (!String(date ?? '').trim()) throw new RuleViolation('which delivery day are these reminders for?');
-  const list = await remindersFor(db, { date });
+  const list = await remindersFor(db, { date, actor });
   const out = { sent: 0, skipped: 0, failed: [] as Array<{ name: string; reason: string }> };
   for (const r of list.rows.filter((x) => customerIds.includes(x.customerId))) {
     if (!r.email || !(await customerWants(db, r.customerId, 'service'))) { out.skipped += 1; continue; }
     try {
       const mail = await customerEmail(db, r.customerId, 'service', {
-        preheader: `Our truck is in ${r.zone ?? 'your area'} ${list.when}`,
-        heading: `Delivering in ${r.zone ?? 'your area'} ${list.when}`,
-        intro: r.message.replace(/\s*Reply here or order online:.*$/i, ''),
+        preheader: `Our truck will be in your area ${list.when}`,
+        heading: `Delivering to you ${list.when}`,
+        // The online-order link is the button; the words stay as the office set them.
+        intro: r.message.replace(/[ \t]*(?:Please reply here[^\n]*?|Reply here)[^\n]*order online:\s*\S+/i, '').replace(/\n{3,}/g, '\n\n').trim(),
         button: { label: 'Order now', url: `${siteUrl()}/#/portal/order` },
         outro: 'Or simply reply to this email with what you would like.',
       });
       await sendMail({
-        to: r.email, subject: `Alka Vida: delivering in ${r.zone ?? 'your area'} ${list.when}`,
+        to: r.email, subject: `Alka Vida: delivering to you ${list.when}`,
         text: mail.text, html: mail.html, headers: mail.headers,
       });
       await db.query(

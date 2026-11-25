@@ -808,6 +808,8 @@ export async function editOrder(
     customerPo?: string | null;
     /** Change where it goes: one of their addresses, or '' / null for the main one. */
     addressId?: string | null;
+    /** Switch between delivery and collection (25 Nov 2026). */
+    deliveryMode?: 'Delivery' | 'Pickup';
   },
 ): Promise<{ subtotalCents: Cents; gctCents: Cents; grandTotalCents: Cents; warnings: string[] }> {
   requireRole(actor, 'admin', 'user');
@@ -835,6 +837,48 @@ export async function editOrder(
     }
 
     const warnings: string[] = [];
+
+    /*
+     * Delivery <-> collection (Everton, 25 Nov 2026: "I can't update an order
+     * for collection if it was marked for delivery and vice versa"). Checked
+     * before anything is written, so a refusal changes nothing.
+     */
+    const newMode = changes.deliveryMode && changes.deliveryMode !== order.delivery_mode
+      ? changes.deliveryMode : null;
+    if (changes.deliveryMode && !['Delivery', 'Pickup'].includes(changes.deliveryMode)) {
+      throw new RuleViolation('an order is either delivered or collected');
+    }
+    if (newMode) {
+      if (order.delivery_mode === 'Counter') {
+        throw new RuleViolation('a counter sale went out at the counter; it cannot become a delivery or a collection');
+      }
+      if (order.needs_review) {
+        throw new RuleViolation(`${order.order_number} is waiting for an administrator to approve its day under `
+          + 'Needs a decision. Settle that first, then change how it goes out');
+      }
+      if (newMode === 'Pickup') {
+        const onVan = await t.maybeOne<{ zone: string; day: string }>(
+          `SELECT ds.zone, ds.delivery_date::text AS day
+           FROM delivery_stops st JOIN delivery_sheets ds ON ds.id = st.delivery_sheet_id
+           WHERE st.order_id = $1 AND st.stop_outcome = 'Pending' AND ds.status = 'Open' AND ds.started_at IS NOT NULL
+           LIMIT 1`, [orderId]);
+        if (onVan) {
+          throw new RuleViolation(`${order.order_number} is on the ${onVan.zone} round for ${onVan.day}, which has `
+            + 'already started, so the water may be on the truck. Take it off that round first');
+        }
+      } else {
+        const day = (changes.requestedDeliveryDate ?? order.requested_delivery_date ?? '').slice(0, 10);
+        const today = businessToday();
+        if (!day) throw new RuleViolation('pick the day to deliver it');
+        if (day < today) throw new RuleViolation(`${day} has passed: pick the day to deliver it`);
+        const rule = await sameDayCheck(t, actor, order.customer_id, 'Delivery', day);
+        if (rule.needsReview) {
+          throw new RuleViolation(`it is after the ${rule.cutoff} cut-off, so a delivery today needs an `
+            + 'administrator. Pick another day, or ask an administrator to change it');
+        }
+      }
+    }
+
     // A line already on the order can stay even if its brand was unlinked since.
     const onIt = changes.lines
       ? (await t.query<{ product_id: string }>(
@@ -930,6 +974,37 @@ export async function editOrder(
       await t.query(`UPDATE customer_orders SET address_id = $2 WHERE id = $1`, [orderId, addressId]);
     }
 
+    let modeNote: { from: string; to: string; round?: string | null } | null = null;
+    if (newMode === 'Pickup') {
+      // Off any round that has not started, and no delivery address.
+      const stop = await t.maybeOne<{ id: string; zone: string; day: string }>(
+        `SELECT st.id, ds.zone, ds.delivery_date::text AS day
+         FROM delivery_stops st JOIN delivery_sheets ds ON ds.id = st.delivery_sheet_id
+         WHERE st.order_id = $1 AND st.stop_outcome = 'Pending' AND ds.status = 'Open' LIMIT 1`, [orderId]);
+      if (stop) await t.query(`DELETE FROM delivery_stops WHERE id = $1`, [stop.id]);
+      await t.query(
+        `UPDATE customer_orders SET delivery_mode = 'Pickup', address_id = NULL,
+           off_round_at = NULL, off_round_note = NULL WHERE id = $1`, [orderId]);
+      addressId = null;
+      modeNote = { from: 'Delivery', to: 'Collection', round: stop ? `${stop.zone} round, ${stop.day}` : null };
+      warnings.push(`${order.order_number} is now a collection${stop ? `, taken off the ${stop.zone} round for ${stop.day}` : ''}.`);
+    } else if (newMode === 'Delivery') {
+      await t.query(`UPDATE customer_orders SET delivery_mode = 'Delivery' WHERE id = $1`, [orderId]);
+      const day = (changes.requestedDeliveryDate ?? order.requested_delivery_date ?? '').slice(0, 10);
+      const placed = await placeOnDeliverySheet(t, orderId, order.customer_id, day, addressId);
+      warnings.push(...placed.warnings);
+      let round: string | null = null;
+      if (placed.sheetId) {
+        const to = await t.one<{ zone: string; day: string }>(
+          `SELECT zone, delivery_date::text AS day FROM delivery_sheets WHERE id = $1`, [placed.sheetId]);
+        round = `${to.zone} round, ${to.day}`;
+        warnings.push(`${order.order_number} is now a delivery, on the ${to.zone} round for ${to.day}.`);
+      } else {
+        warnings.push(`${order.order_number} is now a delivery but is not on a round yet; it shows under Deliveries with no round.`);
+      }
+      modeNote = { from: 'Collection', to: 'Delivery', round };
+    }
+
     // Keep the driver's stop description in step with the change.
     const summary = await summariseOrderLines(t, orderId);
     await t.query(
@@ -952,7 +1027,7 @@ export async function editOrder(
     // For the audit log (27 Oct 2026): a moved order says from where to where.
     let movedFrom: string | null = null;
     let movedTo: string | null = null;
-    if ((dateMoved || addressMoved) && order.delivery_mode === 'Delivery' && !order.needs_review) {
+    if ((dateMoved || addressMoved) && order.delivery_mode === 'Delivery' && !newMode && !order.needs_review) {
       const current = await t.maybeOne<{ id: string; started: boolean; zone: string; day: string }>(
         `SELECT st.id, (ds.started_at IS NOT NULL) AS started, ds.zone, ds.delivery_date::text AS day
          FROM delivery_stops st JOIN delivery_sheets ds ON ds.id = st.delivery_sheet_id
@@ -987,6 +1062,7 @@ export async function editOrder(
       grandTotalCents: totals.grandTotal,
       ...(dateMoved ? { deliveryDateFrom: String(order.requested_delivery_date ?? '').slice(0, 10) || null, deliveryDateTo: newDate } : {}),
       ...(movedFrom || movedTo ? { roundFrom: movedFrom, roundTo: movedTo } : {}),
+      ...(modeNote ? { howFrom: modeNote.from, howTo: modeNote.to, round: modeNote.round ?? null } : {}),
     });
 
     return {

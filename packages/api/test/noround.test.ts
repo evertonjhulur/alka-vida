@@ -49,6 +49,10 @@ const stopOf = async (orderId: string) => (await f.db.one<{ id: string; delivery
 
 before(async () => {
   f = await setupFixture();
+  // The live start day (migration 049) would hide the dated cases below as
+  // the calendar moves on; these tests count from long ago, and the
+  // "going forward" test sets its own start day.
+  await f.db.query(`UPDATE system_settings SET value = '2000-01-01' WHERE key = 'no_round_from'`);
   for (const name of ['Kingston', 'Boulevard']) {
     const has = await f.db.maybeOne(`SELECT 1 FROM delivery_zones WHERE name = $1`, [name]);
     if (!has) await createZone(f.db, f.admin, { name });
@@ -141,6 +145,66 @@ describe('Put on its round', () => {
       customerId: f.customerId, deliveryMode: 'Pickup', lines: [{ productId: f.casedProductId, cases: 1 }],
     });
     await assert.rejects(putOnRound(f.db, f.office, p.id), /not a delivery/);
+  });
+});
+
+describe('Going forward only (25 Nov 2026)', () => {
+  test('orders due before the start day are not counted, unless taken off a round on or after it', async () => {
+    const old = await order(f.customerId);
+    await removeStop(f.db, f.office, (await stopOf(old.id)).id);
+    await f.db.query(`UPDATE customer_orders SET requested_delivery_date = $2::date, off_round_at = NULL, off_round_note = NULL
+                      WHERE id = $1`, [old.id, addDays(today, -10)]);
+    const fresh = await order(f.customerId);
+    await removeStop(f.db, f.office, (await stopOf(fresh.id)).id);
+    try {
+      await f.db.query(`UPDATE system_settings SET value = $1 WHERE key = 'no_round_from'`, [addDays(today, -5)]);
+      let ids = (await noRound(f.db)).orders.map((o) => o.id);
+      assert.ok(!ids.includes(old.id), 'left Pending from before the start day: not counted');
+      assert.ok(ids.includes(fresh.id), 'due after the start day: counted');
+      // The old order is taken off a round today: that is new, so it counts.
+      await f.db.query(`UPDATE customer_orders SET off_round_at = now(), off_round_note = 'Taken off' WHERE id = $1`, [old.id]);
+      ids = (await noRound(f.db)).orders.map((o) => o.id);
+      assert.ok(ids.includes(old.id));
+    } finally {
+      await f.db.query(`UPDATE system_settings SET value = '2000-01-01' WHERE key = 'no_round_from'`);
+    }
+  });
+});
+
+describe('Delivery <-> collection on a pending order (25 Nov 2026)', () => {
+  test('to collection: off its round; back to delivery: on the round for its day', async () => {
+    const { editOrder } = await import('../src/services/orders.ts');
+    const o = await order(f.customerId);
+    assert.ok((await f.db.maybeOne(`SELECT 1 FROM delivery_stops WHERE order_id = $1`, [o.id])), 'starts on a round');
+    await editOrder(f.db, f.office, o.id, { deliveryMode: 'Pickup' });
+    let row = await f.db.one<{ delivery_mode: string; address_id: string | null }>(
+      `SELECT delivery_mode, address_id FROM customer_orders WHERE id = $1`, [o.id]);
+    assert.equal(row.delivery_mode, 'Pickup');
+    assert.ok(!(await f.db.maybeOne(`SELECT 1 FROM delivery_stops WHERE order_id = $1 AND stop_outcome = 'Pending'`, [o.id])));
+    assert.ok(!(await listed()).includes(o.orderNumber), 'a collection needs no round');
+
+    const r = await editOrder(f.db, f.office, o.id, { deliveryMode: 'Delivery', requestedDeliveryDate: addDays(today, 4) });
+    row = await f.db.one(`SELECT delivery_mode, address_id FROM customer_orders WHERE id = $1`, [o.id]);
+    assert.equal(row.delivery_mode, 'Delivery');
+    const st = await f.db.one<{ day: string }>(
+      `SELECT ds.delivery_date::text AS day FROM delivery_stops s JOIN delivery_sheets ds ON ds.id = s.delivery_sheet_id
+       WHERE s.order_id = $1 AND s.stop_outcome = 'Pending'`, [o.id]);
+    assert.equal(st.day, addDays(today, 4));
+    assert.ok(r.warnings.some((w) => /now a delivery/.test(w)));
+  });
+
+  test('refused: back to delivery on a day gone; to collection once its round has started; a counter sale', async () => {
+    const { editOrder } = await import('../src/services/orders.ts');
+    const o = await order(f.customerId);
+    await editOrder(f.db, f.office, o.id, { deliveryMode: 'Pickup' });
+    await f.db.query(`UPDATE customer_orders SET requested_delivery_date = $2::date WHERE id = $1`, [o.id, addDays(today, -1)]);
+    await assert.rejects(editOrder(f.db, f.office, o.id, { deliveryMode: 'Delivery' }), /has passed/);
+    assert.equal((await f.db.one<{ m: string }>(`SELECT delivery_mode AS m FROM customer_orders WHERE id = $1`, [o.id])).m, 'Pickup', 'nothing changed');
+
+    const p = await order(f.customerId);
+    await f.db.query(`UPDATE delivery_sheets SET started_at = now() WHERE id = $1`, [(await stopOf(p.id)).delivery_sheet_id]);
+    await assert.rejects(editOrder(f.db, f.office, p.id, { deliveryMode: 'Pickup' }), /already started/);
+    await f.db.query(`UPDATE delivery_sheets SET started_at = NULL WHERE id = $1`, [(await stopOf(p.id)).delivery_sheet_id]);
   });
 });
 

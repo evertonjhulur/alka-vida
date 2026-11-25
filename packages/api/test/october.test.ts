@@ -451,6 +451,52 @@ describe('Tomorrow\'s round: remind customers to order', () => {
     assert.equal(n.n, 1);
   });
 
+  test('by address (25 Nov 2026): one message naming each place due, labels, signed by the sender, line breaks kept', async () => {
+    const { remindersFor, fillTemplate } = await import('../src/services/reminders.ts');
+    const { saveAddress, updateCustomer } = await import('../src/services/customers.ts');
+    const day = addDays(today, 40);
+    const wd = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][new Date(`${day}T12:00:00Z`).getUTCDay()];
+    const other = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][(new Date(`${day}T12:00:00Z`).getUTCDay() + 1) % 7];
+    await updateCustomer(f.db, f.admin, f.customerId, {
+      deliveryDays: [wd], addressLabel: 'Main office', addressLine1: '12 Hope Road', city: 'Kingston 6', parish: 'St. Andrew',
+    });
+    const shop = await saveAddress(f.db, f.office, f.customerId, null, {
+      label: 'Shop', addressLine1: '5 Port Royal Street', city: 'Kingston', isDelivery: true, deliveryDays: [wd],
+    });
+    // An extra address on another day is not named; one with no days never is.
+    await saveAddress(f.db, f.office, f.customerId, null, { label: 'Warehouse', addressLine1: '1 Marcus Garvey Drive', deliveryDays: [other] });
+    await saveAddress(f.db, f.office, f.customerId, null, { label: 'Spare', addressLine1: '9 Spare Lane' });
+    const staff = { ...f.office, name: 'Shanice Brown' };
+
+    let me = (await remindersFor(f.db, { date: day, actor: staff })).rows.find((r) => r.customerId === f.customerId)!;
+    assert.deepEqual(me.places, ['Main office, 12 Hope Road, Kingston 6, St. Andrew', 'Shop, 5 Port Royal Street, Kingston']);
+    assert.match(me.message, /it's Shanice from Alka Vida/);
+    assert.match(me.message, /delivering to Main office, 12 Hope Road, Kingston 6, St\. Andrew and Shop, 5 Port Royal Street, Kingston\./);
+    assert.match(me.message, /tomorrow|on \w{3} \d{1,2} \w{3}/);
+    assert.match(me.message, /\n\n/, 'line breaks kept');
+    assert.doesNotMatch(me.message, /Warehouse|Spare/);
+    assert.match(decodeURIComponent(me.whatsappLink!.split('?text=')[1]), /\n\nPlease reply here/);
+
+    // An order for the shop: only the main office is asked about.
+    await createOrder(f.db, f.office, {
+      customerId: f.customerId, deliveryMode: 'Delivery', requestedDeliveryDate: day, addressId: shop.id,
+      lines: [{ productId: f.casedProductId, cases: 1 }],
+    });
+    me = (await remindersFor(f.db, { date: day, actor: staff })).rows.find((r) => r.customerId === f.customerId)!;
+    assert.deepEqual(me.places, ['Main office, 12 Hope Road, Kingston 6, St. Andrew']);
+
+    // And one for the main address: nothing left, off the list.
+    await createOrder(f.db, f.office, {
+      customerId: f.customerId, deliveryMode: 'Delivery', requestedDeliveryDate: day,
+      lines: [{ productId: f.casedProductId, cases: 1 }],
+    });
+    assert.ok(!(await remindersFor(f.db, { date: day })).rows.some((r) => r.customerId === f.customerId));
+
+    // No label: just the address. Blanks never leave double spaces.
+    await updateCustomer(f.db, f.admin, f.customerId, { addressLabel: null });
+    assert.equal(fillTemplate('Hi {name},  {x}\n\n\n\nBye', { name: 'Ann', x: '' }), 'Hi Ann,\n\nBye');
+  });
+
   test('an impossible date over HTTP is a 400 with the message, not a 500', async () => {
     const app = await buildServer(f.db);
     const { signToken } = await import('../src/lib/auth.ts');

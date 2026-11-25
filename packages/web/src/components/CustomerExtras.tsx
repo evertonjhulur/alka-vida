@@ -17,14 +17,16 @@ interface Address {
   city: string | null; parish: string | null; is_billing: boolean; is_delivery: boolean;
   delivery_zone: string | null; route_sequence: number; contact_person: string | null; phone: string | null;
   delivery_instructions?: string | null;
+  delivery_days?: string[] | null;
 }
 interface Zone { id: string; name: string; retired_at: string | null; run_days: string[] | null }
 
 const BLANK_ADDR = {
   label: '', addressLine1: '', addressLine2: '', city: '', parish: '',
   isBilling: false, isDelivery: true, deliveryZone: '', routeSequence: '0', contactPerson: '', phone: '',
-  deliveryInstructions: '',
+  deliveryInstructions: '', deliveryDays: [] as string[],
 };
+const DAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
 
 export function AddressesPanel({ customerId }: { customerId: string }) {
   const [rows, setRows] = useState<Address[]>([]);
@@ -49,7 +51,8 @@ export function AddressesPanel({ customerId }: { customerId: string }) {
       deliveryZone: a.delivery_zone ?? '', routeSequence: String(a.route_sequence ?? 0),
       contactPerson: a.contact_person ?? '', phone: a.phone ?? '',
       deliveryInstructions: a.delivery_instructions ?? '',
-    } : { ...BLANK_ADDR });
+      deliveryDays: a.delivery_days ?? [],
+    } : { ...BLANK_ADDR, deliveryDays: [] });
   };
 
   async function save(e: React.FormEvent) {
@@ -95,7 +98,7 @@ export function AddressesPanel({ customerId }: { customerId: string }) {
             <div>
               <strong>{a.label}</strong>
               {a.is_billing && <span className="chip info">Billing</span>}
-              {a.is_delivery && <span className="chip neutral">Delivery{a.delivery_zone ? ` · ${a.delivery_zone}` : ''}</span>}
+              {a.is_delivery && <span className="chip neutral">Delivery{a.delivery_zone ? ` · ${a.delivery_zone}` : ''}{a.delivery_days?.length ? ` · ${a.delivery_days.join(', ')}` : ''}</span>}
               <div className="small">{line(a) || <span className="muted">no address</span>}</div>
               {(a.contact_person || a.phone) && (
                 <div className="muted small">{[a.contact_person, a.phone].filter(Boolean).join(' · ')}</div>
@@ -168,6 +171,23 @@ export function AddressesPanel({ customerId }: { customerId: string }) {
               </>
             )}
           </div>
+          {f.isDelivery && (
+            <div className="field">
+              <span className="label">Delivery days at this address</span>
+              <div className="day-picks" role="group" aria-label="Delivery days at this address">
+                {DAYS.map((d) => (
+                  <button key={d} type="button" aria-pressed={f.deliveryDays.includes(d)}
+                          className={`day-pick${f.deliveryDays.includes(d) ? ' on' : ''}`}
+                          onClick={() => setF({ ...f, deliveryDays: f.deliveryDays.includes(d)
+                            ? f.deliveryDays.filter((x) => x !== d)
+                            : DAYS.filter((x) => x === d || f.deliveryDays.includes(x)) })}>{d}</button>
+                ))}
+              </div>
+              <div className="muted small" style={{ marginTop: 4 }}>
+                Tomorrow's reminders name this address on these days. Leave them all off if it is only used now and then.
+              </div>
+            </div>
+          )}
           <div className="row">
             <div className="field">
               <label htmlFor="ad-contact">Contact there</label>

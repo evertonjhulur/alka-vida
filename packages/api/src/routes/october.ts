@@ -112,7 +112,7 @@ export function registerOctoberRoutes(
   /* ---------------- tomorrow's round: remind customers to order ---------------- */
 
   app.get('/api/reminders', office, async (req) =>
-    reminders.remindersFor(db, { date: ((req.query ?? {}) as { date?: string }).date ?? null }));
+    reminders.remindersFor(db, { date: ((req.query ?? {}) as { date?: string }).date ?? null, actor: actorOf(req as Req) }));
   app.post('/api/reminders/:customerId/sent', office, async (req) => {
     const b = (req.body ?? {}) as { date?: string };
     await reminders.markReminded(db, actorOf(req as Req), (req.params as { customerId: string }).customerId, b.date ?? '');

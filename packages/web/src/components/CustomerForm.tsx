@@ -37,6 +37,8 @@ export interface CustomerFormValues {
   /** Copy addresses for emails, comma-separated (send screen, 28 Oct 2026). */
   ccEmails: string;
   addressLine1: string; addressLine2: string; city: string; parish: string;
+  /** Optional name for the main address, e.g. "Head office" (reminders, 25 Nov 2026). */
+  addressLabel: string;
   deliveryAddress: string;
   deliveryZone: string; deliveryDays: string[]; routeSequence: string;
   priceTierId: string; paymentTerms: string; invoiceCycle: string;
@@ -52,7 +54,7 @@ export interface CustomerFormValues {
 
 export const BLANK_CUSTOMER: CustomerFormValues = {
   accountType: '', name: '', contactPerson: '', phone: '', email: '', ccEmails: '',
-  addressLine1: '', addressLine2: '', city: '', parish: '', deliveryAddress: '',
+  addressLine1: '', addressLine2: '', city: '', parish: '', addressLabel: '', deliveryAddress: '',
   deliveryZone: '', deliveryDays: [], routeSequence: '0',
   priceTierId: '', paymentTerms: '', invoiceCycle: 'PerDelivery',
   gctExempt: false, gctExemptRef: '', autoStatements: true, autoReminders: true, notes: '',
@@ -72,6 +74,7 @@ export function customerToForm(c: Record<string, unknown>): CustomerFormValues {
     // opens in line 1 so nothing is lost.
     addressLine1: hasParts ? s('address_line1') : s('delivery_address'),
     addressLine2: s('address_line2'), city: s('city'), parish: s('parish'),
+    addressLabel: s('address_label'),
     deliveryAddress: s('delivery_address'),
     deliveryZone: s('delivery_zone'),
     deliveryDays: Array.isArray(c.delivery_days) && (c.delivery_days as string[]).length
@@ -99,6 +102,7 @@ export function formToPayload(f: CustomerFormValues) {
     ccEmails: f.ccEmails.trim() || null,
     addressLine1: f.addressLine1 || null, addressLine2: f.addressLine2 || null,
     city: f.city || null, parish: f.parish || null,
+    addressLabel: f.addressLabel.trim() || null,
     deliveryZone: f.deliveryZone || null,
     deliveryDays: f.deliveryDays,
     routeSequence: Number(f.routeSequence) || 0,
@@ -250,6 +254,12 @@ export default function CustomerForm({
 
           <fieldset className="form-block">
             <legend>Where we deliver</legend>
+            <div className="field">
+              <label htmlFor="cf-alabel">Name for this address (optional)</label>
+              <input id="cf-alabel" value={f.addressLabel} placeholder="Head office, Home…" style={{ maxWidth: 320 }}
+                     onChange={(e) => set('addressLabel', e.target.value)} />
+              <div className="muted small" style={{ marginTop: 4 }}>Used in order reminders, e.g. "delivering to Head office, 12 Hope Road".</div>
+            </div>
             <div className="row">
               <div className="field grow">
                 <label htmlFor="cf-a1">Address</label>

@@ -195,6 +195,8 @@ export interface CustomerInput {
   deliveryAddress?: string | null;
   addressLine1?: string | null; addressLine2?: string | null;
   city?: string | null; parish?: string | null;
+  /** Optional name for the main address, e.g. "Head office" (reminders, 25 Nov 2026). */
+  addressLabel?: string | null;
   brandId?: string | null; paymentTerms?: string | null;
   priceTierId?: string | null;
   defaultDeliveryDay?: string | null;
@@ -260,6 +262,7 @@ function customerColumns(input: CustomerInput): Record<string, unknown> {
     cols.cc_emails = list.length ? list.join(', ') : null;
   }
   if (has('contactPerson')) cols.contact_person = text(input.contactPerson);
+  if (has('addressLabel')) cols.address_label = text(input.addressLabel);
   if (has('brandId')) cols.brand_id = input.brandId ?? null;
   if (has('paymentTerms')) cols.payment_terms = text(input.paymentTerms);
   if (has('priceTierId')) cols.price_tier_id = input.priceTierId || null;
@@ -429,6 +432,8 @@ export interface AddressInput {
   deliveryZone?: string | null; routeSequence?: number;
   contactPerson?: string | null; phone?: string | null;
   deliveryInstructions?: string | null;
+  /** Weekdays this address takes deliveries; it is reminded on these (25 Nov 2026). */
+  deliveryDays?: string[] | null;
 }
 
 export async function listAddresses(db: Db | Queryable, customerId: string) {
@@ -468,13 +473,15 @@ export async function saveAddress(
       isDelivery ? zone : null, Number(input.routeSequence) || 0,
       input.contactPerson?.trim() || null, input.phone?.trim() || null,
       input.deliveryInstructions?.trim() || null,
+      isDelivery ? cleanDays(input.deliveryDays) : [],
     ];
     let id = addressId;
     if (id) {
       await t.query(
         `UPDATE customer_addresses SET label = $3, address_line1 = $4, address_line2 = $5,
            city = $6, parish = $7, is_billing = $8, is_delivery = $9, delivery_zone = $10,
-           route_sequence = $11, contact_person = $12, phone = $13, delivery_instructions = $14
+           route_sequence = $11, contact_person = $12, phone = $13, delivery_instructions = $14,
+           delivery_days = $15
          WHERE id = $1 AND customer_id = $2`,
         [id, customerId, ...vals],
       );
@@ -482,8 +489,9 @@ export async function saveAddress(
       const row = await t.one<{ id: string }>(
         `INSERT INTO customer_addresses
            (customer_id, label, address_line1, address_line2, city, parish, is_billing,
-            is_delivery, delivery_zone, route_sequence, contact_person, phone, delivery_instructions)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING id`,
+            is_delivery, delivery_zone, route_sequence, contact_person, phone, delivery_instructions,
+            delivery_days)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING id`,
         [customerId, ...vals],
       );
       id = row.id;

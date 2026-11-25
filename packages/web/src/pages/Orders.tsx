@@ -167,6 +167,8 @@ export default function Orders() {
   const [range, setRange] = useState({ from: '', to: '', by: 'delivery' as 'delivery' | 'placed' });
   const [poEdit, setPoEdit] = useState('');
   const [addrEdit, setAddrEdit] = useState('');
+  /** Delivery or collection, changeable on a pending order (25 Nov 2026). */
+  const [modeEdit, setModeEdit] = useState<'Delivery' | 'Pickup'>('Delivery');
   const [addrs, setAddrs] = useState<Addr[]>([]);
   const [empties, setEmpties] = useState('');
   const [how, setHow] = useState('');
@@ -250,6 +252,7 @@ export default function Orders() {
       setChargeGct(!o.gct_exempt);
       setPoEdit(o.customer_po ?? '');
       setAddrEdit(o.address_id ?? '');
+      setModeEdit(o.delivery_mode === 'Pickup' ? 'Pickup' : 'Delivery');
       setAddrs(await api.get<Addr[]>(`/api/customers/${o.customer_id}/addresses`).catch(() => []));
       setEditing(o);
       window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -277,6 +280,10 @@ export default function Orders() {
     return { subtotal, discountAmount, gct, grandTotal, fixed, pct };
   })();
 
+  /** A delivery or a collection can switch; a counter sale cannot. */
+  const canSwitch = !!editing && (editing.delivery_mode === 'Delivery' || editing.delivery_mode === 'Pickup');
+  const editMode = canSwitch ? modeEdit : (editing?.delivery_mode ?? 'Delivery');
+
   async function saveEdit(e: React.FormEvent) {
     e.preventDefault();
     if (!editing) return;
@@ -301,11 +308,13 @@ export default function Orders() {
         discountFixedCents: totals.fixed,
         gctExempt: !chargeGct,
         customerPo: poEdit,
-        ...(editing.delivery_mode === 'Delivery' ? { addressId: addrEdit || null } : {}),
+        ...(canSwitch ? { deliveryMode: modeEdit } : {}),
+        ...((canSwitch ? modeEdit : editing.delivery_mode) === 'Delivery' ? { addressId: addrEdit || null } : {}),
       });
       const moved = reqDate && reqDate !== (editing.requested_delivery_date ?? '').slice(0, 10);
+      const switched = canSwitch && modeEdit !== editing.delivery_mode;
       setMsg(`${editing.order_number} updated. New total ${money(r.grandTotalCents)}.`
-        + (moved && editing.delivery_mode === 'Delivery' ? ` It is now on the round for ${day(reqDate)}.` : '')
+        + (moved && !switched && editing.delivery_mode === 'Delivery' ? ` It is now on the round for ${day(reqDate)}.` : '')
         + (r.warnings?.length ? ` ${r.warnings.join(' ')}` : ''));
       setEditing(null);
       await load();
@@ -722,15 +731,33 @@ export default function Orders() {
           </h2>
           <form onSubmit={saveEdit}>
             <div className="row">
+              {canSwitch && (
+                <div className="field">
+                  <span className="label">How it goes out</span>
+                  <div className="seg seg-small" role="group" aria-label="Delivery or collection">
+                    {([['Delivery', 'We deliver'], ['Pickup', 'They collect']] as const).map(([k, label]) => (
+                      <button key={k} type="button" aria-pressed={modeEdit === k} className={modeEdit === k ? 'active' : ''}
+                              onClick={() => setModeEdit(k)}>{label}</button>
+                    ))}
+                  </div>
+                  {modeEdit !== editing.delivery_mode && (
+                    <div className="muted small">
+                      {modeEdit === 'Pickup'
+                        ? 'Saving takes it off its round.'
+                        : 'Saving puts it on the round for the date shown.'}
+                    </div>
+                  )}
+                </div>
+              )}
               <div className="field">
-                <label htmlFor="rd">Delivery date</label>
+                <label htmlFor="rd">{editMode === 'Pickup' ? 'Collection date' : 'Delivery date'}</label>
                 <input id="rd" type="date" value={reqDate}
                        onChange={(e) => setReqDate(e.target.value)} />
-                {editing.delivery_mode === 'Delivery' && (
+                {editMode === 'Delivery' && modeEdit === editing.delivery_mode && (
                   <div className="muted small">A new date moves it to that day's round.</div>
                 )}
               </div>
-              {editing.delivery_mode === 'Delivery' && (
+              {editMode === 'Delivery' && (
                 <div className="field">
                   <label htmlFor="ad">Deliver to</label>
                   <select id="ad" value={addrEdit} onChange={(e) => setAddrEdit(e.target.value)}>

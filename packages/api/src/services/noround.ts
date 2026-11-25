@@ -47,9 +47,24 @@ const MISSED: Record<string, string> = {
   Other: 'not delivered', 'Payment Only': 'paid, nothing delivered',
 };
 
+/**
+ * Going forward only (Everton, 25 Nov 2026): "it is giving me passed orders
+ * ... the update is for going forward. If they were delivered the date of
+ * completion would have likely been done on a round or otherwise." Orders
+ * left Pending from before the alert came in were dealt with outside the
+ * app, so only orders due on or after the start day (Settings key
+ * `no_round_from`, set by migration 049) are counted, plus any order taken
+ * off a round on or after that day, whatever its date.
+ */
+const NO_ROUND_FROM_SQL =
+  `(SELECT COALESCE(MAX(value), '1900-01-01')::date FROM system_settings WHERE key = 'no_round_from')`;
+
 /** The test, as SQL over `o` (customer_orders): this delivery order has no round. */
 export const NEEDS_ROUND_SQL = `(
   o.delivery_mode = 'Delivery'
+  AND (COALESCE(o.requested_delivery_date, o.order_date) >= ${NO_ROUND_FROM_SQL}
+       OR (o.off_round_at IS NOT NULL
+           AND (o.off_round_at AT TIME ZONE 'America/Jamaica')::date >= ${NO_ROUND_FROM_SQL}))
   AND o.status IN ('Pending','Partially Delivered')
   AND NOT o.needs_review
   AND NOT COALESCE(o.recorded_late, false)

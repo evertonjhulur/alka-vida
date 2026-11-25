@@ -15,7 +15,7 @@ import { ask } from '../components/Dialog';
  */
 
 interface Row {
-  customerId: string; name: string; contactPerson: string | null; zone: string | null;
+  customerId: string; name: string; contactPerson: string | null; zone: string | null; places?: string[];
   phone: string | null; whatsapp: string | null; email: string | null;
   usual: string | null; lastOrderOn: string | null; balanceCents: number;
   message: string; whatsappLink: string | null; canEmail: boolean; emailBlocked?: string | null;
@@ -131,7 +131,7 @@ export default function Reminders() {
       <h1>{!data?.heading || data.heading === 'Tomorrow' ? 'Tomorrow\u2019s round'
         : data.heading === 'Today' ? 'Today\u2019s round' : `Round on ${data.heading}`}: remind customers</h1>
       <p className="subtitle">
-        Customers whose delivery day it is and who have not ordered yet. Press <strong>Send on WhatsApp</strong>,
+        Customers with an address due that day and no order for it yet; one message names every address due. Press <strong>Send on WhatsApp</strong>,
         press send in WhatsApp, and the next one comes up.
       </p>
 
@@ -167,15 +167,17 @@ export default function Reminders() {
         {editing && (
           <div className="sub-panel" style={{ marginTop: 10 }}>
             <label htmlFor="tpl">The message (the same for everyone; the words in braces are filled in for each customer)</label>
-            <textarea id="tpl" rows={3} style={{ width: '100%', boxSizing: 'border-box' }} value={template}
+            <textarea id="tpl" rows={8} style={{ width: '100%', boxSizing: 'border-box' }} value={template}
                       maxLength={data?.maxTemplate ?? 500} onChange={(e) => setTemplate(e.target.value)} />
             <div className={`small ${template.length >= (data?.maxTemplate ?? 500) ? '' : 'muted'}`} style={{ textAlign: 'right' }}>
               {template.length} / {data?.maxTemplate ?? 500} characters
             </div>
             <div className="muted small" style={{ margin: '4px 0 8px' }}>
-              {'{name}'} their contact person (or the business) · {'{business}'} the business name · {'{zone}'} the round ·
+              {'{name}'} their contact person (or the business) · {'{staff}'} your first name ·
+              {' '}{'{place}'} the address(es) due that day, e.g. "Head office, 12 Hope Road" ·
               {' '}{'{when}'} "tomorrow, Thu 8 Oct" · {'{ask}'} "Would you like your usual 3 cases of 500ml?" ·
-              {' '}{'{link}'} the link to order online
+              {' '}{'{link}'} the link to order online · {'{business}'} the business name · {'{zone}'} the round.
+              {' '}Line breaks are kept.
             </div>
             <button type="button" disabled={busy} onClick={saveTemplate}>Save the message</button>
           </div>
@@ -204,7 +206,7 @@ export default function Reminders() {
                 <Link to={`/customers/${r.customerId}`}><strong>{r.name}</strong></Link>
                 {r.contactPerson && <span className="muted small"> · {r.contactPerson}</span>}
                 <div className="muted small">
-                  {r.zone ?? 'No zone'}
+                  {r.places?.length ? r.places.join(' · ') : (r.zone ?? 'No zone')}
                   {r.usual ? ` · usual: ${r.usual}` : ' · no deliveries yet'}
                   {r.lastOrderOn ? ` (last delivered ${when(r.lastOrderOn)})` : ''}
                   {r.balanceCents > 0 ? ` · owes ${money(r.balanceCents)}` : ''}
@@ -224,7 +226,7 @@ export default function Reminders() {
                 )}
               </div>
             </div>
-            <div className="remind-msg">{r.message}</div>
+            <div className="remind-msg" style={{ whiteSpace: 'pre-line' }}>{r.message}</div>
           </div>
         );
       })}
