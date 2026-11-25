@@ -420,6 +420,44 @@ export async function sendDeliveryDayEmail(db: Db, orderId: string): Promise<{ s
     `Alka Vida order ${o.order_number}: ${day}`, mail, 'delivery day confirmed');
 }
 
+/**
+ * A customer who opened their own account and said "Not sure" of their zone,
+ * placed by the office (25 Nov 2026): "Your delivery day is...". The sign-up
+ * page promised "We'll place you and let you know". Sent once per zone.
+ */
+export async function sendZoneSetEmail(db: Db, customerId: string): Promise<{ sent: boolean; reason?: string }> {
+  const c = await db.maybeOne<{ name: string; email: string | null; zone: string | null; run_days: string[] | null; own_days: string[] | null }>(
+    `SELECT c.name, c.email, c.delivery_zone AS zone, z.run_days, c.delivery_days AS own_days
+     FROM customers c LEFT JOIN delivery_zones z ON z.name = c.delivery_zone WHERE c.id = $1`, [customerId]);
+  if (!c?.zone) return { sent: false, reason: 'no zone yet' };
+  if (!c.email?.trim()) return { sent: false, reason: 'no email for this customer' };
+  if (!(await customerWants(db, customerId, 'orders'))) return { sent: false, reason: 'they have turned these off' };
+  const key = `${customerId}:${c.zone}`;
+  if (await alreadySent(db, 'ZoneSet', key)) return { sent: false, reason: 'already sent' };
+  const days = ((c.own_days?.length ? c.own_days : c.run_days) ?? []).filter(Boolean);
+  const dayText = days.length ? days.join(' and ') : 'any weekday';
+  const booked = await db.query<{ order_number: string; day: string }>(
+    `SELECT o.order_number, d.delivery_date::text AS day
+     FROM customer_orders o
+     JOIN delivery_stops s ON s.order_id = o.id AND s.stop_outcome = 'Pending'
+     JOIN delivery_sheets d ON d.id = s.delivery_sheet_id AND d.status = 'Open'
+     WHERE o.customer_id = $1 AND o.status IN ('Pending','Partially Delivered')
+     ORDER BY d.delivery_date`, [customerId]);
+  const mail = await customerEmail(db, customerId, 'orders', {
+    preheader: `We deliver to you on ${dayText}`,
+    heading: 'Your delivery day',
+    subheading: `${c.zone} area`,
+    greeting: `Good day ${c.name},`,
+    intro: `Thank you for opening your account. We have placed you in our ${c.zone} area, `
+      + `so we deliver to you on ${dayText}.`
+      + (booked.length ? ` ${booked.map((b) => `Order ${b.order_number} is booked for ${fmtDate(b.day)}.`).join(' ')}` : ''),
+    button: { label: 'Order water', url: portalLink('orders') },
+    outro: 'If that day does not suit you, reply to this email or give us a call.',
+  });
+  return sendLogged(db, 'ZoneSet', key, customerId, c.email.trim(),
+    `Alka Vida: your delivery day is ${dayText}`, mail, `delivery day set (${c.zone})`);
+}
+
 /* ------------------------------------------------------------------ */
 /* News & offers                                                       */
 /* ------------------------------------------------------------------ */

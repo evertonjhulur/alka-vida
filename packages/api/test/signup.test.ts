@@ -133,6 +133,11 @@ describe('the office looks at new customers', () => {
     assert.ok(before.length >= 4);
     const sam = before.find((s) => s.email === 'sam@example.com')!;
     assert.equal(sam.duplicates?.[0]?.name, 'Blue Mountain Offices');
+    // "Not sure" of their zone (25 Nov 2026): it is set before "Looks right".
+    if (!sam.delivery_zone) {
+      await assert.rejects(markSignupReviewed(f.db, f.office, sam.id), /set their delivery zone first/);
+      await f.db.query(`UPDATE customers SET delivery_zone = 'Kingston' WHERE id = $1`, [sam.id]);
+    }
     await markSignupReviewed(f.db, f.office, sam.id);
     const after = await listSignups(f.db, f.office);
     assert.equal(after.length, before.length - 1);

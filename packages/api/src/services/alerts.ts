@@ -21,6 +21,7 @@ import { getSetting, siteUrl } from './core.ts';
 import { knockHeld, notifyUsers, usersInRoles } from './push.ts';
 import { mailConfigured, sendMail } from './documents.ts';
 import { renderEmail } from './emailkit.ts';
+import { noRound } from './noround.ts';
 
 const TYPE_WORDS: Record<string, string> = {
   Discount: 'Discount', CreditNote: 'Credit note', StopCorrection: 'Stop correction',
@@ -41,6 +42,16 @@ async function claim(db: Db, kind: string, refId: string): Promise<boolean> {
     `INSERT INTO staff_alerts_sent (kind, ref_id) VALUES ($1,$2) ON CONFLICT DO NOTHING RETURNING ref_id`, [kind, refId]);
   return r.length > 0;
 }
+
+/** Claim by a text key (an order AND the moment it lost its round), made into a uuid. */
+async function claimKey(db: Db, kind: string, key: string): Promise<boolean> {
+  const r = await db.query(
+    `INSERT INTO staff_alerts_sent (kind, ref_id) VALUES ($1, md5($2)::uuid) ON CONFLICT DO NOTHING RETURNING ref_id`, [kind, key]);
+  return r.length > 0;
+}
+
+/** Give the office a moment to put it straight back on a round before telling anyone. */
+const NO_ROUND_GRACE_MS = 2 * 60 * 1000;
 
 async function emailAdmins(db: Db, subject: string, heading: string, lines: Array<[string, string]>, intro: string): Promise<number> {
   if (!mailConfigured()) return 0;
@@ -173,6 +184,17 @@ export async function runAlerts(db: Db): Promise<AlertRun> {
         body: [kind, c.zone ?? 'zone not chosen', c.phone, c.dup ? 'same phone as another customer' : null].filter(Boolean).join(' · '),
         url: '/#/decisions?show=accounts', tag: `signup-${c.id}`,
       });
+      // "Not sure" of their zone: office staff may set it too (25 Nov 2026).
+      if (!c.zone) {
+        const office = (await usersInRoles(db, ['user'])).filter((u) => u.notify_orders).map((u) => u.id);
+        if (office.length) {
+          await notifyUsers(db, office, {
+            title: `Set a zone: ${c.name}`,
+            body: [kind, 'signed up not sure of their zone', c.phone].filter(Boolean).join(' · '),
+            url: '/#/', tag: `signup-zone-${c.id}`,
+          });
+        }
+      }
       out.emails += await emailAdmins(db, `Alka Vida: new customer ${c.name}`, 'A new customer signed up',
         [['Who', c.name], ['Account', kind], ['Zone', c.zone ?? 'Not sure - place them'],
          ...(c.phone ? [['Phone', c.phone] as [string, string]] : []),
@@ -193,6 +215,30 @@ export async function runAlerts(db: Db): Promise<AlertRun> {
       out.decisions++;
     }
   }
+  // Delivery orders left with no round (25 Nov 2026): a backup to the badge
+  // on Delivery rounds and the Today panel. Once per time it loses a round,
+  // after a short grace, and only if it still has none.
+  const now = Date.now();
+  const sinceMs = Number((await db.one<{ ms: string }>(
+    `SELECT (extract(epoch FROM $1::timestamptz) * 1000)::bigint::text AS ms`, [since])).ms);
+  const lost = (await noRound(db)).orders.filter((o) => {
+    const t = new Date(o.since).getTime();
+    return Number.isFinite(t) && t > sinceMs && now - t >= NO_ROUND_GRACE_MS;
+  });
+  if (lost.length) {
+    const office = (await usersInRoles(db, ['admin', 'user'])).filter((u) => u.notify_orders).map((u) => u.id);
+    for (const o of lost) {
+      if (!(await claimKey(db, 'no-round', `${o.id}:${o.since}`))) continue;
+      if (!office.length) continue;
+      await notifyUsers(db, office, {
+        title: `No round: ${o.orderNumber}`,
+        body: [o.customerName, o.day ? `for ${shortDay(o.day)}` : null, o.reason].filter(Boolean).join(' · '),
+        url: '/#/', tag: `no-round-${o.id}`,
+      });
+      out.orders++;
+    }
+  }
+
   // Drivers: something added to their load after they confirmed it.
   const added = await db.query<{ id: string; driver: string; zone: string; day: string; by: string | null }>(
     `SELECT a.id, d.assigned_driver_id AS driver, d.zone, d.delivery_date::text AS day, a.added_by_name AS by

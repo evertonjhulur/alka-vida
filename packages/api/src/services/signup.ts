@@ -316,6 +316,11 @@ export async function listSignups(db: Db, actor: Actor) {
 export async function markSignupReviewed(db: Db, actor: Actor, customerId: string): Promise<void> {
   requireRole(actor, 'admin', 'user');
   await db.tx(async (t) => {
+    // "Not sure" of their zone (25 Nov 2026): set it first, so they are not
+    // marked looked at and then forgotten with no round.
+    const z = await t.maybeOne<{ delivery_zone: string | null }>(
+      `SELECT delivery_zone FROM customers WHERE id = $1`, [customerId]);
+    if (z && !z.delivery_zone) throw new RuleViolation('set their delivery zone first');
     const c = await t.maybeOne<{ name: string }>(
       `UPDATE customers SET signup_reviewed_at = now(), signup_reviewed_by = $2
        WHERE id = $1 AND signed_up_at IS NOT NULL AND signup_reviewed_at IS NULL RETURNING name`, [customerId, actor.id]);

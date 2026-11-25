@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../lib/api';
 import { SortTh, MultiStatusSelect, passes, useSort } from '../components/ListTools';
+import NoRoundPanel from '../components/NoRoundPanel';
 import { money, date, todayInJamaica, when } from '../lib/format';
 
 interface Sheet {
@@ -125,6 +126,9 @@ export default function DeliverySheets() {
           </div>
         </div>
       </div>
+
+      {/* Delivery orders with no round (25 Nov 2026): for the day chosen, or all. */}
+      <NoRoundPanel key={day || 'all'} forDay={day || null} onChange={() => { void loadSheets(); }} />
 
       {day && expected.length > 0 && (
         <div className="panel">

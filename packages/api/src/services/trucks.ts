@@ -33,6 +33,7 @@
 import type { Db, Queryable } from '../db/index.ts';
 import type { Actor } from './core.ts';
 import { audit, num, requireDriver, requireRole } from './core.ts';
+import { noRound } from './noround.ts';
 import { RuleViolation } from '@alka/shared';
 import { assignDriver, startRoute } from './routing.ts';
 
@@ -165,8 +166,16 @@ export async function loadingSummary(db: Queryable, sheetId: string) {
       productId: p.id, name: p.name, bottlesPerCase: num(p.bottles_per_case),
       orderedBottles: ordered.get(p.id) ?? 0,
     }));
+  // Orders for this round's zone and day that are not on it (25 Nov 2026):
+  // a warning before the truck is loaded without them.
+  const round = await db.one<{ zone: string; day: string }>(
+    `SELECT zone, delivery_date::text AS day FROM delivery_sheets WHERE id = $1`, [sheetId]);
+  const notOnRound = (await noRound(db)).orders
+    .filter((o) => o.zone === round.zone && o.day === round.day)
+    .map((o) => ({ id: o.id, orderNumber: o.orderNumber, customerName: o.customerName, reason: o.reason }));
   return {
     sheetId, status: sheet.status, startedAt: sheet.started_at,
+    notOnRound,
     lines,
     products: products.filter((p) => p.active)
       .map((p) => ({ productId: p.id, name: p.name, bottlesPerCase: num(p.bottles_per_case) })),

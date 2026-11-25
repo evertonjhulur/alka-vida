@@ -368,7 +368,8 @@ export async function updateCustomer(
 ): Promise<{ warnings: string[] }> {
   requireRole(actor, 'admin', 'user');
 
-  return db.tx(async (t) => {
+  let zoneWasEmpty = false; let zoneNow: string | null = null;
+  const result = await db.tx(async (t) => {
     const before = await t.maybeOne<{ name: string; active: boolean; delivery_zone: string | null }>(
       `SELECT name, active, delivery_zone FROM customers WHERE id = $1`, [customerId],
     );
@@ -402,8 +403,18 @@ export async function updateCustomer(
     if (!after.delivery_zone) {
       warnings.push('No delivery zone set - delivery orders cannot be auto-routed.');
     }
+    zoneWasEmpty = !before.delivery_zone;
+    zoneNow = after.delivery_zone !== before.delivery_zone ? after.delivery_zone : null;
     return { warnings };
   });
+  // A zone just set (25 Nov 2026): their waiting orders with no round go on
+  // its round, and a customer who signed up "Not sure" is told their day.
+  if (zoneNow) {
+    const { afterZoneSet } = await import('./noround.ts');
+    const placed = await afterZoneSet(db, actor, customerId, zoneWasEmpty);
+    if (placed.length) result.warnings.push(`${placed.join(', ')} put on the ${zoneNow} round.`);
+  }
+  return result;
 }
 
 /* ---------------------------------------------------------------- *

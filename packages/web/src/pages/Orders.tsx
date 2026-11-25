@@ -45,6 +45,18 @@ interface Order {
   /** For emailing the confirmation by hand (27 Oct 2026). */
   customer_email?: string | null;
   confirmation_email?: { at: string; to: string | null; ok: boolean; detail: string | null } | null;
+  /** A delivery order with no round (25 Nov 2026), and why it came off one. */
+  needs_round?: boolean; off_round_note?: string | null;
+}
+
+/** Not on a round: waiting with none, or delivered / cancelled without ever being on one (25 Nov 2026). */
+const notOnRound = (o: Order) => o.delivery_mode === 'Delivery' && (!!o.needs_round || !o.stop_id);
+/** Why a waiting delivery order has no round, in words. */
+function noRoundWhy(o: Order): string | null {
+  if (!o.needs_round) return null;
+  if (!o.customer_zone && !o.address_id) return 'No delivery zone on file';
+  if (o.off_round_note) return o.off_round_note;
+  return null;
 }
 interface Addr { id: string; label: string; address_line1: string | null; is_delivery: boolean }
 interface Product {
@@ -158,6 +170,8 @@ export default function Orders() {
   const [addrs, setAddrs] = useState<Addr[]>([]);
   const [empties, setEmpties] = useState('');
   const [how, setHow] = useState('');
+  /** On a round, not on one, or either (25 Nov 2026). */
+  const [round, setRound] = useState<'' | 'on' | 'none'>(params.get('round') === 'none' ? 'none' : params.get('round') === 'on' ? 'on' : '');
   const [when, setWhen] = useState<When>('any');
   const [limit, setLimit] = useState(50);
 
@@ -432,6 +446,7 @@ export default function Orders() {
   const shown = orders
     .filter((o) => byStatus(o) && byWhen(o)
       && (how === '' || o.delivery_mode === how)
+      && (round === '' || (round === 'none' ? notOnRound(o) : o.delivery_mode === 'Delivery' && !notOnRound(o)))
       && (!needle || o.order_number.toLowerCase().includes(needle)
         || o.customer_name.toLowerCase().includes(needle)))
     .sort((a, b) => (openOnly
@@ -447,12 +462,45 @@ export default function Orders() {
   const ticks = useTicks(page.map((o) => o.id));
   const picked = page.filter((o) => ticks.has(o.id));
   const cancellable = picked.filter((o) => o.status === 'Pending');
+  const placeable = picked.filter((o) => o.needs_round);
   const exportOrders = (list: Order[]) => downloadCsv('orders', [
     ['Order', 'Customer', 'Placed', 'Delivery date', 'How', 'Status', 'What', 'PO', 'Total'],
     ...list.map((o) => [o.order_number, o.customer_name, date(o.order_date),
       o.requested_delivery_date ? date(o.requested_delivery_date) : '', howLabel(o), standing(o, today).label,
       short(o.lines_summary), o.customer_po ?? '', dollars(Number(o.grand_total_cents))]),
   ]);
+  /** Put on its round (25 Nov 2026): its zone's round for its day. */
+  async function putOnRound(o: Order) {
+    setMenuFor(null);
+    const passed = !!o.requested_delivery_date && date(o.requested_delivery_date) < today;
+    let newDay: string | null = null;
+    if (passed || !o.requested_delivery_date) {
+      const d = await askText(`${o.order_number}'s day has passed. Which day should it go out?`, {
+        label: 'Day (yyyy-mm-dd)', value: today, confirmLabel: 'Put it on that round' });
+      if (!d) return;
+      newDay = d.trim();
+    }
+    await act(async () => {
+      const r = await api.post<{ orderNumber: string; zone: string; day: string }>(
+        `/api/orders/${o.id}/put-on-round`, { date: newDay });
+      return `${r.orderNumber} is on the ${r.zone} round for ${day(r.day)}.`;
+    }, 'Could not put it on a round');
+  }
+
+  async function placePicked() {
+    setBusy(true); setError(null); setMsg(null);
+    try {
+      const r = await api.post<{ placed: Array<{ orderNumber: string; zone: string; day: string }>; skipped: Array<{ id: string; why: string }> }>(
+        '/api/orders/put-on-rounds', { orderIds: placeable.map((o) => o.id) });
+      await load().catch(() => {});
+      setMsg(r.placed.length ? `${r.placed.length} put on their rounds: ${r.placed.map((p) => `${p.orderNumber} (${p.zone}, ${day(p.day)})`).join(', ')}.` : 'None could be placed.');
+      if (r.skipped.length) {
+        const num = (id: string) => orders.find((o) => o.id === id)?.order_number ?? id;
+        setError(`Not placed: ${r.skipped.map((x) => `${num(x.id)}: ${x.why}`).join(' · ')}. Use Today or the order's ⋯ menu to pick a zone or a new day.`);
+      }
+    } catch (e) { setError(e instanceof Error ? e.message : 'Could not place them'); } finally { setBusy(false); }
+  }
+
   async function cancelPicked() {
     const reason = await askText(`Cancel ${cancellable.length} order${cancellable.length === 1 ? '' : 's'}? `
       + 'Each customer is told, as when one is cancelled on its own.', { label: 'Why (optional)', confirmLabel: 'Cancel them' });
@@ -484,6 +532,13 @@ export default function Orders() {
           <button role="menuitem" className="pop-item pop-button"
                   onClick={() => openPanel(o, 'offround')}>Take it off the round</button>
         )}
+        {o.needs_round && (noRoundWhy(o) === 'No delivery zone on file' ? (
+          <button role="menuitem" className="pop-item pop-button"
+                  onClick={() => { setMenuFor(null); navigate('/'); }}>Pick a zone and place it (Today)</button>
+        ) : (
+          <button role="menuitem" className="pop-item pop-button"
+                  onClick={() => { void putOnRound(o); }}>Put on its round</button>
+        ))}
         {orderStage(o) === 'pending' && (
           <button role="menuitem" className="pop-item pop-button" onClick={() => markReady(o, true)}>
             {o.delivery_mode === 'Pickup' ? 'Mark ready to collect' : 'Mark ready'}
@@ -826,6 +881,14 @@ export default function Orders() {
           </div>
           <MultiStatusSelect id="ord-st" value={show} onChange={(v) => { setShow(v); setLimit(50); }} options={ORDER_SHOW} />
           <div className="field">
+            <label htmlFor="ord-round">Round</label>
+            <select id="ord-round" value={round} onChange={(e) => { setRound(e.target.value as '' | 'on' | 'none'); setLimit(50); }}>
+              <option value="">Any</option>
+              <option value="on">On a round</option>
+              <option value="none">Not on a round</option>
+            </select>
+          </div>
+          <div className="field">
             <label htmlFor="kind">How</label>
             <select id="kind" value={how} onChange={(e) => setHow(e.target.value)}>
               <option value="">Any way</option>
@@ -870,6 +933,8 @@ export default function Orders() {
                   onClear={ticks.clear}
                   actions={[
                     { label: 'Export to Excel', run: () => exportOrders(picked) },
+                    { label: 'Put on their rounds', run: () => { void placePicked(); },
+                      disabledWhy: placeable.length ? null : 'Only delivery orders with no round can be placed' },
                     { label: 'Cancel orders', danger: true, run: () => { void cancelPicked(); },
                       disabledWhy: cancellable.length ? null : 'Only orders not delivered yet can be cancelled' },
                   ]} />
@@ -930,6 +995,7 @@ export default function Orders() {
                             <span className={`chip ${STAGE_TONE[sg]}`}>{words}</span>
                             {o.source === 'Portal' && !o.seen_at && o.status !== 'Cancelled' && <span className="chip new-chip">New</span>}
                             {more && <div className={`small stage-more ${st.tone === 'bad' ? 'bad' : ''}`}>{more}</div>}
+                            {noRoundWhy(o) && <div className="small muted">{noRoundWhy(o)}</div>}
                           </>
                         );
                       })()}

@@ -69,6 +69,7 @@ import * as paperwork from './services/paperwork.ts';
 import * as portal from './services/portal.ts';
 import * as auditlog from './services/auditlog.ts';
 import * as push from './services/push.ts';
+import * as noround from './services/noround.ts';
 import { kickAlerts, startAlerts } from './services/alerts.ts';
 
 declare module 'fastify' {
@@ -612,6 +613,8 @@ export async function buildServer(db: Db) {
       return {
         applications: Number(apps.n), approvals: Number(approvals.n),
         acceptedQuotes: Number(quotes.n), newOrders: Number(fresh.n),
+        // Delivery orders with no round, and sign-ups with no zone (25 Nov 2026).
+        noRound: await noround.noRoundCount(db),
       };
     });
 
@@ -1219,7 +1222,32 @@ export async function buildServer(db: Db) {
     async (req) => routing.deleteRound(db, actorOf(req), (req.params as { id: string }).id));
 
   app.delete('/api/stops/:id', { preHandler: allow('admin', 'user') },
-    async (req) => routing.removeStop(db, actorOf(req), (req.params as { id: string }).id));
+    async (req) => {
+      const r = await routing.removeStop(db, actorOf(req), (req.params as { id: string }).id);
+      kickAlerts();
+      return r;
+    });
+
+  /* ---------------- delivery orders with no round (25 Nov 2026) ---------------- */
+
+  app.get('/api/no-round', { preHandler: allow('admin', 'user') },
+    async () => noround.noRound(db));
+
+  app.post('/api/orders/:id/put-on-round', { preHandler: allow('admin', 'user') },
+    async (req) => {
+      const b = (req.body ?? {}) as { date?: string | null; zone?: string | null };
+      return noround.putOnRound(db, actorOf(req), (req.params as { id: string }).id, b);
+    });
+
+  app.post('/api/orders/put-on-rounds', { preHandler: allow('admin', 'user') },
+    async (req) => {
+      const b = (req.body ?? {}) as { orderIds?: string[]; date?: string | null };
+      return noround.putOnRounds(db, actorOf(req), Array.isArray(b.orderIds) ? b.orderIds : [], { date: b.date ?? null });
+    });
+
+  app.post('/api/customers/:id/zone', { preHandler: allow('admin', 'user') },
+    async (req) => noround.setCustomerZone(db, actorOf(req), (req.params as { id: string }).id,
+      String(((req.body ?? {}) as { zone?: string }).zone ?? '')));
 
   app.get('/api/delivery-sheets/:id', { preHandler: allow('admin', 'user', 'driver') },
     async (req) => delivery.getSheet(db, (req.params as { id: string }).id));

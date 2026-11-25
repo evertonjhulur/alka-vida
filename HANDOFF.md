@@ -3400,3 +3400,50 @@ migration is numbered 046 so the two can go in together.
   Chrome on a local copy (new charge form, charges grid, New order for BML
   with packaging + delivery fee, Production/Stock without charges, PO
   supplier filter).
+
+## Delivery orders with no round; zones for "Not sure" sign-ups (25 Nov 2026, evening)
+
+Everton asked how to see orders not on a round (delivered ones included),
+then for an alert "the moment a delivery order has no round": not email, a
+quiet count beside Delivery rounds and on Today that clears itself once the
+orders are on a round. Also: who sets the zone for a sign-up "Not sure"?
+His answers ("all agreed"): office staff may set zones too; keep a phone
+notification as a backup; email the customer their delivery day (customer
+emails are switched back on).
+
+- services/noround.ts: worked out live, nothing stored as an alert.
+  NEEDS_ROUND_SQL: Delivery, Pending or Partially Delivered, not
+  needs_review, not recorded_late, no Pending stop on an Open round. Reasons:
+  no zone / missed on the X round / taken off (or round deleted) / part
+  delivered / not placed. Also counts active self sign-ups with no zone (not
+  twice when their order already says "No delivery zone").
+  putOnRound (zone set on the customer if none; a new day if its date has
+  passed), putOnRounds (batch, reports skipped), setCustomerZone (places
+  their waiting orders, emails "Your delivery day is..." once per zone to a
+  self sign-up), afterZoneSet (also run by updateCustomer when a zone is
+  set on Details).
+- Migration 047: customer_orders.off_round_at/off_round_note (set by
+  removeStop and deleteRound, cleared by placeOnDeliverySheet); auto_emails
+  kind check adds ZoneSet, and DeliveryDay + ConfirmEmail, which were never
+  in it (those emails went out but could not be logged and were treated as
+  failed).
+- Routes: GET /api/no-round, POST /api/orders/:id/put-on-round,
+  POST /api/orders/put-on-rounds, POST /api/customers/:id/zone;
+  /api/pending-counts has noRound.
+- markSignupReviewed refuses until a zone is set ("set their delivery zone
+  first"); Needs a decision card has a zone picker + "Set their zone", and
+  "Looks right" is greyed until then.
+- Alerts (alerts.ts): "No round: SO-..." push to admins and office with
+  New-order alerts on, once per time an order loses its round, after a
+  2-minute grace (md5 key in staff_alerts_sent). Not-sure sign-ups also push
+  "Set a zone" to office logins.
+- loadingSummary: notOnRound (this zone and day's orders not on the round),
+  shown as a warning on Loading the truck.
+- Screens: quiet amber badge on Delivery rounds (nav-badge quiet); Today
+  panel "Deliveries with no round" (components/NoRoundPanel.tsx) with Put on
+  its round (zone picker / new day when needed) and Set their zone; the same
+  panel on Delivery rounds for the chosen day (all when none); Orders: Round
+  filter (Any / On a round / Not on a round, ?round=none), reason under the
+  status, ⋯ Put on its round, batch "Put on their rounds".
+- Tests: noround.test.ts (11); signup test updated. API 718 (with
+  charges), shared 80, web 16. Walked in Chrome on a local copy.

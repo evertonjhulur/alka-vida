@@ -9,6 +9,7 @@ import type { Db, Queryable } from '../db/index.ts';
 import type { Actor } from './core.ts';
 import { audit, businessTimeNow, businessToday, getSetting, nextNumber, num, requireRole } from './core.ts';
 import { assertAvailable } from './brands.ts';
+import { NEEDS_ROUND_SQL } from './noround.ts';
 import type { Cents, DeliveryMode, PaymentMethod, RecurrencePattern } from '@alka/shared';
 import {
   computeTotals, computeLineTotal, totalBottles, RuleViolation, composeAddress,
@@ -741,6 +742,8 @@ export async function placeOnDeliverySheet(
     [sheet.id, customerId, orderId, customer.delivery_address, customer.phone,
      orderRef.order_number, summary, customer.route_sequence],
   );
+  // On a round again: forget why it was off one (25 Nov 2026).
+  await t.query(`UPDATE customer_orders SET off_round_at = NULL, off_round_note = NULL WHERE id = $1`, [orderId]);
 
   return { sheetId: sheet.id, stopId: stop.id, warnings };
 }
@@ -1115,6 +1118,8 @@ export async function listOrders(
               WHERE oli.order_id = o.id) AS lines_summary,
             st.id AS stop_id, st.stop_outcome, ds.id AS sheet_id, ds.zone AS sheet_zone,
             ds.delivery_date AS sheet_date, ds.status AS sheet_status,
+            -- A delivery order with no round (25 Nov 2026), and why it came off one.
+            ${NEEDS_ROUND_SQL} AS needs_round, o.off_round_note,
             (ds.started_at IS NOT NULL) AS sheet_started,
             -- The office logged the truck load for its round: Ready (15 Oct 2026).
             (SELECT rl.loaded_at FROM round_loads rl WHERE rl.delivery_sheet_id = ds.id) AS load_logged_at,

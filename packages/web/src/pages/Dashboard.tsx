@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom';
 import { api, type Session } from '../lib/api';
 import { money, date, todayInJamaica, BUSINESS_TIMEZONE, when } from '../lib/format';
 import { NotifyPrompt } from '../components/NotificationsCard';
+import NoRoundPanel from '../components/NoRoundPanel';
 
 interface Aging {
   currentCents: number; d30Cents: number; d60Cents: number;
@@ -200,6 +201,9 @@ export default function Dashboard({ session }: { session: Session }) {
             : `${d.lowStock[0].name} is lowest`,
           d.lowStock.length > 0 ? 'bad' : 'plain')}
       </div>
+
+      {/* Delivery orders with no round, and sign-ups with no zone (25 Nov 2026). */}
+      <NoRoundPanel />
 
       <div className="panel phone-cards">
         <div className="panel-head">

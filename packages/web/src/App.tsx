@@ -83,7 +83,7 @@ interface NavItem {
   /** Other addresses that belong to this item (its tabs), which keep it lit. */
   also?: string[];
   /** Which pending count, if any, puts a badge on this item. */
-  badge?: 'decisions' | 'quotes';
+  badge?: 'decisions' | 'quotes' | 'rounds';
   /** Also shown to office/admin logins ticked "Can also drive" (18 Nov 2026). */
   drivers?: boolean;
 }
@@ -93,7 +93,11 @@ const RULE = '—';
 /** The pages the Settings hub leads to; Settings stays lit on all of them. */
 const SETTINGS_PAGES = ['/settings/', '/pricing', '/products/', '/zones', '/auto-emails', '/employees', '/users'];
 
-interface PendingCounts { applications: number; approvals: number; acceptedQuotes?: number; newOrders?: number }
+interface PendingCounts {
+  applications: number; approvals: number; acceptedQuotes?: number; newOrders?: number;
+  /** Delivery orders with no round, and sign-ups with no zone (25 Nov 2026). */
+  noRound?: number;
+}
 
 /**
  * Navigation mirrors the Section 10 permission table exactly.
@@ -119,7 +123,7 @@ const NAV: NavItem[] = [
   { to: '/orders', label: 'Orders', roles: ['admin', 'user'], section: 'Sales', also: ['/recurring', '/quotes'], badge: 'quotes' },
   { to: '/customers', label: 'Customers', roles: ['admin', 'user'], section: 'Sales', also: ['/messages'] },
 
-  { to: '/delivery', label: 'Delivery rounds', roles: ['admin', 'user'], section: 'Deliveries' },
+  { to: '/delivery', label: 'Delivery rounds', roles: ['admin', 'user'], section: 'Deliveries', badge: 'rounds' },
   { to: '/reminders', label: "Tomorrow's reminders", roles: ['admin', 'user'], section: 'Deliveries' },
   // Drivers, and office/admin logins ticked "Can also drive" (18 Nov 2026).
   { to: '/route', label: 'My route', roles: ['driver'], drivers: true, section: 'Deliveries' },
@@ -214,6 +218,11 @@ function Shell({ session }: { session: Session }) {
   const badgeFor = (n: NavItem) => {
     if (n.badge === 'decisions' && waiting > 0) {
       return <span className="nav-badge" title={`${waiting} waiting for you`}>{waiting}</span>;
+    }
+    // Delivery orders with no round (25 Nov 2026): a quiet count, gone once they are placed.
+    const nr = pending.noRound ?? 0;
+    if (n.badge === 'rounds' && nr > 0) {
+      return <span className="nav-badge quiet" title={`${nr} delivery order${nr === 1 ? '' : 's'} or new customer${nr === 1 ? '' : 's'} with no round or zone: see Today`}>{nr}</span>;
     }
     // New online orders nobody has looked at (15 Oct 2026), before accepted quotes.
     const fresh = pending.newOrders ?? 0;

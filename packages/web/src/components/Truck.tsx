@@ -146,6 +146,8 @@ interface LoadingSummary {
   loaders: Array<{ id: string; name: string; job_title: string | null }>;
   load: Truck | null;
   startedAt: string | null;
+  /** This zone and day's delivery orders that are not on this round (25 Nov 2026). */
+  notOnRound?: Array<{ id: string; orderNumber: string; customerName: string; reason: string }>;
 }
 
 /**
@@ -209,6 +211,16 @@ export function LoadingPanel({ sheetId, onDone, onCancel }: {
   return (
     <div className="panel load-panel">
       <h2 className="side-h" style={{ marginTop: 0 }}>Loading the truck</h2>
+      {(s.notOnRound?.length ?? 0) > 0 && (
+        <div className="notice warn">
+          {s.notOnRound!.length === 1 ? 'One order' : `${s.notOnRound!.length} orders`} for this zone and day
+          {s.notOnRound!.length === 1 ? ' is' : ' are'} not on this round:{' '}
+          {s.notOnRound!.map((o, i) => (
+            <span key={o.id}>{i ? '; ' : ''}<strong>{o.orderNumber}</strong> {o.customerName} ({o.reason})</span>
+          ))}.
+          {' '}Put {s.notOnRound!.length === 1 ? 'it' : 'them'} on the round from Delivery rounds or Today before loading, if {s.notOnRound!.length === 1 ? 'it is' : 'they are'} going.
+        </div>
+      )}
       {s.load && (
         <p className="muted small" style={{ marginTop: 0 }}>
           {loaderWords(s.load.loadedByName, s.load.loaderNames)}. You can change it until the driver confirms it.

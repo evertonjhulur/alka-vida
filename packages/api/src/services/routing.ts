@@ -15,6 +15,7 @@ import type { Db } from '../db/index.ts';
 import type { Actor } from './core.ts';
 import { audit, requireRole } from './core.ts';
 import { RuleViolation } from '@alka/shared';
+import { shortDay } from './noround.ts';
 
 /**
  * The people a route can be handed to: driver logins, plus office and
@@ -221,9 +222,10 @@ export async function removeStop(
     const stop = await t.maybeOne<{
       order_ref: string | null; stop_outcome: string;
       settled_at: string | null; invoice_id: string | null; sheet_status: string;
+      order_id: string | null; zone: string; day: string;
     }>(
       `SELECT st.order_ref, st.stop_outcome, st.settled_at, st.invoice_id,
-              ds.status AS sheet_status
+              ds.status AS sheet_status, st.order_id, ds.zone, ds.delivery_date::text AS day
        FROM delivery_stops st JOIN delivery_sheets ds ON ds.id = st.delivery_sheet_id
        WHERE st.id = $1`,
       [stopId],
@@ -244,6 +246,12 @@ export async function removeStop(
 
     // delivery_stop_lines and delivery_stop_allocations cascade from here.
     await t.query(`DELETE FROM delivery_stops WHERE id = $1`, [stopId]);
+    // Why it has no round now, for the no-round list (25 Nov 2026).
+    if (stop.order_id) {
+      await t.query(
+        `UPDATE customer_orders SET off_round_at = now(), off_round_note = $2 WHERE id = $1`,
+        [stop.order_id, `Taken off the ${stop.zone} round for ${shortDay(stop.day)} by ${actor.name}`]);
+    }
     await audit(t, actor, 'update', 'DeliveryStop', stopId, stop.order_ref ?? stopId, {
       removedFromRoute: true,
     });
@@ -308,6 +316,11 @@ export async function deleteRound(
 
     const orders = await t.query<{ order_ref: string | null }>(
       `SELECT order_ref FROM delivery_stops WHERE delivery_sheet_id = $1 AND order_id IS NOT NULL ORDER BY sequence_no`, [sheetId]);
+    // Why they have no round now, for the no-round list (25 Nov 2026).
+    await t.query(
+      `UPDATE customer_orders SET off_round_at = now(), off_round_note = $2
+       WHERE id IN (SELECT order_id FROM delivery_stops WHERE delivery_sheet_id = $1 AND order_id IS NOT NULL)`,
+      [sheetId, `Its ${s.zone} round for ${shortDay(s.day)} was deleted by ${actor.name}`]);
     // Stops, their lines, the loading and planned collections go with the round (ON DELETE CASCADE).
     await t.query(`DELETE FROM delivery_stops WHERE delivery_sheet_id = $1 AND after_stop_id IS NOT NULL`, [sheetId]);
     await t.query(`DELETE FROM delivery_sheets WHERE id = $1`, [sheetId]);

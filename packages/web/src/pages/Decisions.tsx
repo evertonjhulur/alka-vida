@@ -131,6 +131,8 @@ export default function Decisions({ session }: { session: Session }) {
   const [declineWhy, setDeclineWhy] = useState('');
   /** The order whose day is being changed, and to what. */
   const [dayFor, setDayFor] = useState<{ id: string; date: string } | null>(null);
+  /** A zone picked for a sign-up "Not sure" of theirs (25 Nov 2026). */
+  const [signupZone, setSignupZone] = useState<Record<string, string>>({});
 
   async function load() {
     const [a, b] = await Promise.all([
@@ -211,6 +213,13 @@ export default function Decisions({ session }: { session: Session }) {
   const decidedApps = apps.filter((a) => a.status !== 'Pending').slice(0, 10);
   const total = approvals.length + pendingApps.length + webOrders.length + signups.length;
 
+  const setZoneFor = (c: Signup) => act(async () => {
+    const zone = signupZone[c.id];
+    const r = await api.post<{ placed: string[]; emailed: boolean }>(`/api/customers/${c.id}/zone`, { zone });
+    return [`${c.name} is in ${zone}.`, r.placed.length ? `${r.placed.join(', ')} put on the round.` : '',
+      r.emailed ? 'They were emailed their delivery day.' : ''].filter(Boolean).join(' ');
+  }, 'Could not set the zone');
+
   const lookedAt = (c: Signup) => act(async () => {
     await api.post(`/api/signups/${c.id}/reviewed`);
     return `${c.name} marked as looked at.`;
@@ -231,6 +240,17 @@ export default function Decisions({ session }: { session: Session }) {
           {c.delivery_zone
             ? <>{c.delivery_zone}{c.delivery_days.length ? ` (${c.delivery_days.join(', ')})` : ''}</>
             : <span style={{ color: 'var(--warn)' }}>not sure of their zone: place them</span>}
+          {!c.delivery_zone && (
+            <span className="row" style={{ gap: 6, marginTop: 6 }}>
+              <select aria-label={`Delivery zone for ${c.name}`} value={signupZone[c.id] ?? ''}
+                      onChange={(e) => setSignupZone({ ...signupZone, [c.id]: e.target.value })}>
+                <option value="">Pick a zone…</option>
+                {zones.filter((z) => !z.retired_at).map((z) => <option key={z.name} value={z.name}>{z.name}</option>)}
+              </select>
+              <button type="button" className="approve-soft" disabled={busy || !signupZone[c.id]}
+                      onClick={() => setZoneFor(c)}>Set their zone</button>
+            </span>
+          )}
           {c.signup_method === 'Email' && !c.email_confirmed ? ' · email not confirmed yet' : ''}
         </div>
         {c.lat != null && (
@@ -245,7 +265,9 @@ export default function Decisions({ session }: { session: Session }) {
       </div>
       <div className="decision-actions">
         <Link className="button-link secondary" style={{ whiteSpace: 'nowrap' }} to={`/customers/${c.id}`}>Open to change</Link>
-        <button className="approve-soft" disabled={busy} onClick={() => lookedAt(c)}>Looks right</button>
+        <button className="approve-soft" disabled={busy || !c.delivery_zone}
+                title={c.delivery_zone ? undefined : 'Set their delivery zone first'}
+                onClick={() => lookedAt(c)}>Looks right</button>
       </div>
     </div>
   );
