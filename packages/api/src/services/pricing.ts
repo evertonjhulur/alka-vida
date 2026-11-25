@@ -34,27 +34,44 @@ export interface ProductInput {
   pricePerBottleCents?: Cents;
   brandId?: string | null;
   isReturnable?: boolean;
+  /**
+   * A charge or service, not water (25 Nov 2026): BML's coolant packaging, a
+   * delivery fee. Priced per `chargeUnit`, never stock.
+   */
+  isCharge?: boolean;
+  /** What a charge is counted in: "case", "delivery", "each"... */
+  chargeUnit?: string | null;
 }
 
 export async function createProduct(
   db: Db, actor: Actor, input: ProductInput,
 ): Promise<{ id: string }> {
   requireRole(actor, 'admin', 'user');
+  const charge = !!input.isCharge;
+  if (charge) {
+    // Counted in its own unit, never cases of bottles; not a returnable bottle.
+    input = { ...input, bottlesPerCase: 0, isReturnable: false, size: null, pricePerCaseCents: 0 };
+    if (!input.chargeUnit?.trim()) {
+      throw new RuleViolation('say what the charge is per (for example case, delivery or each)');
+    }
+  }
   validateProduct(input);
 
   return db.tx(async (t) => {
     const row = await t.one<{ id: string }>(
       `INSERT INTO products
          (name, size, bottles_per_case, price_per_case_cents,
-          price_per_bottle_cents, brand_id, is_returnable)
-       VALUES ($1,$2,$3,COALESCE($4,0),COALESCE($5,0),$6,COALESCE($7,false))
+          price_per_bottle_cents, brand_id, is_returnable, is_charge, charge_unit)
+       VALUES ($1,$2,$3,COALESCE($4,0),COALESCE($5,0),$6,COALESCE($7,false),$8,$9)
        RETURNING id`,
       [input.name.trim(), input.size ?? null, input.bottlesPerCase,
        input.pricePerCaseCents ?? null, input.pricePerBottleCents ?? null,
-       input.brandId ?? null, input.isReturnable ?? null],
+       input.brandId ?? null, input.isReturnable ?? null,
+       charge, charge ? input.chargeUnit!.trim().toLowerCase() : null],
     );
     await audit(t, actor, 'create', 'Product', row.id, input.name, {
       bottlesPerCase: input.bottlesPerCase,
+      ...(charge ? { charge: true, chargeUnit: input.chargeUnit!.trim().toLowerCase() } : {}),
     });
     return { id: row.id };
   });
@@ -66,10 +83,22 @@ export async function updateProduct(
   requireRole(actor, 'admin', 'user');
 
   return db.tx(async (t) => {
-    const before = await t.maybeOne<{ name: string; bottles_per_case: number }>(
-      `SELECT name, bottles_per_case FROM products WHERE id = $1`, [productId],
+    const before = await t.maybeOne<{ name: string; bottles_per_case: number; is_charge: boolean }>(
+      `SELECT name, bottles_per_case, is_charge FROM products WHERE id = $1`, [productId],
     );
     if (!before) throw new RuleViolation('product not found');
+    if (input.isCharge !== undefined && input.isCharge !== before.is_charge) {
+      throw new RuleViolation('a product cannot be switched between water and a charge. '
+        + 'Retire it and add a new product instead');
+    }
+    if (before.is_charge) {
+      if ((input.bottlesPerCase !== undefined && input.bottlesPerCase !== 0) || input.isReturnable) {
+        throw new RuleViolation('a charge is counted in its own unit, not cases or returnable bottles');
+      }
+      if (input.chargeUnit !== undefined && !input.chargeUnit?.trim()) {
+        throw new RuleViolation('say what the charge is per (for example case, delivery or each)');
+      }
+    }
 
     // Changing whether something is cased would silently invalidate the
     // quantities on every existing order and invoice for it.
@@ -94,12 +123,14 @@ export async function updateProduct(
            price_per_bottle_cents = COALESCE($6,price_per_bottle_cents),
            is_returnable = COALESCE($7,is_returnable),
            active = COALESCE($8,active),
-           brand_id = CASE WHEN $9::boolean THEN $10::uuid ELSE brand_id END
+           brand_id = CASE WHEN $9::boolean THEN $10::uuid ELSE brand_id END,
+           charge_unit = CASE WHEN is_charge AND $11::text IS NOT NULL THEN $11::text ELSE charge_unit END
        WHERE id = $1`,
       [productId, input.name ?? null, input.size ?? null,
        input.bottlesPerCase ?? null, input.pricePerCaseCents ?? null,
        input.pricePerBottleCents ?? null, input.isReturnable ?? null,
-       input.active ?? null, 'brandId' in input, input.brandId || null],
+       input.active ?? null, 'brandId' in input, input.brandId || null,
+       input.chargeUnit?.trim() ? input.chargeUnit.trim().toLowerCase() : null],
     );
     await audit(t, actor, 'update', 'Product', productId, input.name ?? before.name, input);
   });
@@ -116,7 +147,9 @@ function validateProduct(input: ProductInput): void {
     throw new RuleViolation('a cased product needs a price per case');
   }
   if (input.bottlesPerCase === 0 && !input.pricePerBottleCents) {
-    throw new RuleViolation('a product sold individually needs a price per bottle');
+    throw new RuleViolation(input.isCharge
+      ? 'a charge needs a price'
+      : 'a product sold individually needs a price per bottle');
   }
 }
 
@@ -301,8 +334,12 @@ export interface PriceMatrix {
     bottlesPerCase: number; active: boolean; isReturnable: boolean;
     /** The 5-gallon bottle itself, charged for empties short (7 Oct 2026). */
     isBottleCharge: boolean;
+    /** A charge or service, not water (25 Nov 2026). */
+    isCharge: boolean;
+    /** What a charge is counted in ("case", "delivery"...). */
+    chargeUnit: string | null;
     /** The unit this product is sold and priced in. */
-    unit: 'case' | 'bottle';
+    unit: 'case' | 'bottle' | 'charge';
     /** Whose product it is: ours, or bottled for a customer (16 Oct 2026). */
     brandId: string | null; brandName: string | null;
     brandType: 'Owned' | 'Third-Party Co-Pack' | null;
@@ -324,14 +361,15 @@ export async function priceMatrix(db: Db): Promise<PriceMatrix> {
   const products = await db.query<{
     id: string; name: string; size: string | null; bottles_per_case: number;
     active: boolean; is_returnable: boolean; is_bottle_charge: boolean;
+    is_charge: boolean; charge_unit: string | null;
     price_per_case_cents: number; price_per_bottle_cents: number;
     brand_id: string | null; brand_name: string | null; brand_type: 'Owned' | 'Third-Party Co-Pack' | null;
   }>(
     `SELECT p.id, p.name, p.size, p.bottles_per_case, p.active, p.is_returnable, p.is_bottle_charge,
-            p.price_per_case_cents, p.price_per_bottle_cents,
+            p.is_charge, p.charge_unit, p.price_per_case_cents, p.price_per_bottle_cents,
             p.brand_id, b.name AS brand_name, b.type AS brand_type
      FROM products p LEFT JOIN brands b ON b.id = p.brand_id
-     ORDER BY p.active DESC, p.bottles_per_case DESC, p.name`,
+     ORDER BY p.active DESC, p.is_charge, p.bottles_per_case DESC, p.name`,
   );
 
   const rates = await db.query<{
@@ -362,7 +400,9 @@ export async function priceMatrix(db: Db): Promise<PriceMatrix> {
         active: p.active,
         isReturnable: p.is_returnable,
         isBottleCharge: !!p.is_bottle_charge,
-        unit: cased ? ('case' as const) : ('bottle' as const),
+        isCharge: !!p.is_charge,
+        chargeUnit: p.charge_unit,
+        unit: cased ? ('case' as const) : p.is_charge ? ('charge' as const) : ('bottle' as const),
         brandId: p.brand_id, brandName: p.brand_name, brandType: p.brand_type,
         listPriceCents: cased ? num(p.price_per_case_cents) : num(p.price_per_bottle_cents),
         tierPrices,

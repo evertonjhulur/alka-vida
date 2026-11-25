@@ -329,15 +329,16 @@ export async function salesReport(db: Db, from?: string | null, to?: string | nu
 
   const byProduct = await db.query<{
     product_id: string; name: string; bottles_per_case: number; cases: number; bottles: number; cents: number;
+    charge_unit: string | null;
   }>(
-    `SELECT pr.id AS product_id, pr.name, pr.bottles_per_case,
+    `SELECT pr.id AS product_id, pr.name, pr.bottles_per_case, pr.charge_unit,
             COALESCE(SUM(l.cases),0)::int AS cases, COALESCE(SUM(l.loose_bottles),0)::int AS bottles,
             COALESCE(SUM(l.line_total_cents),0)::bigint AS cents
      FROM invoice_line_items l
      JOIN invoices i ON i.id = l.invoice_id
      JOIN products pr ON pr.id = l.product_id
      WHERE ${SALES_WHERE}
-     GROUP BY pr.id, pr.name, pr.bottles_per_case
+     GROUP BY pr.id, pr.name, pr.bottles_per_case, pr.charge_unit
      ORDER BY cents DESC`, p,
   );
 
@@ -398,6 +399,8 @@ export async function salesReport(db: Db, from?: string | null, to?: string | nu
     byProduct: byProduct.map((r) => ({
       productId: r.product_id, name: r.name, bottlesPerCase: num(r.bottles_per_case),
       cases: num(r.cases), bottles: num(r.bottles), cents: num(r.cents),
+      // A charge or service (25 Nov 2026): counted in this unit, not bottles.
+      chargeUnit: r.charge_unit ?? null,
     })),
     byZone: byZone.map((r) => ({ zone: r.zone, invoices: num(r.invoices), cents: num(r.cents) })),
     topCustomers: topCustomers.map((r) => ({
@@ -489,7 +492,8 @@ export async function marginReport(db: Db, from?: string | null, to?: string | n
      FROM products pr
      LEFT JOIN sold s ON s.product_id = pr.id
      LEFT JOIN bom b ON b.product_id = pr.id
-     WHERE pr.active OR s.cents IS NOT NULL
+     -- Charges and services (25 Nov 2026) are not made, so have no materials.
+     WHERE (pr.active OR s.cents IS NOT NULL) AND NOT pr.is_charge
      ORDER BY COALESCE(s.cents, 0) DESC, pr.name`, p,
   );
 

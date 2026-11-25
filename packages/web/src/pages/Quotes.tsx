@@ -8,6 +8,7 @@ import { money, statusTone, todayInJamaica, when } from '../lib/format';
 import CustomerPicker, { type PickerCustomer } from '../components/CustomerPicker';
 import { ask, askText } from '../components/Dialog';
 import { gctTotal } from '../lib/gct';
+import { unitWord } from '../lib/charges';
 
 /**
  * Quotations (Everton's revisions, 30 Sep 2026, point 1).
@@ -43,6 +44,7 @@ interface Quote extends QuoteRow {
 interface Priced {
   product_id: string; name: string; bottles_per_case: number;
   price_per_case_cents: number; price_per_bottle_cents: number;
+  is_charge?: boolean; charge_unit?: string | null;
 }
 interface Customer extends PickerCustomer { gct_exempt?: boolean }
 
@@ -355,7 +357,7 @@ function QuoteEditor({ quoteId }: { quoteId?: string }) {
                             <button type="button" className="secondary"
                                     onClick={() => setLines(lines.map((x) => (x.productId === l.productId ? { ...x, qty: x.qty + 1 } : x)))}>+</button>
                           </span>
-                          <span className="muted small unit">{cased ? 'cs' : 'btl'}</span>
+                          <span className="muted small unit">{p.is_charge ? unitWord(p, l.qty) : cased ? 'cs' : 'btl'}</span>
                         </td>
                         <td data-label="Line total" className="num">{money(l.qty * unitOf(l))}</td>
                         <td className="num"><button type="button" className="danger-soft"

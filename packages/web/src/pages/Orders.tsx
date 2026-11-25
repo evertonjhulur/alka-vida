@@ -50,6 +50,7 @@ interface Addr { id: string; label: string; address_line1: string | null; is_del
 interface Product {
   id: string; product_id?: string; name: string; bottles_per_case: number;
   price_per_case_cents: number; price_per_bottle_cents: number;
+  is_charge?: boolean; charge_unit?: string | null;
 }
 interface OrderLine {
   id: string; product_id: string; product_name: string;
@@ -80,6 +81,7 @@ interface UndoPlan {
 }
 
 import { gctTotal } from '../lib/gct';
+import { unitWord } from '../lib/charges';
 
 const STAGE_TONE: Record<OrderStage, string> = {
   pending: 'warn', ready: 'info', out: 'info', part: 'warn', delivered: 'ok', cancelled: 'muted',
@@ -737,7 +739,8 @@ export default function Orders() {
                                    onChange={(e) => setLines(lines.map((x, j) =>
                                      j === i ? { ...x, qty: e.target.value } : x))} />
                             <span className="muted small" style={{ marginLeft: 6 }}>
-                              {Number(p.bottles_per_case) > 0
+                              {p.is_charge ? unitWord(p, Number(l.qty))
+                                : Number(p.bottles_per_case) > 0
                                 ? `cases of ${p.bottles_per_case}` : 'bottles'}
                             </span>
                           </>

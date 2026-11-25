@@ -107,7 +107,7 @@ async function orderedOnRound(t: Queryable, sheetId: string) {
        GROUP BY sl.order_line_id
      ) d ON d.order_line_id = oli.id
      WHERE st.delivery_sheet_id = $1 AND st.stop_outcome = 'Pending' AND st.order_id IS NOT NULL
-       AND NOT p.is_bottle_charge
+       AND NOT (p.is_bottle_charge OR p.is_charge)
      GROUP BY oli.product_id`,
     [sheetId],
   );
@@ -116,7 +116,7 @@ async function orderedOnRound(t: Queryable, sheetId: string) {
 /** Products that can go on a truck, with how they are counted. */
 async function loadableProducts(t: Queryable) {
   return t.query<{ id: string; name: string; bottles_per_case: number; active: boolean }>(
-    `SELECT id, name, bottles_per_case, active FROM products WHERE NOT is_bottle_charge ORDER BY name`,
+    `SELECT id, name, bottles_per_case, active FROM products WHERE NOT is_bottle_charge AND NOT is_charge ORDER BY name`,
   );
 }
 
@@ -546,7 +546,7 @@ export async function truckPosition(db: Queryable, sheetId: string) {
     `SELECT sl.product_id, SUM(sl.total_bottles)::int AS bottles
      FROM delivery_stop_lines sl JOIN delivery_stops st ON st.id = sl.stop_id
      JOIN products p ON p.id = sl.product_id
-     WHERE st.delivery_sheet_id = $1 AND st.stop_outcome = 'Delivered' AND NOT p.is_bottle_charge
+     WHERE st.delivery_sheet_id = $1 AND st.stop_outcome = 'Delivered' AND NOT (p.is_bottle_charge OR p.is_charge)
      GROUP BY sl.product_id`, [sheetId],
   )).map((r) => [r.product_id, num(r.bottles)]));
   const lines = load.lines.map((l) => ({ ...l, deliveredBottles: delivered.get(l.productId) ?? 0 }));

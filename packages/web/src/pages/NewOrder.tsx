@@ -34,6 +34,9 @@ interface Product {
   special_price?: boolean;
   /** The 5-gallon bottle itself: only ever added for empties short. */
   is_bottle_charge?: boolean;
+  /** A charge or service, not water (25 Nov 2026): priced per charge_unit. */
+  is_charge?: boolean;
+  charge_unit?: string | null;
 }
 
 interface Customer {
@@ -91,6 +94,7 @@ type PayWhen = 'Now' | 'On delivery' | 'On account';
 type Pattern = 'Weekly' | 'Biweekly' | 'Monthly';
 
 import { gctTotal } from '../lib/gct';
+import { perUnit, unitWord } from '../lib/charges';
 /** Recording an earlier day (23 Oct 2026): it was delivered, or they took it. */
 const PAST_MODES: Array<[Mode, string]> = [
   ['Delivery', 'We delivered it'],
@@ -146,6 +150,8 @@ function nextAfter(iso: string, p: Pattern): string {
  */
 const SIZE_AT_END = /\s+(\d+(?:\.\d+)?\s*(?:ml|l|ltr|litres?|liters?|gal|gallons?|oz))$/i;
 function splitName(p: Product): { group: string; size: string } {
+  // A charge has no size: it is picked by its name, and is priced per its unit.
+  if (p.is_charge) return { group: p.name, size: perUnit(p.charge_unit) };
   const m = p.name.match(SIZE_AT_END);
   if (m && m.index !== undefined) return { group: p.name.slice(0, m.index).trim(), size: m[1] };
   return { group: p.name, size: p.size?.trim() || 'Each' };
@@ -165,8 +171,8 @@ function sizeMl(size: string): number {
 const listPriceOf = (p: Product) => (p.bottles_per_case > 0
   ? Number(p.price_per_case_cents) : Number(p.price_per_bottle_cents));
 const priceOf = (p: Product, l?: Line) => (l?.price ?? listPriceOf(p));
-const unitOf = (p: Product) => (p.bottles_per_case > 0 ? 'cs' : 'btl');
-const packOf = (p: Product) => (p.bottles_per_case > 0 ? `${p.bottles_per_case}/case` : 'each');
+const unitOf = (p: Product, n = 2) => (p.is_charge ? unitWord(p, n) : p.bottles_per_case > 0 ? 'cs' : 'btl');
+const packOf = (p: Product) => (p.is_charge ? 'charge' : p.bottles_per_case > 0 ? `${p.bottles_per_case}/case` : 'each');
 const centsOf = (typed: string) => Math.max(0, Math.round((Number(String(typed).replace(/[,$\s]/g, '')) || 0) * 100));
 
 let nextKey = 1;
@@ -904,12 +910,12 @@ export default function NewOrder() {
                          value={l.qty} disabled={!p} onChange={(e) => setQty(l.key, e.target.value)}
                          onFocus={(e) => e.currentTarget.select()}
                          onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); focusSoon('ns-add'); } }} />
-                  <span className="small muted">{p ? unitOf(p) : ''}</span>
+                  <span className="small muted">{p ? unitOf(p, qtyOf(l)) : ''}</span>
                 </span>
                 <span className="num ns-hide-s ns-rate">
                   {p ? (
                     <>
-                      <input inputMode="decimal" aria-label={`Price per ${p.bottles_per_case > 0 ? 'case' : 'bottle'}, line ${i + 1}`}
+                      <input inputMode="decimal" aria-label={`Price ${p.is_charge ? perUnit(p.charge_unit) : p.bottles_per_case > 0 ? 'per case' : 'per bottle'}, line ${i + 1}`}
                              className={`price-input${l.price !== null ? ' changed' : ''}`}
                              value={(priceOf(p, l) / 100).toFixed(2)}
                              onChange={(e) => setPrice(l.key, e.target.value)} />
@@ -933,7 +939,9 @@ export default function NewOrder() {
               <select id="ns-add" aria-label="Add a product" value="" onChange={(e) => chooseGroup(null, e.target.value)}>
                 <option value="">Add a product…</option>
                 {groups.map(([g, list]) => (
-                  <option key={g} value={g}>{g} ({list.length} {list.length === 1 ? 'size' : 'sizes'})</option>
+                  <option key={g} value={g}>
+                    {g} ({list.every((x) => x.is_charge) ? `charge, ${list[0].sizeLabel}` : `${list.length} ${list.length === 1 ? 'size' : 'sizes'}`})
+                  </option>
                 ))}
               </select>
               <select disabled aria-label="Size"><option>Size</option></select>

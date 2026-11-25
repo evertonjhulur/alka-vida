@@ -103,7 +103,7 @@ async function usualOrder(t: Queryable, customerId: string): Promise<{ text: str
   const lines = await t.query<{ name: string; bpc: number; cases: number; loose: number }>(
     `SELECT p.name, p.bottles_per_case AS bpc, oli.cases, oli.loose_bottles AS loose
      FROM order_line_items oli JOIN products p ON p.id = oli.product_id
-     WHERE oli.order_id = $1 AND NOT p.is_bottle_charge ORDER BY p.name`, [last.id],
+     WHERE oli.order_id = $1 AND NOT (p.is_bottle_charge OR p.is_charge) ORDER BY p.name`, [last.id],
   );
   const parts = lines
     .filter((l) => num(l.cases) > 0 || num(l.loose) > 0)

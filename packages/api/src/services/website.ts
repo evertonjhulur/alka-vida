@@ -90,7 +90,7 @@ export async function siteInfo(db: Queryable): Promise<SiteInfo> {
     `SELECT p.id, p.name, p.size, p.bottles_per_case, p.price_per_case_cents::text,
             p.price_per_bottle_cents::text, p.is_returnable
      FROM products p
-     WHERE p.active AND NOT p.is_bottle_charge AND ${ownProductSql('p')}`,
+     WHERE p.active AND NOT (p.is_bottle_charge OR p.is_charge) AND ${ownProductSql('p')}`,
   );
   const products: SiteProduct[] = rows.map((r) => {
     const cased = Number(r.bottles_per_case) > 0;

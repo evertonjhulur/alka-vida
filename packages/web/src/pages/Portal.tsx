@@ -17,7 +17,7 @@ interface Priced {
   product_id: string; name: string; bottles_per_case: number;
   price_per_case_cents: number; price_per_bottle_cents: number;
   price_tier: string | null;
-  is_returnable?: boolean; is_bottle_charge?: boolean;
+  is_returnable?: boolean; is_bottle_charge?: boolean; is_charge?: boolean;
 }
 
 interface Address {
@@ -139,7 +139,7 @@ export default function Portal({ session }: { session: Session }) {
     // shortfall in empties (7 Oct 2026, point 13).
     const all = await api.get<Priced[]>(`/api/customers/${customerId}/prices`);
     setBottle(all.find((p) => p.is_bottle_charge) ?? null);
-    setPrices(all.filter((p) => !p.is_bottle_charge));
+    setPrices(all.filter((p) => !p.is_bottle_charge && !p.is_charge));
     setQuotes(await api.get<MyQuote[]>('/api/quotations').catch(() => []));
   }
 

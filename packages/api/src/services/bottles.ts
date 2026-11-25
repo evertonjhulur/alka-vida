@@ -112,7 +112,7 @@ export async function poolFigures(db: Queryable): Promise<PoolFigures> {
   const full = await db.query<{ id: string; name: string; bottles: number }>(
     `SELECT p.id, p.name, COALESCE(f.quantity_on_hand, 0)::int AS bottles
      FROM products p LEFT JOIN finished_goods_stock f ON f.product_id = p.id
-     WHERE p.is_returnable AND NOT p.is_bottle_charge
+     WHERE p.is_returnable AND NOT (p.is_bottle_charge OR p.is_charge)
        AND (p.active OR COALESCE(f.quantity_on_hand, 0) <> 0)
      ORDER BY p.name`,
   );

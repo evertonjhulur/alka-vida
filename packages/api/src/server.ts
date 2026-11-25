@@ -891,8 +891,10 @@ export async function buildServer(db: Db) {
   app.get('/api/products', async (req) => {
     const s = req.session!;
     const q = (req.query ?? {}) as { for?: string };
+    // Charges and services (25 Nov 2026) are the office's to add, never a
+    // customer's to order.
     const where = s.role === 'customer'
-      ? (s.customerId ? `AND ${productAvailableSql('p', '$1')}` : 'AND false')
+      ? (s.customerId ? `AND NOT p.is_charge AND ${productAvailableSql('p', '$1')}` : 'AND false')
       : q.for === 'walkin' ? `AND ${ownProductSql('p')}` : '';
     const rows = await db.query<Record<string, unknown>>(
       `SELECT p.*, b.name AS brand_name, b.type AS brand_type

@@ -656,9 +656,12 @@ export async function completeProduction(
   const day = checkRunDay(input.productionDate);
 
   return db.tx(async (t) => {
-    const product = await t.one<{ name: string; bottles_per_case: number; is_returnable: boolean }>(
-      `SELECT name, bottles_per_case, is_returnable FROM products WHERE id = $1`, [input.productId],
+    const product = await t.one<{ name: string; bottles_per_case: number; is_returnable: boolean; is_charge: boolean }>(
+      `SELECT name, bottles_per_case, is_returnable, is_charge FROM products WHERE id = $1`, [input.productId],
     );
+    if (product.is_charge) {
+      throw new RuleViolation(`${product.name} is a charge or service, not something made, so it has no production run`);
+    }
     const { cases, loose, bottles, scrapped } = runSize(product, input);
     const batchCode = checkBatchCode(product, input.batchCode);
 
@@ -1186,7 +1189,8 @@ export async function finishedGoods(db: Db) {
                  ELSE NULL END AS full_cases
      FROM products p
      LEFT JOIN finished_goods_stock f ON f.product_id = p.id
-     WHERE p.active
+     -- A charge or service (25 Nov 2026) is never stock.
+     WHERE p.active AND NOT p.is_charge
      ORDER BY p.name`,
   );
 }

@@ -22,6 +22,7 @@ interface Line {
   cases: number;
   loose_bottles: number;
   is_bottle_charge?: boolean;
+  is_charge?: boolean;
 }
 interface StopDetail {
   id: string;
@@ -63,7 +64,7 @@ export default function HandedOverFix({ stopId, onDone, onCancel }: {
     api.get<StopDetail>(`/api/stops/${stopId}`).then((s) => {
       setStop(s);
       const rec = new Map((s.recordedLines ?? []).map((r) => [r.order_line_id, r]));
-      setQty(Object.fromEntries(s.lines.filter((l) => !l.is_bottle_charge).map((l) => {
+      setQty(Object.fromEntries(s.lines.filter((l) => !l.is_bottle_charge && !l.is_charge).map((l) => {
         const r = rec.get(l.order_line_id);
         return [l.order_line_id, String(r ? (l.bottles_per_case > 0 ? Number(r.cases) : Number(r.loose_bottles)) : 0)];
       })));
@@ -76,7 +77,7 @@ export default function HandedOverFix({ stopId, onDone, onCancel }: {
 
   const settled = !!stop.settled_at || (stop.sheet_status ?? 'Open') !== 'Open';
   const appliesNow = isAdmin || !settled;
-  const goods = stop.lines.filter((l) => !l.is_bottle_charge);
+  const goods = stop.lines.filter((l) => !l.is_bottle_charge && !l.is_charge);
   const most = (l: Line) => (l.bottles_per_case > 0 ? Number(l.cases) : Number(l.loose_bottles));
   const entered = (l: Line) => Math.max(0, Math.round(Number(qty[l.order_line_id] ?? 0) || 0));
   const tooMany = goods.some((l) => entered(l) > most(l));

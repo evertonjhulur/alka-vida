@@ -45,8 +45,8 @@ async function alreadySent(db: Queryable, kind: string, key: string): Promise<bo
 
 /** An order's lines as email items, with what each comes to. */
 async function orderItems(db: Queryable, orderId: string): Promise<Array<{ name: string; qty: string; amount: string }>> {
-  const rows = await db.query<{ name: string; bpc: number; cases: number; loose: number; ppc: number; ppb: number }>(
-    `SELECT p.name, p.bottles_per_case AS bpc, oli.cases, oli.loose_bottles AS loose,
+  const rows = await db.query<{ name: string; bpc: number; cases: number; loose: number; ppc: number; ppb: number; unit: string | null }>(
+    `SELECT p.name, p.bottles_per_case AS bpc, oli.cases, oli.loose_bottles AS loose, p.charge_unit AS unit,
             oli.price_per_case_cents AS ppc, oli.price_per_bottle_cents AS ppb
      FROM order_line_items oli JOIN products p ON p.id = oli.product_id
      WHERE oli.order_id = $1 ORDER BY p.is_bottle_charge, p.name`, [orderId],
@@ -55,7 +55,7 @@ async function orderItems(db: Queryable, orderId: string): Promise<Array<{ name:
     .filter((r) => num(r.cases) > 0 || num(r.loose) > 0)
     .map((r) => ({
       name: r.name,
-      qty: qtyWords(num(r.bpc), num(r.cases), num(r.loose)),
+      qty: qtyWords(num(r.bpc), num(r.cases), num(r.loose), r.unit),
       amount: cash(computeLineTotal({
         bottlesPerCase: num(r.bpc), cases: num(r.cases), looseBottles: num(r.loose),
         pricePerCase: num(r.ppc), pricePerBottle: num(r.ppb),
@@ -65,18 +65,18 @@ async function orderItems(db: Queryable, orderId: string): Promise<Array<{ name:
 
 /** What one stop actually handed over. */
 async function stopItems(db: Queryable, stopId: string): Promise<Array<{ name: string; qty: string }>> {
-  const rows = await db.query<{ name: string; bpc: number; cases: number; loose: number }>(
-    `SELECT p.name, p.bottles_per_case AS bpc, sl.cases, sl.loose_bottles AS loose
+  const rows = await db.query<{ name: string; bpc: number; cases: number; loose: number; unit: string | null }>(
+    `SELECT p.name, p.bottles_per_case AS bpc, sl.cases, sl.loose_bottles AS loose, p.charge_unit AS unit
      FROM delivery_stop_lines sl JOIN products p ON p.id = sl.product_id
      WHERE sl.stop_id = $1 AND sl.total_bottles > 0 ORDER BY p.is_bottle_charge, p.name`, [stopId],
   );
-  return rows.map((r) => ({ name: r.name, qty: qtyWords(num(r.bpc), num(r.cases), num(r.loose)) }));
+  return rows.map((r) => ({ name: r.name, qty: qtyWords(num(r.bpc), num(r.cases), num(r.loose), r.unit) }));
 }
 
 /** What is still to come on an order after its deliveries so far. */
 export async function remainingItems(db: Queryable, orderId: string): Promise<Array<{ name: string; qty: string }>> {
-  const rows = await db.query<{ name: string; bpc: number; cases: number; loose: number }>(
-    `SELECT p.name, p.bottles_per_case AS bpc,
+  const rows = await db.query<{ name: string; bpc: number; cases: number; loose: number; unit: string | null }>(
+    `SELECT p.name, p.bottles_per_case AS bpc, p.charge_unit AS unit,
             GREATEST(oli.cases - oli.delivered_cases, 0) AS cases,
             GREATEST(oli.loose_bottles - oli.delivered_loose, 0) AS loose
      FROM order_line_items oli JOIN products p ON p.id = oli.product_id
@@ -84,7 +84,7 @@ export async function remainingItems(db: Queryable, orderId: string): Promise<Ar
      ORDER BY p.name`, [orderId],
   );
   return rows.filter((r) => num(r.cases) > 0 || num(r.loose) > 0)
-    .map((r) => ({ name: r.name, qty: qtyWords(num(r.bpc), num(r.cases), num(r.loose)) }));
+    .map((r) => ({ name: r.name, qty: qtyWords(num(r.bpc), num(r.cases), num(r.loose), r.unit) }));
 }
 
 const portalLink = (tab = 'orders') => `${siteUrl()}/#/portal/${tab}`;

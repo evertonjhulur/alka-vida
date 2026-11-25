@@ -3,12 +3,15 @@ import { Link } from 'react-router-dom';
 import { api, type Session } from '../lib/api';
 import { money, toCents } from '../lib/format';
 import { ask, askText } from '../components/Dialog';
+import { perUnit } from '../lib/charges';
 
 interface Tier { id: string; name: string; customerCount: number }
 interface Product {
   id: string; name: string; size: string | null; bottlesPerCase: number;
   active: boolean; isReturnable: boolean; isBottleCharge?: boolean;
-  unit: 'case' | 'bottle'; listPriceCents: number;
+  /** A charge or service, not water (25 Nov 2026). */
+  isCharge?: boolean; chargeUnit?: string | null;
+  unit: 'case' | 'bottle' | 'charge'; listPriceCents: number;
   tierPrices: Record<string, number>;
   brandId: string | null; brandName: string | null; brandType: string | null;
 }
@@ -21,7 +24,13 @@ interface Matrix { tiers: Tier[]; products: Product[] }
 
 const NEW_PRODUCT = {
   name: '', size: '', bottlesPerCase: '24', listPrice: '', isReturnable: false, brandId: '',
+  /** Bottled water (made, stocked, delivered) or a charge or service (25 Nov 2026). */
+  kind: 'water' as 'water' | 'charge',
+  /** What a charge is counted in. */
+  chargeUnit: 'case',
 };
+/** The usual units a charge is priced per; anything else can be typed. */
+const CHARGE_UNITS = ['case', 'bottle', 'delivery', 'trip', 'hour', 'each'];
 
 export default function Pricing({ session }: { session: Session }) {
   const [matrix, setMatrix] = useState<Matrix | null>(null);
@@ -55,16 +64,19 @@ export default function Pricing({ session }: { session: Session }) {
     e.preventDefault();
     setBusy(true); setError(null);
     try {
-      const bpc = Number(np.bottlesPerCase) || 0;
+      const charge = np.kind === 'charge';
+      const bpc = charge ? 0 : Number(np.bottlesPerCase) || 0;
       const price = toCents(np.listPrice || '0');
       await api.post('/api/products', {
         name: np.name,
-        size: np.size || null,
+        size: charge ? null : np.size || null,
         bottlesPerCase: bpc,
         // The price goes in the unit the product is actually sold in.
         pricePerCaseCents: bpc > 0 ? price : 0,
         pricePerBottleCents: bpc > 0 ? 0 : price,
-        isReturnable: np.isReturnable,
+        isReturnable: charge ? false : np.isReturnable,
+        isCharge: charge,
+        chargeUnit: charge ? np.chargeUnit.trim() || 'each' : null,
         brandId: np.brandId || brands.find((b) => b.type === 'Owned' && b.active)?.id || null,
       });
       setMsg(`${np.name} added.`);
@@ -227,10 +239,26 @@ export default function Pricing({ session }: { session: Session }) {
             onChange={(e) => setBrand(p, e.target.value)}>
       <option value="">No brand (ours)</option>
       {brands.filter((b) => b.active || b.id === p.brandId).map((b) => (
-        <option key={b.id} value={b.id}>{b.name}{b.type === CO_PACK ? ' — bottled for a customer' : ''}</option>
+        <option key={b.id} value={b.id}>
+          {b.name}{b.type === CO_PACK ? (p.unit === 'charge' ? ' — only that client sees it' : ' — bottled for a customer') : ''}
+        </option>
       ))}
     </select>
   );
+
+  async function changeUnit(product: Product) {
+    const unit = await askText(`What is ${product.name} charged per?`, {
+      label: 'Charged per (for example case, delivery, each)', value: product.chargeUnit ?? 'each', confirmLabel: 'Save',
+    });
+    if (!unit || !unit.trim() || unit.trim().toLowerCase() === (product.chargeUnit ?? '')) return;
+    setBusy(true); setError(null);
+    try {
+      await api.patch(`/api/products/${product.id}`, { chargeUnit: unit.trim() });
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not change the unit');
+    } finally { setBusy(false); }
+  }
 
   async function toggleActive(product: Product) {
     setBusy(true); setError(null);
@@ -244,6 +272,7 @@ export default function Pricing({ session }: { session: Session }) {
 
   const cased = matrix.products.filter((p) => p.unit === 'case');
   const individual = matrix.products.filter((p) => p.unit === 'bottle');
+  const charges = matrix.products.filter((p) => p.unit === 'charge');
 
   /**
    * These render JSX and are CALLED as plain functions, not used as <Cell/>
@@ -301,8 +330,9 @@ export default function Pricing({ session }: { session: Session }) {
                   <td>
                     <strong>{p.name}</strong>
                     <div className="muted small">
-                      {p.size ?? ''}
-                      {p.unit === 'case' ? ` · ${p.bottlesPerCase} per case` : ' · each'}
+                      {p.unit === 'charge'
+                        ? `Charge or service · ${perUnit(p.chargeUnit)}`
+                        : <>{p.size ?? ''}{p.unit === 'case' ? ` · ${p.bottlesPerCase} per case` : ' · each'}</>}
                       {p.isReturnable ? ' · returnable' : ''}
                       {p.isBottleCharge ? ' · charged when a customer hands over fewer empties than the full 5-gallon bottles they take' : ''}
                       {!p.active ? ' · retired' : ''}
@@ -324,8 +354,13 @@ export default function Pricing({ session }: { session: Session }) {
                   {matrix!.tiers.map((t) => cell(p, t))}
                   <td className="num">
                     {/* A product with no bill of materials cannot be costed or
-                        produced, so the way in belongs next to the product. */}
-                    <Link to={`/products/${p.id}/bom`}>Materials</Link>{' '}
+                        produced, so the way in belongs next to the product.
+                        A charge is not made, so it has none. */}
+                    {p.unit === 'charge' ? (
+                      <button type="button" className="link-button" disabled={busy}
+                              style={{ fontSize: 13, color: 'var(--brand)', marginRight: 6 }}
+                              onClick={() => changeUnit(p)}>Change unit</button>
+                    ) : <Link to={`/products/${p.id}/bom`}>Materials</Link>}{' '}
                     <button className={p.active ? 'danger-soft' : 'secondary'} disabled={busy}
                             onClick={() => toggleActive(p)}>
                       {p.active ? 'Retire' : 'Restore'}
@@ -474,6 +509,13 @@ export default function Pricing({ session }: { session: Session }) {
         'Sold individually',
         'The 5-gallon line and anything else sold by the bottle. Rates below are the price for one bottle.',
       )}
+      {grid(
+        charges,
+        'Charges and services',
+        'Not water: packaging, labour, delivery and the like. Rates are the price per unit shown under each name. '
+        + 'Never stock: not made, counted or loaded on a truck. One on a client\'s brand is offered to that client only. '
+        + 'The office adds these; customers cannot order them on the portal or website.',
+      )}
 
       <div className="panel">
         <div className="row" style={{ justifyContent: 'space-between' }}>
@@ -485,12 +527,36 @@ export default function Pricing({ session }: { session: Session }) {
 
         {showProduct && (
           <form onSubmit={addProduct}>
+            <div className="row" role="radiogroup" aria-label="Kind of product" style={{ gap: 18, marginBottom: 8 }}>
+              <label className="check" style={{ margin: 0 }}>
+                <input type="radio" name="pkind" checked={np.kind === 'water'} style={{ width: 'auto' }}
+                       onChange={() => setNp({ ...np, kind: 'water' })} />
+                Bottled water <span className="muted small">(made, stocked and delivered)</span>
+              </label>
+              <label className="check" style={{ margin: 0 }}>
+                <input type="radio" name="pkind" checked={np.kind === 'charge'} style={{ width: 'auto' }}
+                       onChange={() => setNp({ ...np, kind: 'charge' })} />
+                Charge or service <span className="muted small">(packaging, labour, delivery… never stock)</span>
+              </label>
+            </div>
             <div className="row">
               <div className="field" style={{ flex: '1 1 220px' }}>
-                <label htmlFor="pn">Product name</label>
+                <label htmlFor="pn">{np.kind === 'charge' ? 'Name on the invoice' : 'Product name'}</label>
                 <input id="pn" required style={{ width: '100%' }} value={np.name}
+                       placeholder={np.kind === 'charge' ? 'e.g. Coolant – labour & case packaging' : ''}
                        onChange={(e) => setNp({ ...np, name: e.target.value })} />
               </div>
+              {np.kind === 'charge' ? (
+                <div className="field">
+                  <label htmlFor="pu">Charged per</label>
+                  <input id="pu" list="charge-units" required style={{ width: 130 }} value={np.chargeUnit}
+                         onChange={(e) => setNp({ ...np, chargeUnit: e.target.value })} />
+                  <datalist id="charge-units">
+                    {CHARGE_UNITS.map((u) => <option key={u} value={u} />)}
+                  </datalist>
+                  <div className="muted small">case, delivery, each…</div>
+                </div>
+              ) : (<>
               <div className="field">
                 <label htmlFor="ps">Size</label>
                 <input id="ps" value={np.size} placeholder="500ml"
@@ -503,9 +569,10 @@ export default function Pricing({ session }: { session: Session }) {
                        onChange={(e) => setNp({ ...np, bottlesPerCase: e.target.value })} />
                 <div className="muted small">0 = sold individually</div>
               </div>
+              </>)}
               <div className="field">
                 <label htmlFor="pp">
-                  List price {Number(np.bottlesPerCase) > 0 ? 'per case' : 'per bottle'}
+                  List price {np.kind === 'charge' ? perUnit(np.chargeUnit) : Number(np.bottlesPerCase) > 0 ? 'per case' : 'per bottle'}
                 </label>
                 <input id="pp" type="number" step="0.01" min="0" required
                        style={{ width: 140 }} value={np.listPrice}
@@ -516,17 +583,24 @@ export default function Pricing({ session }: { session: Session }) {
                 <select id="pbr" value={np.brandId} onChange={(e) => setNp({ ...np, brandId: e.target.value })}>
                   <option value="">{brands.find((b) => b.type === 'Owned' && b.active)?.name ?? 'Ours'}</option>
                   {brands.filter((b) => b.active && b.type === CO_PACK).map((b) => (
-                    <option key={b.id} value={b.id}>{b.name} — bottled for a customer</option>
+                    <option key={b.id} value={b.id}>
+                      {b.name} — {np.kind === 'charge' ? 'only that client sees it' : 'bottled for a customer'}
+                    </option>
                   ))}
                 </select>
+                {np.kind === 'charge' && !np.brandId && (
+                  <div className="muted small">Ours: any customer can be charged it</div>
+                )}
               </div>
+              {np.kind === 'water' && (
               <div className="field">
                 <label htmlFor="pr">Returnable</label>
                 <input id="pr" type="checkbox" checked={np.isReturnable}
                        style={{ width: 'auto' }}
                        onChange={(e) => setNp({ ...np, isReturnable: e.target.checked })} />
               </div>
-              <div className="field"><button disabled={busy}>Add product</button></div>
+              )}
+              <div className="field"><button disabled={busy}>{np.kind === 'charge' ? 'Add charge' : 'Add product'}</button></div>
             </div>
           </form>
         )}

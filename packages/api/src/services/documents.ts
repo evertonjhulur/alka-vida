@@ -19,7 +19,7 @@ import { fileURLToPath } from 'node:url';
 import type { Db, Queryable } from '../db/index.ts';
 import type { Actor } from './core.ts';
 import { audit, businessToday, contactEmail, documentFooter, requireRole, num, siteUrl } from './core.ts';
-import { RuleViolation, GCT_RATE } from '@alka/shared';
+import { RuleViolation, GCT_RATE, unitCount, perUnit } from '@alka/shared';
 import { resolveLines } from './orders.ts';
 import { getInvoiceDetail } from './invoices.ts';
 import { getStatement, invoicesInStatuses, type StatementFilter, type StatementStatus } from './ledger.ts';
@@ -422,6 +422,7 @@ async function drawInvoice(doc: PDFKit.PDFDocument, db: Db, invoiceId: string) {
     const size = String(l.product_size ?? '').trim();
     const bpc = num(l.bottles_per_case as number);
     if (l.is_bottle_charge) return 'Bottle not returned (yours to keep)';
+    if (l.is_charge) return perUnit(l.charge_unit as string | null);
     if (/^5\s*gal/i.test(size)) return '19 litres (5 Gallon)';
     return [size, bpc > 0 ? `case of ${bpc}` : ''].filter(Boolean).join(', ');
   };
@@ -972,9 +973,13 @@ export async function addressing(
   };
 }
 
-/** "3 cases" / "4 bottles", the way every email counts a line. */
-export function qtyWords(bpc: number, cases: number, loose: number): string {
+/**
+ * "3 cases" / "4 bottles", the way every email counts a line. A charge or
+ * service (25 Nov 2026) is counted in its own unit: "12 cases", "1 delivery".
+ */
+export function qtyWords(bpc: number, cases: number, loose: number, chargeUnit?: string | null): string {
   const c = Math.abs(cases); const l = Math.abs(loose);
+  if (chargeUnit) return unitCount(l, chargeUnit);
   if (bpc > 0 && c > 0 && l > 0) return `${c} cs + ${l}`;
   if (bpc > 0 && c > 0) return `${c} case${c === 1 ? '' : 's'}`;
   return `${l} bottle${l === 1 ? '' : 's'}`;
@@ -999,8 +1004,9 @@ export async function invoiceEmailFigures(db: Queryable, invoiceId: string): Pro
   const bal = await db.one<{ balance_cents: number; amount_paid_cents: number }>(
     `SELECT balance_cents, amount_paid_cents FROM invoice_ledger WHERE invoice_id = $1`, [invoiceId],
   );
-  const lines = await db.query<{ name: string; bpc: number; cases: number; loose: number; total: number }>(
-    `SELECT p.name, p.bottles_per_case AS bpc, l.cases, l.loose_bottles AS loose, l.line_total_cents AS total
+  const lines = await db.query<{ name: string; bpc: number; cases: number; loose: number; total: number; unit: string | null }>(
+    `SELECT p.name, p.bottles_per_case AS bpc, l.cases, l.loose_bottles AS loose, l.line_total_cents AS total,
+            p.charge_unit AS unit
      FROM invoice_line_items l JOIN products p ON p.id = l.product_id
      WHERE l.invoice_id = $1 ORDER BY p.name`, [invoiceId],
   );
@@ -1021,7 +1027,7 @@ export async function invoiceEmailFigures(db: Queryable, invoiceId: string): Pro
     totals.push(['Balance due', cash(num(bal.balance_cents)), true]);
   }
   return {
-    items: lines.map((l) => ({ name: l.name, qty: qtyWords(num(l.bpc), num(l.cases), num(l.loose)), amount: cash(Math.abs(num(l.total))) })),
+    items: lines.map((l) => ({ name: l.name, qty: qtyWords(num(l.bpc), num(l.cases), num(l.loose), l.unit), amount: cash(Math.abs(num(l.total))) })),
     totals, customerId: h.customer_id, invoiceNumber: h.invoice_number,
     invoiceDate: h.invoice_date, dueDate: h.due_date, balanceCents: num(bal.balance_cents),
     isCreditNote: h.is_credit_note,

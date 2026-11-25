@@ -58,7 +58,7 @@ export async function stopOptions(db: Queryable) {
      WHERE c.active AND NOT c.is_walk_in ORDER BY c.name`,
   );
   const products = await db.query(
-    `SELECT id, name, bottles_per_case FROM products WHERE active AND NOT is_bottle_charge ORDER BY name`,
+    `SELECT id, name, bottles_per_case FROM products WHERE active AND NOT is_bottle_charge AND NOT is_charge ORDER BY name`,
   );
   const suppliers = await db.query(`SELECT id, name, phone, address FROM suppliers ORDER BY name`);
   const pos = await db.query<{ id: string; po_number: string; supplier_id: string; status: string; order_date: string }>(

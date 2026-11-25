@@ -670,7 +670,8 @@ export async function getInvoiceDetail(db: Db, invoiceId: string) {
   if (!ledger) return null;
   const header = await db.one(`SELECT * FROM invoices WHERE id = $1`, [invoiceId]);
   const lines = await db.query(
-    `SELECT ili.*, p.name AS product_name, p.bottles_per_case, p.size AS product_size, p.is_bottle_charge
+    `SELECT ili.*, p.name AS product_name, p.bottles_per_case, p.size AS product_size, p.is_bottle_charge,
+            p.is_charge, p.charge_unit
      FROM invoice_line_items ili JOIN products p ON p.id = ili.product_id
      WHERE ili.invoice_id = $1`, [invoiceId],
   );

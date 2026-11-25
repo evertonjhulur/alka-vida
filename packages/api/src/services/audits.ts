@@ -443,12 +443,13 @@ async function currentStock(
     if (!m) throw new RuleViolation(`raw material ${itemId} not found`);
     return { name: m.name, systemQty: num(m.quantity_on_hand) };
   }
-  const p = await t.maybeOne<{ name: string; qty: number }>(
-    `SELECT p.name, COALESCE(f.quantity_on_hand, 0) AS qty
+  const p = await t.maybeOne<{ name: string; qty: number; is_charge: boolean }>(
+    `SELECT p.name, COALESCE(f.quantity_on_hand, 0) AS qty, p.is_charge
      FROM products p LEFT JOIN finished_goods_stock f ON f.product_id = p.id
      WHERE p.id = $1`, [itemId],
   );
   if (!p) throw new RuleViolation(`product ${itemId} not found`);
+  if (p.is_charge) throw new RuleViolation(`${p.name} is a charge or service, not stock, so it is not counted`);
   return { name: p.name, systemQty: num(p.qty) };
 }
 
@@ -511,7 +512,7 @@ export async function stockSnapshot(db: Db, asOf?: string | null) {
             (SELECT MAX(audit_date)::text FROM inventory_audits a
               WHERE a.item_type = 'FinishedGoods' AND a.item_id = p.id) AS last_counted
      FROM products p LEFT JOIN finished_goods_stock f ON f.product_id = p.id
-     WHERE p.active AND NOT p.is_bottle_charge ORDER BY p.name`,
+     WHERE p.active AND NOT (p.is_bottle_charge OR p.is_charge) ORDER BY p.name`,
   );
   // The 5-gallon bottle charge is a price for a bottle not handed back, not
   // goods on the floor, so it is left out above (UX review, 11 Oct 2026).

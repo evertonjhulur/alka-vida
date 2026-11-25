@@ -522,6 +522,14 @@ export async function createPortalOrder(
     if (days.length && !days.includes(weekdayOf(requested))) reviewReason = 'SpecialDay';
   }
 
+  // Charges and services (25 Nov 2026) are added by the office only.
+  const ids = (input.lines ?? []).map((l) => l.productId).filter(Boolean);
+  if (ids.length) {
+    const charge = await db.maybeOne<{ name: string }>(
+      `SELECT name FROM products WHERE id = ANY($1::uuid[]) AND is_charge LIMIT 1`, [ids]);
+    if (charge) throw new RuleViolation(`${charge.name} is a charge the office adds; it cannot be ordered here`);
+  }
+
   return createOrder(db, actor, {
     customerId,
     // Quantities ONLY. A price on a line outranks the customer's tier rate,

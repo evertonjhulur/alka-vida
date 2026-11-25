@@ -6,6 +6,7 @@ import { payMethods, useTakeCard } from '../lib/payments';
 import { money, toCents, date, day, time, statusTone } from '../lib/format';
 import Logo from '../components/Logo';
 import { gctTotal } from '../lib/gct';
+import { unitCount, unitWord } from '../lib/charges';
 
 /**
  * One invoice, laid out the way the customer receives it, with what can be
@@ -20,14 +21,18 @@ interface Line {
   loose_bottles: number; bottles_per_case: number; line_total_cents: number;
   price_per_case_cents: number; price_per_bottle_cents: number;
   delivered_on?: string | null; reference?: string | null; order_id?: string | null;
+  is_charge?: boolean; charge_unit?: string | null;
 }
 interface Priced {
   product_id: string; name: string; bottles_per_case: number;
+  is_charge?: boolean; charge_unit?: string | null;
   price_per_case_cents: number; price_per_bottle_cents: number;
 }
 /** One line in the admin's edit panel; price is typed in dollars, per case or per bottle. */
 interface EditRow {
   key: string; productId: string; name: string; bpc: number; qty: string; price: string;
+  /** A charge's unit (25 Nov 2026); null for water. */
+  unit?: string | null; isCharge?: boolean;
   perCase: number; perBottle: number;
   orderId: string | null; deliveredOn: string | null; reference: string | null;
 }
@@ -85,7 +90,8 @@ type Panel = 'pay' | 'edit' | 'discount' | 'credit' | 'void' | null;
 
 const METHODS = ['Cash', 'Card', 'Bank Transfer', 'Cheque', 'Other'] as const;
 
-const qtyText = (l: Line) => (Number(l.bottles_per_case) > 0
+const qtyText = (l: Line) => (l.is_charge ? unitCount(Number(l.loose_bottles), l.charge_unit)
+  : Number(l.bottles_per_case) > 0
   ? `${l.cases} ${Number(l.cases) === 1 ? 'case' : 'cases'} of ${l.bottles_per_case}`
   : `${l.loose_bottles} ${Number(l.loose_bottles) === 1 ? 'bottle' : 'bottles'}`);
 const unitPrice = (l: Line) => (Number(l.bottles_per_case) > 0
@@ -166,6 +172,7 @@ export default function InvoiceDetail({ session }: { session: Session }) {
           const cased = Number(l.bottles_per_case) > 0;
           return {
             key: l.id, productId: l.product_id, name: l.product_name, bpc: Number(l.bottles_per_case),
+            isCharge: !!l.is_charge, unit: l.charge_unit ?? null,
             qty: String(cased ? l.cases : l.loose_bottles),
             price: (unitPrice(l) / 100).toFixed(2),
             perCase: Number(l.price_per_case_cents), perBottle: Number(l.price_per_bottle_cents),
@@ -296,6 +303,7 @@ export default function InvoiceDetail({ session }: { session: Session }) {
       ...edit, add: '',
       rows: [...edit.rows, {
         key: `new-${Date.now()}`, productId: p.product_id, name: p.name, bpc: Number(p.bottles_per_case), qty: '1',
+        isCharge: !!p.is_charge, unit: p.charge_unit ?? null,
         price: (Number(cased ? p.price_per_case_cents : p.price_per_bottle_cents) / 100).toFixed(2),
         perCase: Number(p.price_per_case_cents), perBottle: Number(p.price_per_bottle_cents),
         orderId: null, deliveredOn: null, reference: null,
@@ -556,7 +564,7 @@ export default function InvoiceDetail({ session }: { session: Session }) {
                         <td style={{ whiteSpace: 'nowrap' }}>
                           <input type="number" min="0" step="1" style={{ width: 80 }} aria-label={`Quantity of ${r.name}`}
                                  value={r.qty} onChange={(e) => setRow(r.key, { qty: e.target.value })} />
-                          <span className="muted small"> {r.bpc > 0 ? 'cases' : 'bottles'}</span>
+                          <span className="muted small"> {r.isCharge ? unitWord({ is_charge: true, charge_unit: r.unit }, Number(r.qty)) : r.bpc > 0 ? 'cases' : 'bottles'}</span>
                         </td>
                         <td style={{ whiteSpace: 'nowrap' }}>
                           <input inputMode="decimal" style={{ width: 100 }} aria-label={`Price of ${r.name}`}

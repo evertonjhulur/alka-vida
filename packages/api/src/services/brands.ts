@@ -28,14 +28,18 @@ export const CO_PACK: BrandType = 'Third-Party Co-Pack';
  * SQL expression `customer` (a parameter like `$1`, or a column).
  *
  * The bottle charge (the 5-gallon bottle itself, charged for empties short)
- * is a charge, not something chosen, so it is never held back.
+ * is a charge, not something chosen, so it is never held back. A charge or
+ * service on our own brand (a delivery fee) may go to anyone, a client who
+ * buys only their own brands included; one on a client's brand (BML's
+ * coolant packaging) only to that client (25 Nov 2026).
  */
 export function productAvailableSql(p: string, customer: string): string {
   return `(
     ${p}.is_bottle_charge
     OR (
       NOT EXISTS (SELECT 1 FROM brands ob WHERE ob.id = ${p}.brand_id AND ob.type = '${CO_PACK}')
-      AND COALESCE((SELECT oc.buys_own_brand FROM customers oc WHERE oc.id = ${customer}), true)
+      AND (${p}.is_charge
+           OR COALESCE((SELECT oc.buys_own_brand FROM customers oc WHERE oc.id = ${customer}), true))
     )
     OR EXISTS (
       SELECT 1 FROM customer_brands cb JOIN brands cbb ON cbb.id = cb.brand_id

@@ -2,7 +2,7 @@ import { Fragment, useEffect, useState } from 'react';
 import { api, getSession } from '../lib/api';
 import { money, date, when, todayInJamaica } from '../lib/format';
 
-interface Product { id: string; name: string; bottles_per_case: number; is_bottle_charge?: boolean; is_returnable?: boolean }
+interface Product { id: string; name: string; bottles_per_case: number; is_bottle_charge?: boolean; is_charge?: boolean; is_returnable?: boolean }
 
 interface Feasibility {
   canProduce: boolean;
@@ -112,7 +112,7 @@ export default function Production() {
 
   async function load() {
     // The bottle charge is a price, not something the plant makes.
-    setProducts((await api.get<Product[]>('/api/products')).filter((p) => !p.is_bottle_charge));
+    setProducts((await api.get<Product[]>('/api/products')).filter((p) => !p.is_bottle_charge && !p.is_charge));
     setRuns(await api.get<Run[]>('/api/production'));
   }
   useEffect(() => { load().catch((e) => setError(e.message)); }, []);

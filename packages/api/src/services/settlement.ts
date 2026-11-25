@@ -518,11 +518,11 @@ async function correctHandedOver(
   // other stops of the order delivered.
   const caps = await t.query<{
     id: string; product_id: string; cases: number; loose_bottles: number; bpc: number;
-    is_returnable: boolean; is_bottle_charge: boolean; other_cases: number; other_loose: number;
+    is_returnable: boolean; is_bottle_charge: boolean; is_charge: boolean; other_cases: number; other_loose: number;
     here_cases: number | null; here_loose: number | null; here_total: number | null;
   }>(
     `SELECT oli.id, oli.product_id, oli.cases, oli.loose_bottles, p.bottles_per_case AS bpc,
-            p.is_returnable, p.is_bottle_charge,
+            p.is_returnable, p.is_bottle_charge, p.is_charge,
             COALESCE(o.cases, 0)::int AS other_cases, COALESCE(o.loose, 0)::int AS other_loose,
             h.cases AS here_cases, h.loose_bottles AS here_loose, h.total_bottles AS here_total
      FROM order_line_items oli JOIN products p ON p.id = oli.product_id
@@ -558,7 +558,7 @@ async function correctHandedOver(
          SET cases = EXCLUDED.cases, loose_bottles = EXCLUDED.loose_bottles, total_bottles = EXCLUDED.total_bottles`,
       [stopId, c.id, c.product_id, cases, loose, total]);
     const change = total - num(c.here_total);
-    if (change !== 0 && !c.is_bottle_charge) {
+    if (change !== 0 && !c.is_bottle_charge && !c.is_charge) {
       delta.set(c.product_id, (delta.get(c.product_id) ?? 0) + change);
       if (c.is_returnable) fullsChange += change;
     }

@@ -3341,3 +3341,62 @@ details? also ability to edit their bottle balance if needs be?"
 - Office staff can see the history but not adjust (same as opening balances).
 - Tests: bottleadjust.test.ts (4). API 694 pass on his local copy (which had
   the 19 Nov discount-approval work not yet on GitHub). Walked on a local copy.
+
+## Charges and services as products; PO supplier filter (25 Nov 2026)
+
+Everton: "In the creation of products, its all tied to bottles at the
+moment. So if we only want to charge for packaging because arrangements
+changed we are unable to do this." Example: BML makes its coolant; Alka
+Vida gives the labour and the case packaging, invoiced as a packaging charge
+per case, seen only by BML. Other charges (delivery fee et al.) the same.
+He also asked for a filter by supplier on the Purchase orders screen.
+He said "build it" without answering two open questions; defaults taken:
+charges are office only, and they show on the driver's stop and invoice but
+never count in truck loads or stock.
+
+NOTE: built on the 20 Nov code (his folder). The 24 Nov complimentary-water
+update (migration 045, zip sent in that chat) was NOT in his folder; this
+migration is numbered 046 so the two can go in together.
+
+- Migration 046_charges.sql: products.is_charge, products.charge_unit, and a
+  CHECK that a charge has bottles_per_case 0, is not returnable and is not
+  the bottle charge.
+- pricing.ts: createProduct takes isCharge + chargeUnit (required, stored
+  lower case); a charge is forced to 0 per case, not returnable, no size.
+  updateProduct refuses switching water<->charge, cases or returnable on a
+  charge; chargeUnit editable. priceMatrix: isCharge, chargeUnit, unit
+  'charge'. Price lists and special prices work as for any product (unit
+  price in price_per_bottle_cents).
+- Visibility (brands.ts productAvailableSql): a charge on a client's brand
+  only for that client (existing rule); one on our brand for anyone, even a
+  client who buys only their own brands.
+- Office only: GET /api/products for a customer login leaves charges out;
+  createPortalOrder refuses them; website siteInfo leaves them out; Portal
+  screen filters them.
+- Never stock: excluded from stockmoves (deliveredBottles, stopBottles, and
+  takeFinishedGoods skips them), trucks (orderedOnRound, loadableProducts,
+  truckPosition), settlement stop corrections, stock list (finishedGoods),
+  count list and recordCount (refused), completeProduction (refused),
+  collections stop options, bottle pool, reminders ("same again" text),
+  material-cost report. Production screen and HandedOverFix filter them.
+  Standing orders DO carry charge lines.
+- Wording: shared/src/charges.ts (copy in web/src/lib/charges.ts):
+  unitCount "12 cases" / "1 delivery", perUnit "per case". qtyWords takes an
+  optional chargeUnit (emails, round sheet, end of day PDF). Invoice PDF
+  description "per case". Sales by product and End of day carry chargeUnit.
+  Driver stop shows the unit and "a charge, nothing to hand over".
+- Screens: Products & pricing has the kind choice on New product (Bottled
+  water / Charge or service: name on the invoice, Charged per with
+  suggestions, list price per unit, brand "only that client sees it"), a
+  "Charges and services" grid with "Change unit" in place of Materials.
+  New order: charges listed as "Name (charge, per case)", size "per case",
+  quantity labelled in the unit. Orders edit, Invoice detail + admin edit,
+  Quotes, Credit notes and Reports use the unit.
+- Purchase orders list: "Supplier" drop-down (suppliers that have POs, A-Z)
+  beside Find and Status; with one picked, a line shows how many POs, the
+  amount ordered (cancelled left out) and still to come, plus "show all
+  suppliers". Export to Excel names the file after the supplier.
+- Tests: charges.test.ts (9). API 707, shared 80, web 16 pass. Walked in
+  Chrome on a local copy (new charge form, charges grid, New order for BML
+  with packaging + delivery fee, Production/Stock without charges, PO
+  supplier filter).

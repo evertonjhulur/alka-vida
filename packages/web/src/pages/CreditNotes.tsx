@@ -6,6 +6,7 @@ import { BatchBar, SortTh, MultiStatusSelect, passes, TickAllTh, TickTd, useSort
 import { downloadCsv, dollars } from '../lib/csv';
 import { money, toCents, when } from '../lib/format';
 import CustomerPicker, { type PickerCustomer } from '../components/CustomerPicker';
+import { unitWord } from '../lib/charges';
 
 /**
  * Credit notes (Everton's revisions, 30 Sep 2026, point 2).
@@ -31,6 +32,7 @@ interface Inv {
 interface Priced {
   product_id: string; name: string; bottles_per_case: number;
   price_per_case_cents: number; price_per_bottle_cents: number;
+  is_charge?: boolean; charge_unit?: string | null;
 }
 interface InvLine {
   product_id: string; product_name: string; bottles_per_case: number; cases: number; loose_bottles: number;
@@ -229,7 +231,7 @@ export default function CreditNotes({ session }: { session: Session }) {
                           <td>
                             <input type="number" min="0" style={{ width: 80 }} value={l.qty || ''} aria-label={`How many ${p?.name}`}
                                    onChange={(e) => setLines(lines.map((x) => (x.productId === l.productId ? { ...x, qty: Math.max(0, Math.round(Number(e.target.value)) || 0) } : x)))} />
-                            <span className="muted small"> {cased ? 'cases' : 'bottles'}</span>
+                            <span className="muted small"> {p?.is_charge ? unitWord(p, l.qty) : cased ? 'cases' : 'bottles'}</span>
                           </td>
                           <td className="num">
                             <input type="number" min="0" step="0.01" className="price-input" aria-label={`Unit price of ${p?.name}`}

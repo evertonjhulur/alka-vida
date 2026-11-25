@@ -117,9 +117,10 @@ async function sheetData(db: Db, sheetId: string) {
   let n = 0;
   for (const r of rows) {
     const lines = r.order_id ? await db.query<{
-      name: string; bpc: number; cases: number; loose: number; returnable: boolean;
+      name: string; bpc: number; cases: number; loose: number; returnable: boolean; unit: string | null;
     }>(
-      `SELECT p.name, p.bottles_per_case AS bpc, oli.cases, oli.loose_bottles AS loose, p.is_returnable AS returnable
+      `SELECT p.name, p.bottles_per_case AS bpc, oli.cases, oli.loose_bottles AS loose, p.is_returnable AS returnable,
+              p.charge_unit AS unit
        FROM order_line_items oli JOIN products p ON p.id = oli.product_id
        WHERE oli.order_id = $1 ORDER BY p.is_bottle_charge, p.name`, [r.order_id],
     ) : [];
@@ -135,7 +136,7 @@ async function sheetData(db: Db, sheetId: string) {
       address: r.address ?? '',
       instructions: r.instructions,
       orderRef: r.order_number ?? r.order_ref,
-      lines: lines.map((l) => `${qtyWords(num(l.bpc), num(l.cases), num(l.loose))}  ${shortName(l.name)}`),
+      lines: lines.map((l) => `${qtyWords(num(l.bpc), num(l.cases), num(l.loose), l.unit)}  ${shortName(l.name)}`),
       note: r.payment_only ? (r.summary ?? 'Collect a payment') : null,
       owedCents: owed.owedCents,
       onAccount,

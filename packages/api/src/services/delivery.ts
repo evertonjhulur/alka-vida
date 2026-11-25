@@ -836,7 +836,7 @@ export async function getStopForDriver(db: Db, stopId: string) {
     // cases / loose_bottles are what is still to come at THIS stop: ordered,
     // less what an earlier part delivery of the same order handed over.
     `SELECT oli.id AS order_line_id, p.name AS product_name, p.bottles_per_case,
-            p.is_returnable, p.is_bottle_charge, oli.total_bottles,
+            p.is_returnable, p.is_bottle_charge, p.is_charge, p.charge_unit, oli.total_bottles,
             GREATEST(oli.cases - COALESCE(d.cases, 0), 0)::int AS cases,
             GREATEST(oli.loose_bottles - COALESCE(d.loose, 0), 0)::int AS loose_bottles,
             oli.cases AS ordered_cases, oli.loose_bottles AS ordered_loose
@@ -848,7 +848,7 @@ export async function getStopForDriver(db: Db, stopId: string) {
        GROUP BY sl.order_line_id
      ) d ON d.order_line_id = oli.id
      WHERE oli.order_id = $1
-     ORDER BY p.is_bottle_charge, p.name`, [stop.order_id, stopId],
+     ORDER BY p.is_bottle_charge, p.is_charge, p.name`, [stop.order_id, stopId],
   );
 
   /*

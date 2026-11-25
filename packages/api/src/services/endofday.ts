@@ -58,13 +58,14 @@ export async function endOfDay(db: Db, day: string) {
   }));
 
   const byProduct = (await db.query<Record<string, unknown>>(
-    `SELECT pr.id, pr.name, pr.bottles_per_case,
+    `SELECT pr.id, pr.name, pr.bottles_per_case, pr.charge_unit,
             COALESCE(SUM(li.cases),0)::int AS cases, COALESCE(SUM(li.loose_bottles),0)::int AS bottles,
             COALESCE(SUM(li.line_total_cents),0)::bigint AS cents
      FROM invoice_line_items li JOIN invoices i ON i.id = li.invoice_id JOIN products pr ON pr.id = li.product_id
      WHERE ${SALE}
-     GROUP BY pr.id, pr.name, pr.bottles_per_case ORDER BY cents DESC`, [day]))
-    .map((r) => ({ name: r.name as string, bottlesPerCase: num(r.bottles_per_case), cases: num(r.cases), bottles: num(r.bottles), cents: num(r.cents) }));
+     GROUP BY pr.id, pr.name, pr.bottles_per_case, pr.charge_unit ORDER BY cents DESC`, [day]))
+    .map((r) => ({ name: r.name as string, bottlesPerCase: num(r.bottles_per_case), cases: num(r.cases), bottles: num(r.bottles), cents: num(r.cents),
+                   chargeUnit: (r.charge_unit as string | null) ?? null }));
 
   const credits = (await db.query<Record<string, unknown>>(
     `SELECT i.id, i.invoice_number, c.name AS customer, li.invoice_number AS against,
@@ -285,7 +286,7 @@ export async function renderEndOfDayPdf(db: Db, day: string): Promise<{ filename
   }
   if (r.sales.byProduct.length) {
     table([{ label: 'Product', w: 300 }, { label: 'Quantity', w: 100, right: true }, { label: 'Before discount and GCT', w: 140, right: true }],
-      r.sales.byProduct.map((p) => [short(p.name), qtyWords(p.bottlesPerCase, p.cases, p.bottles), cash(p.cents)]));
+      r.sales.byProduct.map((p) => [short(p.name), qtyWords(p.bottlesPerCase, p.cases, p.bottles, p.chargeUnit), cash(p.cents)]));
   }
   if (r.sales.invoices.length) {
     table([{ label: 'Invoice', w: 70 }, { label: 'Customer', w: 150 }, { label: 'How', w: 110 }, { label: 'Before GCT', w: 70, right: true },

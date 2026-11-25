@@ -5,6 +5,7 @@ import HandedOverFix from '../components/HandedOverFix';
 import { api, getSession } from '../lib/api';
 import { payMethods, useTakeCard } from '../lib/payments';
 import { money, toCents } from '../lib/format';
+import { unitCount } from '../lib/charges';
 
 interface StopLine {
   order_line_id: string;
@@ -17,6 +18,9 @@ interface StopLine {
   total_bottles: number;
   /** The 5-gallon bottle sold on its own (bought for a shortfall in empties). */
   is_bottle_charge?: boolean;
+  /** A charge or service, not goods (25 Nov 2026): counted in its own unit. */
+  is_charge?: boolean;
+  charge_unit?: string | null;
   /** What was ordered; cases / loose_bottles above are what is still to come. */
   ordered_cases?: number;
   ordered_loose?: number;
@@ -539,19 +543,23 @@ export default function DriverStop() {
         {stop.lines.map((l) => {
           const cased = l.bottles_per_case > 0;
           const ordered = cased ? l.cases : l.loose_bottles;
-          const unit = cased ? (ordered === 1 ? 'case' : 'cases') : (ordered === 1 ? 'bottle' : 'bottles');
+          const word = (n: number | string) => (l.is_charge
+            ? unitCount(Number(n), l.charge_unit).replace(/^-?\d+\s*/, '')
+            : cased ? (Number(n) === 1 ? 'case' : 'cases') : (Number(n) === 1 ? 'bottle' : 'bottles'));
+          const unit = word(ordered);
           return (
             <div key={l.order_line_id} className="drop-row">
               <div>
                 <strong>{l.product_name.replace(/^Alka Vida\s+/i, '')}</strong>
                 <div className="muted small">
-                  {delivered_ ? `ordered ${cased ? l.ordered_cases ?? l.cases : l.ordered_loose ?? l.loose_bottles} ${cased ? 'cases' : 'bottles'}`
-                    : remainderStop ? `${ordered} ${unit} left to bring` : `ordered ${ordered} ${unit}`}
+                  {delivered_ ? `ordered ${cased ? l.ordered_cases ?? l.cases : l.ordered_loose ?? l.loose_bottles} ${word(cased ? l.ordered_cases ?? l.cases : l.ordered_loose ?? l.loose_bottles)}`.trim()
+                    : remainderStop ? `${ordered} ${unit} left to bring` : `ordered ${ordered} ${unit}`.trim()}
                   {l.is_bottle_charge ? ' · bought (short of empties)' : ''}
+                  {l.is_charge ? ' · a charge, nothing to hand over' : ''}
                 </div>
               </div>
               {delivered_ ? (
-                <div className="num"><strong>{delivered[l.order_line_id] ?? '0'}</strong> {cased ? (delivered[l.order_line_id] === '1' ? 'case' : 'cases') : (delivered[l.order_line_id] === '1' ? 'bottle' : 'bottles')}</div>
+                <div className="num"><strong>{delivered[l.order_line_id] ?? '0'}</strong> {word(delivered[l.order_line_id] ?? '0')}</div>
               ) : (
               <div className="stepper big">
                 <button type="button" className="secondary" aria-label={`One fewer ${l.product_name}`}

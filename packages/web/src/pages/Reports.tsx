@@ -5,6 +5,7 @@ import { downloadCsv } from '../lib/csv';
 import { money, day, todayInJamaica } from '../lib/format';
 import { SamePersonFlag } from '../components/Truck';
 import { ProductionTab, PurchasingTab, productionCsv, purchasingCsv, type ProductionBy, type ProductionReport, type PurchasingReport } from '../components/OpsReports';
+import { unitCount } from '../lib/charges';
 
 /**
  * Reports, as tabs over one period (approved mockup, 29 Sep 2026).
@@ -25,7 +26,7 @@ interface Sales {
   };
   /** Delivered to weekly/monthly customers, not invoiced yet (27 Oct 2026). */
   notInvoiced?: NotInvoiced;
-  byProduct: Array<{ productId: string; name: string; bottlesPerCase: number; cases: number; bottles: number; cents: number }>;
+  byProduct: Array<{ productId: string; name: string; bottlesPerCase: number; cases: number; bottles: number; cents: number; chargeUnit?: string | null }>;
   byZone: Array<{ zone: string; invoices: number; cents: number }>;
   topCustomers: Array<{ customerId: string; name: string; invoices: number; cents: number }>;
   bottles: { out: number; back: number; lost: number };
@@ -42,7 +43,7 @@ interface EndOfDay {
   sales: {
     invoices: Array<{ invoiceId: string; number: string; customerId: string; customer: string; how: string; orders: string | null;
       netCents: number; gctCents: number; totalCents: number; paidCents: number; balanceCents: number; status: string }>;
-    byProduct: Array<{ name: string; bottlesPerCase: number; cases: number; bottles: number; cents: number }>;
+    byProduct: Array<{ name: string; bottlesPerCase: number; cases: number; bottles: number; cents: number; chargeUnit?: string | null }>;
     byHow: Array<{ how: string; count: number; netCents: number }>;
     credits: Array<{ invoiceId: string; number: string; customer: string; against: string | null; netCents: number; totalCents: number; reason: string | null }>;
     notInvoiced: NotInvoiced;
@@ -508,7 +509,8 @@ export default function Reports() {
     );
   };
 
-  const qty = (bpc: number, cases: number, bottles: number) => (bpc > 0 && cases > 0
+  const qty = (bpc: number, cases: number, bottles: number, chargeUnit?: string | null) => (chargeUnit
+    ? unitCount(bottles, chargeUnit) : bpc > 0 && cases > 0
     ? `${cases} cs${bottles > 0 ? ` + ${bottles}` : ''}` : `${bottles} ${bottles === 1 ? 'bottle' : 'bottles'}`);
 
   const eodTab = () => {
@@ -551,7 +553,7 @@ export default function Reports() {
             <table style={{ marginTop: 8 }}>
               <thead><tr><th>Product</th><th className="num">Quantity</th><th className="num">Before discount and GCT</th></tr></thead>
               <tbody>{eod.sales.byProduct.map((p) => (
-                <tr key={p.name}><td>{short(p.name)}</td><td className="num">{qty(p.bottlesPerCase, p.cases, p.bottles)}</td><td className="num">{money(p.cents)}</td></tr>
+                <tr key={p.name}><td>{short(p.name)}</td><td className="num">{qty(p.bottlesPerCase, p.cases, p.bottles, p.chargeUnit)}</td><td className="num">{money(p.cents)}</td></tr>
               ))}</tbody>
             </table>
           )}

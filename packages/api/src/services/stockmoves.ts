@@ -24,8 +24,10 @@ export async function takeFinishedGoods(
   for (const l of lines) {
     const qty = Math.round(num(l.bottles));
     if (qty <= 0) continue;
-    const p = await t.maybeOne<{ name: string }>(`SELECT name FROM products WHERE id = $1`, [l.productId]);
-    if (!p) continue;
+    const p = await t.maybeOne<{ name: string; is_charge: boolean }>(
+      `SELECT name, is_charge FROM products WHERE id = $1`, [l.productId]);
+    // A charge or service (25 Nov 2026) is never stock.
+    if (!p || p.is_charge) continue;
     await t.query(
       `INSERT INTO finished_goods_stock (product_id, quantity_on_hand) VALUES ($1, $2)
        ON CONFLICT (product_id) DO UPDATE
@@ -49,7 +51,7 @@ export async function deliveredBottles(
     `SELECT oli.product_id, SUM(oli.delivered_total)::int AS bottles, bool_or(p.is_returnable) AS is_returnable
      FROM order_line_items oli JOIN products p ON p.id = oli.product_id
      -- The 5-gallon bottle sold on its own is not water off the shelf.
-     WHERE oli.order_id = $1 AND NOT p.is_bottle_charge GROUP BY oli.product_id`,
+     WHERE oli.order_id = $1 AND NOT (p.is_bottle_charge OR p.is_charge) GROUP BY oli.product_id`,
     [orderId],
   );
   return rows.map((r) => ({
@@ -69,7 +71,7 @@ export async function stopBottles(
   const rows = await t.query<{ product_id: string; bottles: number; is_returnable: boolean }>(
     `SELECT sl.product_id, SUM(sl.total_bottles)::int AS bottles, bool_or(p.is_returnable) AS is_returnable
      FROM delivery_stop_lines sl JOIN products p ON p.id = sl.product_id
-     WHERE sl.stop_id = $1 AND NOT p.is_bottle_charge GROUP BY sl.product_id`,
+     WHERE sl.stop_id = $1 AND NOT (p.is_bottle_charge OR p.is_charge) GROUP BY sl.product_id`,
     [stopId],
   );
   return rows.map((r) => ({

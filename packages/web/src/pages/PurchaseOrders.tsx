@@ -95,8 +95,14 @@ export default function PurchaseOrders() {
   /* ---- the list: status, sort, batch actions (11 Oct 2026) ---- */
   const [poStatus, setPoStatus] = useState<string[]>([]);
   const [poFind, setPoFind] = useState('');
+  /** One supplier's purchase orders only (Everton, 25 Nov 2026); blank = all. */
+  const [poSupplier, setPoSupplier] = useState('');
   const poNeedle = poFind.trim().toLowerCase();
+  // The suppliers that have purchase orders, A to Z, for the drop-down.
+  const poSuppliers = [...new Map(orders.map((p) => [p.supplier_id, p.supplier_name])).entries()]
+    .sort((a, b) => a[1].localeCompare(b[1]));
   const poFiltered = orders.filter((p) => passes(poStatus, (v) => p.status === v)
+    && (!poSupplier || p.supplier_id === poSupplier)
     && (!poNeedle || p.po_number.toLowerCase().includes(poNeedle) || p.supplier_name.toLowerCase().includes(poNeedle)));
   const poSort = useSort(poFiltered, {
     number: (p) => p.po_number, supplier: (p) => p.supplier_name, date: (p) => String(p.order_date).slice(0, 10),
@@ -110,7 +116,9 @@ export default function PurchaseOrders() {
     try { const m = await fn(); if (m) setMsg(m); } catch (e) { setError(e instanceof Error ? e.message : failed); }
     finally { setBusy(false); }
   }
-  const exportPos = (list: PO[]) => downloadCsv('purchase-orders', [
+  const exportPos = (list: PO[]) => downloadCsv(poSupplier
+    ? `purchase-orders-${(poSuppliers.find(([id]) => id === poSupplier)?.[1] ?? 'supplier').replace(/[^A-Za-z0-9]+/g, '-')}`
+    : 'purchase-orders', [
     ['PO', 'Supplier', 'Ordered', 'Lines', 'Status', 'Total', 'Pending'],
     ...list.map((p) => [p.po_number, p.supplier_name, String(p.order_date).slice(0, 10), String(p.line_count),
       p.status, dollars(Number(p.grand_total_cents)), dollars(Number(p.pending_cents ?? 0))]),
@@ -398,12 +406,29 @@ export default function PurchaseOrders() {
                 <label htmlFor="po-find">Find</label>
                 <input id="po-find" type="search" placeholder="PO number or supplier" value={poFind} onChange={(e) => setPoFind(e.target.value)} />
               </div>
+              <div className="field">
+                <label htmlFor="po-sup">Supplier</label>
+                <select id="po-sup" value={poSupplier} onChange={(e) => setPoSupplier(e.target.value)}>
+                  <option value="">All suppliers</option>
+                  {poSuppliers.map(([id, name]) => <option key={id} value={id}>{name}</option>)}
+                </select>
+              </div>
               <MultiStatusSelect id="po-st" value={poStatus} onChange={setPoStatus} options={[
                 ['', 'Any status'], ['Draft', 'Draft'], ['Sent', 'Sent'],
                 ['Partially Received', 'Partially received'], ['Received', 'Received'],
                 ['Partially Received - Closed', 'Partially received - closed'], ['Cancelled', 'Cancelled'],
               ]} />
             </div>
+            {poSupplier && (
+              <p className="muted small" style={{ margin: '0 0 8px' }}>
+                {poFiltered.length} purchase order{poFiltered.length === 1 ? '' : 's'} from{' '}
+                {poSuppliers.find(([id]) => id === poSupplier)?.[1]}
+                {' · '}ordered {money(poFiltered.filter((p) => p.status !== 'Cancelled').reduce((a, p) => a + Number(p.grand_total_cents), 0))}
+                {' · '}still to come {money(poFiltered.reduce((a, p) => a + Number(p.pending_cents ?? 0), 0))}
+                {' · '}<button type="button" className="link-button" style={{ fontSize: 13, color: 'var(--brand)' }}
+                        onClick={() => setPoSupplier('')}>show all suppliers</button>
+              </p>
+            )}
             <BatchBar count={poPicked.length} noun={['purchase order', 'purchase orders']} busy={busy}
                       summary={money(poPicked.reduce((a, p) => a + Number(p.grand_total_cents), 0))}
                       onClear={poTicks.clear}
@@ -455,7 +480,7 @@ export default function PurchaseOrders() {
                 ))}
               </tbody>
             </table>
-            {orders.length > 0 && poSort.sorted.length === 0 && <p className="muted">No purchase order in that status.</p>}
+            {orders.length > 0 && poSort.sorted.length === 0 && <p className="muted">No purchase order matches{poSupplier ? ' for that supplier' : ''}{poStatus.length ? ' in that status' : ''}.</p>}
             {orders.length === 0 && <p className="muted">No purchase orders yet.</p>}
           </>
         )}

@@ -600,6 +600,7 @@ export async function setSpecialPrice(
 export async function customerPrices(db: Db | Queryable, customerId: string) {
   return db.query(
     `SELECT p.id AS product_id, p.name, p.size, p.bottles_per_case, p.is_returnable, p.is_bottle_charge,
+            p.is_charge, p.charge_unit,
             COALESCE(cp.price_per_case_cents, pl.price_per_case_cents, p.price_per_case_cents)
               AS price_per_case_cents,
             COALESCE(cp.price_per_bottle_cents, pl.price_per_bottle_cents, p.price_per_bottle_cents)
