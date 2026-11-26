@@ -497,6 +497,30 @@ describe('Tomorrow\'s round: remind customers to order', () => {
     assert.equal(fillTemplate('Hi {name},  {x}\n\n\n\nBye', { name: 'Ann', x: '' }), 'Hi Ann,\n\nBye');
   });
 
+  test('greets by first name (26 Nov 2026); a business with no contact person gets no name', async () => {
+    const { greetingName, fillTemplate, remindersFor } = await import('../src/services/reminders.ts');
+    const cases: Array<[string, string]> = [
+      ['Andrea Fullwood/Will Arcwelding', 'Andrea'], ['ALAN WILES', 'Alan'], ['Ms. Alicia Brown', 'Alicia'],
+      ['Ms. Frasier', 'Ms. Frasier'], ['Dr. Kevin Harvey', 'Dr. Harvey'], ['Fr. Clifton Harris', 'Fr. Harris'],
+      ['Tony (Indian)', 'Tony'], ['Kimberly/Matthew Mahadeo', 'Kimberly'], ['Mr Oneal Johnson', 'Oneal'],
+      ['Sean Campbell (FR.)', 'Sean'], ['', ''],
+    ];
+    for (const [raw, want] of cases) assert.equal(greetingName(raw), want, raw);
+    assert.equal(fillTemplate('Good day {name}, it\'s {staff}.', { name: '', staff: 'Ann' }), "Good day, it's Ann.");
+
+    const day = addDays(today, 41);
+    const wd = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][new Date(`${day}T12:00:00Z`).getUTCDay()];
+    await f.db.query(`UPDATE customers SET delivery_days = $2, account_type = 'Corporate', contact_person = NULL WHERE id = $1`,
+      [f.customerId, [wd]]);
+    let me = (await remindersFor(f.db, { date: day })).rows.find((r) => r.customerId === f.customerId)!;
+    assert.match(me.message, /^Good day, it's/);
+    assert.equal(me.noGreetingName, true);
+    await f.db.query(`UPDATE customers SET contact_person = 'Mrs. Petrina Gordon-Smith' WHERE id = $1`, [f.customerId]);
+    me = (await remindersFor(f.db, { date: day })).rows.find((r) => r.customerId === f.customerId)!;
+    assert.match(me.message, /^Good day Petrina, it's/);
+    assert.equal(me.noGreetingName, false);
+  });
+
   test('an impossible date over HTTP is a 400 with the message, not a 500', async () => {
     const app = await buildServer(f.db);
     const { signToken } = await import('../src/lib/auth.ts');

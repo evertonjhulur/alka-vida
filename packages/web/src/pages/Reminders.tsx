@@ -16,6 +16,7 @@ import { ask } from '../components/Dialog';
 
 interface Row {
   customerId: string; name: string; contactPerson: string | null; zone: string | null; places?: string[];
+  noGreetingName?: boolean;
   phone: string | null; whatsapp: string | null; email: string | null;
   usual: string | null; lastOrderOn: string | null; balanceCents: number;
   message: string; whatsappLink: string | null; canEmail: boolean; emailBlocked?: string | null;
@@ -173,7 +174,8 @@ export default function Reminders() {
               {template.length} / {data?.maxTemplate ?? 500} characters
             </div>
             <div className="muted small" style={{ margin: '4px 0 8px' }}>
-              {'{name}'} their contact person (or the business) · {'{staff}'} your first name ·
+              {'{name}'} their first name (a business: its contact person's; none on file, no name) ·
+              {' '}{'{fullname}'} the contact person's full name · {'{staff}'} your first name ·
               {' '}{'{place}'} the address(es) due that day, e.g. "Head office, 12 Hope Road" ·
               {' '}{'{when}'} "tomorrow, Thu 8 Oct" · {'{ask}'} "Would you like your usual 3 cases of 500ml?" ·
               {' '}{'{link}'} the link to order online · {'{business}'} the business name · {'{zone}'} the round.
@@ -227,6 +229,12 @@ export default function Reminders() {
               </div>
             </div>
             <div className="remind-msg" style={{ whiteSpace: 'pre-line' }}>{r.message}</div>
+            {r.noGreetingName && (
+              <div className="muted small">
+                No contact person on file, so the greeting has no name.{' '}
+                <a href={`#/customers/${r.customerId}`}>Add one on their page</a>.
+              </div>
+            )}
           </div>
         );
       })}

@@ -82,6 +82,8 @@ export interface ReminderRow {
   zone: string | null;
   /** The addresses due that day, as the message names them ("Head office, 12 Hope Road, Kingston 6"). */
   places: string[];
+  /** A business with no contact person on file: the greeting has no name. */
+  noGreetingName: boolean;
   phone: string | null;
   whatsapp: string | null;
   email: string | null;
@@ -137,7 +139,7 @@ export function fillTemplate(template: string, v: Record<string, string>): strin
   return template
     .replace(/\r\n?/g, '\n')
     .replace(/\{(\w+)\}/g, (m, k: string) => (k in v ? v[k] : m))
-    .split('\n').map((l) => l.replace(/[ \t]{2,}/g, ' ').trim()).join('\n')
+    .split('\n').map((l) => l.replace(/[ \t]{2,}/g, ' ').replace(/[ \t]+([,.!?])/g, '$1').trim()).join('\n')
     .replace(/\n{3,}/g, '\n\n')
     .trim();
 }
@@ -154,6 +156,35 @@ function placeWords(label: string | null, address: string | null): string {
   const a = address?.trim() || '';
   if (l && a) return `${l}, ${a}`;
   return l || a || 'your address';
+}
+
+const COURTESY = /^(mr|mrs|ms|miss|mstr)\.?$/i;
+const STANDING = /^(dr|fr|rev|revd|pastor|pst|prof|sis|bro|deacon|deaconess|deconess)\.?$/i;
+
+/**
+ * How the reminder greets them (Everton, 26 Nov 2026): the first name, which
+ * feels personal, not the full name or the company. "Andrea Fullwood/Will
+ * Arcwelding" -> "Andrea"; "ALAN WILES" -> "Alan"; "Ms. Alicia Brown" ->
+ * "Alicia". A title that IS the greeting stays with the surname: "Ms. Frasier",
+ * "Dr. Kevin Harvey" -> "Dr. Harvey", "Fr. Clifton Harris" -> "Fr. Harris".
+ */
+export function greetingName(raw: string | null | undefined): string {
+  const first = String(raw ?? '').split(/[\/&]|\band\b/i)[0].replace(/\([^)]*\)/g, ' ').trim();
+  const words = first.split(/\s+/).filter(Boolean);
+  if (words.length === 0) return '';
+  const tidy = (w: string) => (w === w.toUpperCase() && /[A-Z]{2}/.test(w)
+    ? w.charAt(0) + w.slice(1).toLowerCase() : w);
+  const t = words[0];
+  if (STANDING.test(t) && words.length > 1) {
+    const title = t.replace(/\.?$/, '.');
+    return `${title.charAt(0).toUpperCase()}${title.slice(1).toLowerCase()} ${tidy(words[words.length - 1])}`;
+  }
+  if (COURTESY.test(t)) {
+    if (words.length === 2) return `${t.replace(/\.?$/, '.')} ${tidy(words[1])}`;
+    if (words.length > 2) return tidy(words[1]);
+    return '';
+  }
+  return tidy(t);
 }
 
 /** Whoever sends the reminder signs it with their first name. */
@@ -182,12 +213,12 @@ export async function remindersFor(db: Db, opts: { date?: string | null; actor?:
     : date === today ? `today, ${dayWords(date)}` : `on ${dayWords(date)}`;
 
   const customers = await db.query<{
-    id: string; name: string; contact_person: string | null; delivery_zone: string | null;
+    id: string; name: string; contact_person: string | null; delivery_zone: string | null; account_type: string;
     phone: string | null; whatsapp: string | null; email: string | null; service_emails: boolean;
     balance_cents: number; address_label: string | null; delivery_address: string | null;
     main_due: boolean; main_ordered: boolean;
   }>(
-    `SELECT c.id, c.name, c.contact_person, c.delivery_zone, c.phone, c.whatsapp, c.email,
+    `SELECT c.id, c.name, c.contact_person, c.account_type, c.delivery_zone, c.phone, c.whatsapp, c.email,
             c.service_emails, COALESCE(b.balance_cents, 0)::bigint AS balance_cents,
             c.address_label, c.delivery_address,
             -- Their own delivery days, or (none set) the days their zone's round runs.
@@ -245,7 +276,10 @@ export async function remindersFor(db: Db, opts: { date?: string | null; actor?:
     if (places.length === 0) continue;
     const usual = await usualOrder(db, c.id);
     const message = fillTemplate(template, {
-      name: c.contact_person?.trim() || c.name,
+      // First name of the contact person; an individual with none, their own
+      // first name; a business with none, no name at all ("Good day, it's …").
+      name: greetingName(c.contact_person) || (c.account_type === 'Individual' ? greetingName(c.name) : ''),
+      fullname: c.contact_person?.trim() || c.name,
       business: c.name,
       zone: c.delivery_zone ?? 'your area',
       when,
@@ -262,6 +296,7 @@ export async function remindersFor(db: Db, opts: { date?: string | null; actor?:
       customerId: c.id,
       name: c.name,
       contactPerson: c.contact_person,
+      noGreetingName: !greetingName(c.contact_person) && c.account_type !== 'Individual',
       zone: c.delivery_zone,
       places,
       phone: c.phone,
