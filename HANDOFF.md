@@ -3530,3 +3530,56 @@ expected empties (so the bottle variance) and the reports summed every stop.
   "N empties listed, not counted (not delivered)".
 - Already-settled rounds keep their stored bottle_variance (not re-worked).
 - Tests: failedstopempties.test.ts (2). API 735.
+
+## Delivered short, nothing more to come, 27 Nov 2026
+
+His report: Imperial Optical's order was delivered short on today's round,
+"but the order is requesting another round instead of just being closed and
+going to invoice". The driver's button reads "Delivered (they took less,
+nothing more to come)", but markStop left the order Partially Delivered,
+so it showed under Deliveries with no round ("Part delivered: the rest still
+needs a round").
+
+- Migration 051: customer_orders.closed_short_at, closed_short_note.
+- orders.refreshOrderStatus: delivered > 0 and closed short = Delivered.
+- orders.closeShortIn / closeShort: Partially Delivered only; sets the mark,
+  clears off_round, takes any untouched Pending stop for the rest off its
+  open round, audit-logged. POST /api/orders/:id/close-short (admin, user).
+- markStop: Delivered with less and no remainderTo now closes short.
+- Settlement correction (HandedOverFix): a "They took less: nothing more to
+  come" tick sends closeShort: true instead of a day for the rest.
+- Orders ⋯ "Close it: nothing more to come" on Partially Delivered orders;
+  Deliveries with no round: "Nothing more to come" beside Put on its round
+  for part-delivered orders. Invoicing is unchanged: the stop already
+  invoiced what went (weekly/monthly customers: it waits for the cycle).
+- Tests: closedshort.test.ts (3). API 738.
+- For Imperial Optical (and any other order stuck the same way) once live:
+  Orders ⋯ Close it: nothing more to come.
+
+## Stray cents on credit, 27 Nov 2026
+
+His report: Doris Jackson's stop asked for J$999.99, not J$1,000. Her invoice
+was J$1,000.00; she had J$0.01 credit. Pre-4-Nov invoices of J$999.99 paid
+with J$1,000 left a cent on account, and it loops: the cent goes on the
+next invoice and the whole-dollar cash leaves a new one. Live audit (27 Nov,
+read-only): 14 customers with a J$0.01 credit row (11 at exactly -J$0.01,
+3 inside a balance owed), 2 real credits with a tail (Danielle Andrade
+Goffe 3,700.01, Jon-Paul Morrison 2,000.02). No invoice had cents left owing.
+
+His ruling: clear any odd cents of J$0.04 or less on a customer's credit,
+whatever the rest of the balance; admin-only, ticked from a list; a
+"Rounding adjustment" on account and statement; receipts unchanged.
+
+- services/straycents.ts: listStrayCents (credit rows = unattached,
+  confirmed, not reversed, positive, not kept for an undelivered order;
+  tail = sum % 100, 1-4 cents), clearStrayCents (admin; splits the cents off
+  a larger row, same receipt number, then reverses them with kind
+  'Rounding'). The reversed cent can never go on an invoice again
+  (moneyOnAccount skips reversed rows).
+- GET /api/stray-cents, POST /api/stray-cents/clear {customerIds} (admin).
+- Statement (ledger.ts): kind 'Rounding' reads "Rounding adjustment".
+  End of day money and Payments received leave Rounding rows out. Receipt
+  PDFs already skip reversals, so receipts add up as before.
+- Payments screen (admin): "Stray cents on credit (N)" panel, Review and
+  clear…, every row ticked by default.
+- Tests: straycents.test.ts (2). API 740.

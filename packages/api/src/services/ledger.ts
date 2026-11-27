@@ -163,8 +163,10 @@ export async function getStatement(
 
       -- Every Confirmed payment, attached or unattached, in one category.
       SELECT to_char(p.payment_date AT TIME ZONE $2, 'YYYY-MM-DD') AS entry_date,
-             CASE WHEN p.is_reversal THEN 'Reversal' ELSE 'Payment' END AS type,
+             CASE WHEN p.kind = 'Rounding' THEN 'Adjustment' WHEN p.is_reversal THEN 'Reversal' ELSE 'Payment' END AS type,
              CASE
+               -- Stray cents cleared (27 Nov 2026).
+               WHEN p.kind = 'Rounding' THEN 'Rounding adjustment'
                WHEN p.is_reversal THEN 'Payment reversed'
                -- Says WHY the reference is blank. A row reading "Payment
                -- received" next to an empty reference column looks like data

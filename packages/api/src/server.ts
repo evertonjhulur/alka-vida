@@ -25,6 +25,7 @@ import * as endofday from './services/endofday.ts';
 import * as undoDelivery from './services/undodelivery.ts';
 import * as routing from './services/routing.ts';
 import * as rounds from './services/rounds.ts';
+import * as straycents from './services/straycents.ts';
 import * as settlement from './services/settlement.ts';
 import * as opsreports from './services/opsreports.ts';
 import * as invoices from './services/invoices.ts';
@@ -1221,6 +1222,16 @@ export async function buildServer(db: Db) {
   // Delete a round that has not started and has nothing recorded (27 Oct 2026).
   app.delete('/api/delivery-sheets/:id', { preHandler: allow('admin', 'user') },
     async (req) => routing.deleteRound(db, actorOf(req), (req.params as { id: string }).id));
+
+  // Stray cents on credit (27 Nov 2026): admins review and clear them.
+  app.get('/api/stray-cents', { preHandler: allow('admin') }, async () => straycents.listStrayCents(db));
+  app.post('/api/stray-cents/clear', { preHandler: allow('admin') },
+    async (req) => straycents.clearStrayCents(db, actorOf(req), (req.body ?? {}) as { customerIds?: string[] }));
+
+  // Delivered short, nothing more to come (27 Nov 2026).
+  app.post('/api/orders/:id/close-short', { preHandler: allow('admin', 'user') },
+    async (req) => orders.closeShort(db, actorOf(req), (req.params as { id: string }).id,
+      ((req.body ?? {}) as { reason?: string | null }).reason ?? null));
 
   /* ---------------- several rounds a day (27 Nov 2026) ---------------- */
 

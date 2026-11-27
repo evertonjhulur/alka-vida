@@ -84,6 +84,12 @@ export default function NoRoundPanel({ forDay, onChange }: {
     return `${r.orderNumber} is on the ${r.zone} round for ${dayText(r.day)}.`;
   });
 
+  // Part delivered and nothing more is coming (27 Nov 2026).
+  const closeShort = (o: NoRoundOrder) => act(o.id, async () => {
+    const r = await api.post<{ orderNumber: string }>(`/api/orders/${o.id}/close-short`, {});
+    return `${r.orderNumber} is closed as delivered: nothing more to come.`;
+  });
+
   const setZone = (c: NoZoneCustomer) => act(c.id, async () => {
     const r = await api.post<{ placed: string[]; emailed: boolean }>(`/api/customers/${c.id}/zone`, { zone: zoneFor[c.id] });
     return [`${c.name} is in ${zoneFor[c.id]}.`,
@@ -138,6 +144,11 @@ export default function NoRoundPanel({ forDay, onChange }: {
                         onClick={() => putOn(o)}>
                   {busy === o.id ? 'Placing…' : 'Put on its round'}
                 </button>
+                {o.kind === 'rest' && (
+                  <button type="button" className="secondary" disabled={busy !== null} onClick={() => closeShort(o)}>
+                    Nothing more to come
+                  </button>
+                )}
               </span>
             </li>
           );

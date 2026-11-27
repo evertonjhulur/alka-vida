@@ -104,6 +104,7 @@ export async function endOfDay(db: Db, day: string) {
      LEFT JOIN users du ON du.id = d.assigned_driver_id
      LEFT JOIN users cu ON cu.id = p.created_by_id
      WHERE business_date(p.payment_date) = $1::date
+       AND p.kind IS DISTINCT FROM 'Rounding'
      ORDER BY p.payment_date`, [day]);
   const payments = payRows.map((r) => ({
     id: r.id as string, amountCents: num(r.amount_cents), method: r.method as string,

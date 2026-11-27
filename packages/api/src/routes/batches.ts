@@ -85,6 +85,7 @@ export function registerBatchRoutes(
        LEFT JOIN customer_orders o ON o.id = p.order_id
        LEFT JOIN delivery_sheets ds ON ds.id = p.delivery_sheet_id
        WHERE p.status = 'Confirmed'
+         AND p.kind IS DISTINCT FROM 'Rounding'
          AND ($1::uuid IS NULL OR p.customer_id = $1::uuid)
          AND ($2::date IS NULL OR business_date(p.payment_date) >= $2::date)
          AND ($3::date IS NULL OR business_date(p.payment_date) <= $3::date)

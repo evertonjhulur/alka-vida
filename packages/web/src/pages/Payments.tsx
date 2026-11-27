@@ -10,6 +10,7 @@ import { todayInJamaica as todayJa } from '../lib/format';
 import CustomerPicker, { type PickerCustomer } from '../components/CustomerPicker';
 import { PaymentFixPanel, PaymentMenu, usePaymentFix } from '../components/PaymentMenu';
 import SplitTransfer from '../components/SplitTransfer';
+import StrayCents from '../components/StrayCents';
 
 /**
  * Payments: money received outside a round (approved mockup, 29 Sep 2026).
@@ -184,6 +185,10 @@ export default function Payments() {
         <SplitTransfer invoices={open} customers={customers} takeCard={takeCard}
                        onCancel={() => setSplitting(false)}
                        onDone={(m) => { setSplitting(false); setError(null); setMsg(m); load().catch(() => {}); setStamp((n) => n + 1); }} />
+      )}
+
+      {getSession()?.role === 'admin' && !splitting && (
+        <StrayCents onDone={(m) => { setError(null); setMsg(m); load().catch(() => {}); setStamp((n) => n + 1); }} />
       )}
 
       {!splitting && <form className="panel" onSubmit={receive}>

@@ -21,7 +21,7 @@ import { createInvoice, openInvoicesForCustomer } from './invoices.ts';
 import { applyAccountCredit } from './payments.ts';
 import {
   addBottleChargeLine, bottleChargeProduct, deliveryTarget, placeOnDeliverySheet, recomputeDelivered, settleDateRequest,
-  refreshOrderStatus, summariseOrderLines, summariseRemaining,
+  refreshOrderStatus, summariseOrderLines, summariseRemaining, closeShortIn,
 } from './orders.ts';
 import { applyDeliveryMovement, bottleAccount, recordBottlesSold } from './bottles.ts';
 import { takeFinishedGoods, stopBottles } from './stockmoves.ts';
@@ -265,6 +265,11 @@ async function recordStopOutcome(
         }
         remainderTo = await sendRemainder(t, stop.id, stop.order_id, stop.customer_id,
           sheet.delivery_date, input.remainderTo);
+      } else if (orderStatus === 'Partially Delivered') {
+        // "Delivered (they took less, nothing more to come)" (27 Nov 2026):
+        // the order closes short instead of waiting for a round for the rest.
+        orderStatus = (await closeShortIn(t, actor, stop.order_id,
+          `They took less on the ${shortDay(sheet.delivery_date)} round: nothing more to come`)).status;
       }
     }
 

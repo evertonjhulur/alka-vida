@@ -1269,14 +1269,15 @@ export async function refreshOrderStatus(t: Queryable, orderId: string): Promise
      FROM order_line_items WHERE order_id = $1`,
     [orderId],
   );
-  const current = await t.one<{ status: string }>(
-    `SELECT status FROM customer_orders WHERE id = $1`, [orderId],
+  const current = await t.one<{ status: string; closed_short_at: string | null }>(
+    `SELECT status, closed_short_at FROM customer_orders WHERE id = $1`, [orderId],
   );
   if (current.status === 'Cancelled') return current.status;
 
+  // Closed short (27 Nov 2026): some went, nothing more is coming.
   const status = num(agg.delivered) === 0
     ? 'Pending'
-    : num(agg.delivered) >= num(agg.ordered)
+    : num(agg.delivered) >= num(agg.ordered) || current.closed_short_at
       ? 'Delivered'
       : 'Partially Delivered';
 
@@ -1442,4 +1443,46 @@ export async function summariseRemaining(t: Queryable, orderId: string): Promise
     .filter((r) => num(r.cases) > 0 || num(r.loose) > 0)
     .map((r) => (num(r.bpc) > 0 ? `${num(r.cases)} cs ${r.name}` : `${num(r.loose)} x ${r.name}`))
     .join(', ');
+}
+
+/**
+ * Delivered short, nothing more to come (Everton, 27 Nov 2026). The order
+ * reads Delivered with what was handed over; the rest is never sent. Any stop
+ * still waiting for the rest on an open round comes off it. Used by the
+ * driver's "they took less, nothing more to come", by a settlement correction
+ * and by Orders › Close it short.
+ */
+export async function closeShortIn(
+  t: Queryable, actor: Actor, orderId: string, note: string,
+): Promise<{ orderNumber: string; status: string; stopsRemoved: number }> {
+  const o = await t.maybeOne<{ order_number: string; status: string }>(
+    `SELECT order_number, status FROM customer_orders WHERE id = $1 FOR UPDATE`, [orderId]);
+  if (!o) throw new RuleViolation('that order no longer exists');
+  if (o.status !== 'Partially Delivered') {
+    throw new RuleViolation(o.status === 'Pending'
+      ? `nothing on ${o.order_number} has been delivered yet, so cancel it instead`
+      : `${o.order_number} is ${o.status.toLowerCase()}`);
+  }
+  await t.query(
+    `UPDATE customer_orders SET closed_short_at = now(), closed_short_note = $2,
+            off_round_at = NULL, off_round_note = NULL
+     WHERE id = $1`, [orderId, note]);
+  // The rest waiting on a round (nothing recorded on it yet) comes off.
+  const waiting = await t.query<{ id: string }>(
+    `SELECT st.id FROM delivery_stops st JOIN delivery_sheets ds ON ds.id = st.delivery_sheet_id
+     WHERE st.order_id = $1 AND ds.status = 'Open' AND st.stop_outcome = 'Pending'
+       AND st.invoice_id IS NULL AND st.settled_at IS NULL AND COALESCE(st.payment_amount_cents, 0) = 0`, [orderId]);
+  if (waiting.length) await t.query(`DELETE FROM delivery_stops WHERE id = ANY($1::uuid[])`, [waiting.map((w) => w.id)]);
+  const status = await refreshOrderStatus(t, orderId);
+  await audit(t, actor, 'update', 'CustomerOrder', orderId, o.order_number, {
+    closedShort: note, ...(waiting.length ? { restTakenOffRound: waiting.length } : {}),
+  });
+  return { orderNumber: o.order_number, status, stopsRemoved: waiting.length };
+}
+
+export async function closeShort(db: Db, actor: Actor, orderId: string, reason?: string | null) {
+  requireRole(actor, 'admin', 'user');
+  const why = reason?.trim();
+  return db.tx((t) => closeShortIn(t, actor, orderId,
+    `Closed short by ${actor.name}${why ? `: ${why}` : ': nothing more to come'}`));
 }

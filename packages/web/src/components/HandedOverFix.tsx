@@ -56,6 +56,8 @@ export default function HandedOverFix({ stopId, onDone, onCancel }: {
   const [stop, setStop] = useState<StopDetail | null>(null);
   const [qty, setQty] = useState<Record<string, string>>({});
   const [restOn, setRestOn] = useState('');
+  /** Nothing more is coming: the order closes short (27 Nov 2026). */
+  const [noMore, setNoMore] = useState(false);
   const [reason, setReason] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -93,12 +95,12 @@ export default function HandedOverFix({ stopId, onDone, onCancel }: {
           deliveredLines: goods.map((l) => (l.bottles_per_case > 0
             ? { orderLineId: l.order_line_id, cases: entered(l), looseBottles: 0 }
             : { orderLineId: l.order_line_id, cases: 0, looseBottles: entered(l) })),
-          ...(short ? { restOn } : {}),
+          ...(short ? (noMore ? { closeShort: true } : { restOn }) : {}),
         },
         reason,
       });
       onDone(out.applied
-        ? `What was handed over is corrected. The invoice, stock and bottles follow${short ? ', and the rest goes out on the day chosen' : ''}.`
+        ? `What was handed over is corrected. The invoice, stock and bottles follow${short ? (noMore ? ', and the order is closed: nothing more to come' : ', and the rest goes out on the day chosen') : ''}.`
         : 'Sent to an administrator to approve; nothing changes until they do.');
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Could not save the correction');
@@ -136,11 +138,19 @@ export default function HandedOverFix({ stopId, onDone, onCancel }: {
       {nothing && <div className="notice warn small">Nothing handed over at all: if nothing went, an administrator uses Undo — delivered in error on the order instead.</div>}
       {short && !tooMany && !nothing && (
         <div className="field" style={{ marginTop: 8 }}>
-          <label htmlFor={`rest-${stopId}`}>The rest goes out on</label>
-          <input id={`rest-${stopId}`} type="date" min={minRest} value={restOn} disabled={busy}
-                 onChange={(e) => setRestOn(e.target.value)} />
-          <div className="muted small">It goes on that day's round as "Rest of order", invoiced when it is delivered.
-            A customer with no delivery zone has it waiting for that day: add it to a round by hand.</div>
+          <label style={{ display: 'flex', gap: 6, alignItems: 'center', fontWeight: 'normal' }}>
+            <input type="checkbox" checked={noMore} disabled={busy} onChange={(e) => setNoMore(e.target.checked)} />
+            They took less: nothing more to come (close the order)
+          </label>
+          {!noMore && (
+            <>
+              <label htmlFor={`rest-${stopId}`}>The rest goes out on</label>
+              <input id={`rest-${stopId}`} type="date" min={minRest} value={restOn} disabled={busy}
+                     onChange={(e) => setRestOn(e.target.value)} />
+              <div className="muted small">It goes on that day's round as "Rest of order", invoiced when it is delivered.
+                A customer with no delivery zone has it waiting for that day: add it to a round by hand.</div>
+            </>
+          )}
         </div>
       )}
       <div className="field">
@@ -150,7 +160,7 @@ export default function HandedOverFix({ stopId, onDone, onCancel }: {
                onChange={(e) => setReason(e.target.value)} />
       </div>
       <div className="row" style={{ gap: 8 }}>
-        <button type="button" disabled={busy || !reason.trim() || tooMany || nothing || (short && !restOn)} onClick={save}>
+        <button type="button" disabled={busy || !reason.trim() || tooMany || nothing || (short && !noMore && !restOn)} onClick={save}>
           {busy ? 'Saving…' : appliesNow ? 'Save what was handed over' : 'Send for approval'}
         </button>
         {onCancel && <button type="button" className="secondary" disabled={busy} onClick={onCancel}>Close</button>}

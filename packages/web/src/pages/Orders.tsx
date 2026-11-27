@@ -216,6 +216,16 @@ export default function Orders() {
       await load();
     } catch (e) { setError(e instanceof Error ? e.message : 'Could not change it'); } finally { setBusy(false); }
   }
+  // Delivered short, nothing more to come (27 Nov 2026).
+  async function closeShort(o: Order) {
+    setMenuFor(null); setBusy(true); setError(null); setMsg(null);
+    try {
+      const r = await api.post<{ orderNumber: string; stopsRemoved: number }>(`/api/orders/${o.id}/close-short`, {});
+      setMsg(`${r.orderNumber} is closed as delivered: nothing more to come.`
+        + (r.stopsRemoved ? ' The rest was taken off its round.' : ''));
+      await load();
+    } catch (e) { setError(e instanceof Error ? e.message : 'Could not close it'); } finally { setBusy(false); }
+  }
   useEffect(() => { load().catch((e) => setError(e.message)); }, [when, range.from, range.to, range.by]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // A click anywhere else closes the ⋯ menu.
@@ -548,6 +558,11 @@ export default function Orders() {
           <button role="menuitem" className="pop-item pop-button"
                   onClick={() => { void putOnRound(o); }}>Put on its round</button>
         ))}
+        {o.status === 'Partially Delivered' && (
+          <button role="menuitem" className="pop-item pop-button" onClick={() => { void closeShort(o); }}>
+            Close it: nothing more to come
+          </button>
+        )}
         {orderStage(o) === 'pending' && (
           <button role="menuitem" className="pop-item pop-button" onClick={() => markReady(o, true)}>
             {o.delivery_mode === 'Pickup' ? 'Mark ready to collect' : 'Mark ready'}

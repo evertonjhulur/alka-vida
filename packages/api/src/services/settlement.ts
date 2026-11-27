@@ -28,7 +28,7 @@ import type { Cents } from '@alka/shared';
 import { planPayments, validateAllocation, RuleViolation } from '@alka/shared';
 import { insertPayment } from './payments.ts';
 import { amountOwedForStop, sendRemainder } from './delivery.ts';
-import { recomputeDelivered, refreshOrderStatus } from './orders.ts';
+import { closeShortIn, recomputeDelivered, refreshOrderStatus } from './orders.ts';
 import { editInvoiceIn, openInvoicesForCustomer } from './invoices.ts';
 import { collectedEmpties, settleCollections } from './collections.ts';
 import { unconfirmedAdditions } from './trucks.ts';
@@ -319,6 +319,8 @@ export interface StopCorrection {
    * something on the order.
    */
   restOn?: string | null;
+  /** Or: nothing more is coming, so the order closes short (27 Nov 2026). */
+  closeShort?: boolean;
   /** Words for Needs a decision, e.g. "2 cs Alka Vida 280 ml → 0". Set by the server. */
   quantitiesSummary?: string;
   /** The driver's note on the stop. */
@@ -580,7 +582,7 @@ async function correctHandedOver(
   }
 
   await recomputeDelivered(t, orderId);
-  const orderStatus = await refreshOrderStatus(t, orderId);
+  let orderStatus = await refreshOrderStatus(t, orderId);
 
   // Full 5-gallon bottles out follow the 5-gallon lines, unless given.
   if (fullsChange !== 0 && (changes.bottlesDeliveredFull === undefined || changes.bottlesDeliveredFull === null)) {
@@ -650,8 +652,12 @@ async function correctHandedOver(
 
   // The rest goes on the day chosen.
   let restOn: string | null = null;
-  if (orderStatus === 'Partially Delivered') {
-    if (!changes.restOn) throw new RuleViolation('choose the day the rest goes out');
+  if (orderStatus === 'Partially Delivered' && changes.closeShort) {
+    // Nothing more to come (27 Nov 2026): closed short, no round for the rest.
+    orderStatus = (await closeShortIn(t, actor, orderId,
+      `Closed short when the ${now.sheet_date} stop was corrected: ${reason}`)).status;
+  } else if (orderStatus === 'Partially Delivered') {
+    if (!changes.restOn) throw new RuleViolation('choose the day the rest goes out, or that nothing more is coming');
     restOn = await sendRemainder(t, stopId, orderId, stop.customer_id, String(now.sheet_date), changes.restOn,
       { allowNoRound: true });
   }
