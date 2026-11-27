@@ -3447,3 +3447,86 @@ emails are switched back on).
   status, ⋯ Put on its round, batch "Put on their rounds".
 - Tests: noround.test.ts (11); signup test updated. API 718 (with
   charges), shared 80, web 16. Walked in Chrome on a local copy.
+
+## Several rounds a day, 27 Nov 2026
+
+His ask: "I need to create multiple rounds on the same day, for different
+drivers etc., reassigning customers from rounds due to reasons." His
+rulings: (1) new orders follow the first round of their zone and day that
+has not started; (2) a round may mix zones once stops are put on it by
+hand, and rounds can be merged; (3) stops can be moved after a round has
+started, with the driver re-sorting; (4) the reason for a move is optional.
+
+- Migration 050: drops the unique "one open round per zone per day" index
+  (plain index instead); delivery_sheets.name, created_by_name,
+  resort_needed_at, resort_note.
+- orders.placeOnDeliverySheet: picks the first Open, NOT started round for
+  the zone and day (by created_at). If rounds exist but all have started,
+  the order is not placed: off_round_note "Every X round for <day> had
+  already started", so it shows under Deliveries with no round (before,
+  it joined the started round). With no round at all, one is made, as before.
+- services/rounds.ts (+ roundzones.ts for STOP_ZONES_SQL / labelOf):
+  createRound (today or later; zone must exist; a second round for the same
+  zone/day is auto-named "<zone> 2"; optional driver via assignDriver,
+  vehicle, name), updateRound (name, vehicle), moveTargets (other open
+  rounds that day), moveStops (pending delivery stops with no money on
+  them, same day only; joins a started round at the end, else at the
+  customer's usual place), mergeRound (the merged round must not have
+  started and have nothing recorded; stops + pending collections move; the
+  round is deleted).
+- Goods: a stop moved off a truck whose load the driver confirmed leaves
+  its water on it (counted back at the end); moved onto one, a load
+  addition is made (stock off the shelf) for the driver to reconfirm
+  (trucks.recordAddition). A loading logged but unconfirmed only gets a
+  warning to change it. Merge carries the merged round's loading across
+  without moving stock: becomes the other round's loading, is added into
+  its unconfirmed loading, or is an addition (no shelf move) to a confirmed
+  one; if the other round is out with no loading, it goes back on the shelf.
+- Mid-round re-sort: moving or merging onto a started round sets
+  resort_needed_at. locations.loadSheetForSort then allows sorting the
+  Pending stops only, from the last worked stop's pin; applySort numbers
+  them after the worked stops, never saves "usual", clears the flag.
+  routing.keepStopOrder clears it without sorting. alerts.ts pushes "Your
+  stops changed" to the driver (claimKey 'resort').
+- Routes: POST /api/delivery-sheets (new round), PATCH
+  /api/delivery-sheets/:id, GET /api/delivery-sheets/:id/move-targets,
+  POST /api/stops/move {stopIds, toSheetId, reason}, POST
+  /api/delivery-sheets/:id/merge {intoSheetId, reason}, POST
+  /api/delivery-sheets/:id/keep-order. listSheets/getSheet return
+  stop_zones; round names shown on the delivery sheet PDF, rounds report,
+  End of day, driver stop and stock-ledger labels.
+- Screens: Delivery rounds "+ New round" panel; Round column shows the name
+  with zone, other zones and vehicle. Round page: Name and vehicle, Merge
+  into another round, tick boxes + "Move to another round", a Move button
+  per pending stop, the "Stops changed while the round is out" notice with
+  Keep the order. My route: "Your stops changed" panel with Sort / Keep.
+- Tests: severalrounds.test.ts (10); feedback.test.ts's started-round test
+  moved to a day of its own. API 733, shared 80, web 16. Walked in Chrome
+  on a local copy.
+- Not done: moving goods truck-to-truck in the app (a stop moved onto a
+  confirmed load is always taken off the shelf); collection stops are not
+  moved one by one (they go with a merge); rounds by hand for past days.
+
+## Failed stops showing empties collected, 27 Nov 2026
+
+His report: "stops in the delivery rounds failed but empties marked
+collected. I think it's the pre-fill of the empties." Right: DriverStop
+pre-fills the empties box (what they said they'd hand over, else fulls up to
+what they hold) and record() sent it with every outcome. Customer bottle
+accounts and the empties at the plant were never affected (they count
+Delivered stops only), but the round's "Empties back", the settlement's
+expected empties (so the bottle variance) and the reports summed every stop.
+
+- DriverStop: a non-Delivered outcome sends only empties the driver typed;
+  a hint says so under the box.
+- markStop: a non-Delivered outcome stores 0 fulls / empties / lost, whatever
+  is sent (empties without a delivery go on an Empties collection stop).
+- Totals count Delivered stops only: settlement review (emptiesFromStops,
+  fullOut), settleRoute's bottles_out, the correction's variance re-work,
+  reports (bottles back; rounds report empties_recorded), RouteDetail and
+  DriverRoute sums.
+- applyStopCorrection: on a stop not delivered, empties can only be cleared
+  (> 0 refused) and clearing moves no stock. Settlement shows old listings as
+  "N empties listed, not counted (not delivered)".
+- Already-settled rounds keep their stored bottle_variance (not re-worked).
+- Tests: failedstopempties.test.ts (2). API 735.

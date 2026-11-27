@@ -1,8 +1,9 @@
-import { useCallback, useEffect, useState } from 'react';
-import { Link, useNavigate, useParams } from 'react-router-dom';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { Link, useLocation, useNavigate, useParams } from 'react-router-dom';
 import { ask } from '../components/Dialog';
 import { api, openPdf, type Session } from '../lib/api';
 import SortStopsPanel from '../components/SortStopsPanel';
+import { otherZones, roundTitle } from '../lib/rounds';
 import { money, date, day, time, when } from '../lib/format';
 import {
   AddStopPanel, AddToLoadPanel, AdditionsList, LoadingPanel, ReturnsPanel, SamePersonFlag, TruckTable, KIND_WORDS, collectionSummary, loaderWords,
@@ -53,6 +54,99 @@ interface Sheet {
   expected_cash_cents?: number | string | null; actual_cash_cents?: number | string | null; cash_variance_cents?: number | string | null;
   settlement_notes?: string | null; bottle_actual_returned?: number | null; bottle_variance?: number | null;
   bottle_settle_notes?: string | null; reconciled_date?: string | null; reconciled_by_name?: string | null;
+  /** Several rounds a day (27 Nov 2026). */
+  name?: string | null; stop_zones?: string[];
+  resort_needed_at?: string | null; resort_note?: string | null;
+}
+
+interface Target {
+  id: string; label: string; zone: string; driverName: string | null; vehicle: string | null;
+  started: boolean; stopCount: number; stopZones: string[];
+}
+
+/**
+ * Move stops to another round the same day, or merge this whole round into
+ * one (27 Nov 2026). The reason is optional.
+ */
+function ToRoundPanel({ sheetId, mode, stopIds, names, onDone, onCancel }: {
+  sheetId: string; mode: 'move' | 'merge'; stopIds: string[]; names: string[];
+  onDone: (message: string, goTo?: string) => void; onCancel: () => void;
+}) {
+  const [targets, setTargets] = useState<Target[] | null>(null);
+  const [to, setTo] = useState('');
+  const [reason, setReason] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    api.get<Target[]>(`/api/delivery-sheets/${sheetId}/move-targets`).then(setTargets)
+      .catch((e) => setError(e instanceof Error ? e.message : 'Could not list the rounds'));
+  }, [sheetId]);
+  const chosen = targets?.find((t) => t.id === to);
+  // Opened from a stop further down the page: bring the panel into view.
+  const box = useRef<HTMLDivElement>(null);
+  useEffect(() => { box.current?.scrollIntoView({ behavior: 'smooth', block: 'center' }); }, [stopIds.join(','), mode]);
+  async function go() {
+    setBusy(true); setError(null);
+    try {
+      if (mode === 'move') {
+        const r = await api.post<{ moved: string[]; to: string; warnings: string[] }>('/api/stops/move',
+          { stopIds, toSheetId: to, reason: reason.trim() || null });
+        onDone(`${r.moved.join(', ')} moved to the ${r.to} round.${r.warnings.length ? ` ${r.warnings.join(' ')}` : ''}`);
+      } else {
+        const r = await api.post<{ into: string; moved: string[]; warnings: string[] }>(`/api/delivery-sheets/${sheetId}/merge`,
+          { intoSheetId: to, reason: reason.trim() || null });
+        onDone(`Merged into the ${r.into} round${r.moved.length ? ` (${r.moved.length} ${r.moved.length === 1 ? 'stop' : 'stops'})` : ''}.`
+          + `${r.warnings.length ? ` ${r.warnings.join(' ')}` : ''}`, to);
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'That did not work');
+      setBusy(false);
+    }
+  }
+  return (
+    <div className="panel" ref={box} style={{ borderColor: 'var(--info, #2563eb)' }}>
+      <h2 className="side-h" style={{ marginTop: 0 }}>
+        {mode === 'move'
+          ? `Move ${names.length === 1 ? names[0] : `${names.length} stops`} to another round`
+          : 'Merge this round into another'}
+      </h2>
+      {error && <div className="notice error">{error}</div>}
+      {targets && targets.length === 0 ? (
+        <p className="small">There is no other open round on this day. Make one first with + New round on Delivery rounds.</p>
+      ) : (
+        <div className="row" style={{ alignItems: 'flex-end' }}>
+          <div className="field" style={{ flex: '1 1 260px' }}>
+            <label htmlFor="to-round">To which round?</label>
+            <select id="to-round" value={to} onChange={(e) => setTo(e.target.value)} disabled={!targets}>
+              <option value="">{targets ? 'Choose a round…' : 'Loading…'}</option>
+              {(targets ?? []).map((t) => (
+                <option key={t.id} value={t.id}>
+                  {t.label}{t.stopZones.some((z) => z !== t.zone) ? ` (+ ${t.stopZones.filter((z) => z !== t.zone).join(', ')})` : ''}
+                  {` · ${t.driverName ?? 'no driver yet'}`}{t.vehicle ? `, ${t.vehicle}` : ''}
+                  {` · ${t.stopCount} ${t.stopCount === 1 ? 'stop' : 'stops'}`}{t.started ? ' · out on the road' : ''}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="field" style={{ flex: '1 1 220px' }}>
+            <label htmlFor="to-reason">Reason (optional)</label>
+            <input id="to-reason" value={reason} placeholder="e.g. truck down, driver off" onChange={(e) => setReason(e.target.value)} />
+          </div>
+        </div>
+      )}
+      {chosen?.started && (
+        <p className="small" style={{ color: 'var(--warn)' }}>
+          {chosen.label} is out on the road: the water is added to its load for the driver to reconfirm, and the driver is asked to sort the stops left to do.
+        </p>
+      )}
+      <div className="row" style={{ gap: 8 }}>
+        <button type="button" disabled={busy || !to} onClick={go}>
+          {busy ? 'Working…' : mode === 'move' ? 'Move' : 'Merge'}
+        </button>
+        <button type="button" className="secondary" disabled={busy} onClick={onCancel}>Cancel</button>
+      </div>
+    </div>
+  );
 }
 
 interface Driver { id: string; name: string; office?: boolean }
@@ -91,6 +185,13 @@ export default function RouteDetail({ session }: { session: Session }) {
   const [fixReturns, setFixReturns] = useState(false);
   /** Adding to a load the driver has already confirmed. */
   const [adding2, setAdding2] = useState(false);
+  /** Several rounds a day (27 Nov 2026): stops ticked to move, the move / merge panel, naming the round. */
+  const [picked, setPicked] = useState<string[]>([]);
+  const [toRound, setToRound] = useState<{ mode: 'move' | 'merge'; stopIds: string[] } | null>(null);
+  const [naming, setNaming] = useState(false);
+  const [nameDraft, setNameDraft] = useState('');
+  const [vehicleDraft, setVehicleDraft] = useState('');
+  const location = useLocation();
 
   const office = session.role === 'admin' || session.role === 'user';
   const navigate = useNavigate();
@@ -108,6 +209,11 @@ export default function RouteDetail({ session }: { session: Session }) {
   }, [sheetId, office]);
 
   useEffect(() => { load(); }, [load]);
+  // A message carried from the screen that sent us here (a round just made or merged into).
+  useEffect(() => {
+    const m = (location.state as { made?: string } | null)?.made;
+    if (m) setMsg(m);
+  }, [location.state]);
   useEffect(() => {
     if (office) api.get<Driver[]>('/api/drivers').then(setDrivers).catch(() => {});
   }, [office]);
@@ -204,8 +310,22 @@ export default function RouteDetail({ session }: { session: Session }) {
 
   const done = (message: string) => {
     setMsg(message); setError(null); setLoading(false); setAdding(false); setFixReturns(false); setAdding2(false);
+    setPicked([]); setToRound(null);
     load();
   };
+  const movedOrMerged = (message: string, goTo?: string) => {
+    if (goTo) { navigate(`/delivery/${goTo}`, { replace: true, state: { made: message } }); return; }
+    done(message);
+  };
+  const saveName = () => act(async () => {
+    await api.patch(`/api/delivery-sheets/${sheetId}`, { name: nameDraft.trim() || null, vehicle: vehicleDraft.trim() || null });
+    setNaming(false);
+    return 'Round updated.';
+  });
+  const keepOrder = () => act(async () => {
+    await api.post(`/api/delivery-sheets/${sheetId}/keep-order`);
+    return 'Stop order kept as it is.';
+  });
 
   if (error && !sheet) return <div className="notice error">{error}</div>;
   if (!sheet) return <p className="muted">Loading…</p>;
@@ -238,7 +358,9 @@ export default function RouteDetail({ session }: { session: Session }) {
   const onTruck = sheet.stops.reduce((t, s) => t + Number(s.order_total_cents ?? 0), 0);
   const cash = sheet.stops.reduce((t, s) => t + Number(s.payment_amount_cents ?? 0), 0);
   const fullOut = sheet.stops.reduce((t, s) => t + Number(s.bottles_delivered_full ?? 0), 0);
-  const emptiesBack = sheet.stops.reduce((t, s) => t + Number(s.bottles_empties_picked_up ?? 0), 0)
+  // Delivered stops only: a stop that did not happen moved no bottles (27 Nov 2026).
+  const emptiesBack = sheet.stops.filter((s) => s.stop_outcome === 'Delivered')
+    .reduce((t, s) => t + Number(s.bottles_empties_picked_up ?? 0), 0)
     + collections.filter((c) => c.kind === 'Empties' && c.status === 'Collected').reduce((t, c) => t + Number(c.empties_count), 0);
   const stillOut = visitCount - worked;
   const truck = sheet.truck;
@@ -248,7 +370,7 @@ export default function RouteDetail({ session }: { session: Session }) {
     <>
       <Link to="/delivery" className="back-link">← Delivery rounds</Link>
       <div className="inv-title">
-        <h1>{sheet.zone} · {day(sheet.delivery_date)} {date(sheet.delivery_date).slice(0, 4)}</h1>
+        <h1>{roundTitle(sheet)} · {day(sheet.delivery_date)} {date(sheet.delivery_date).slice(0, 4)}</h1>
         <span className={`chip ${statusChip[1]}`}>{statusChip[0]}</span>
         {/* The paper copy for the driver (25 Oct 2026): opens in a new tab to print or save. */}
         <button type="button" className="secondary" style={{ marginLeft: 'auto' }}
@@ -257,7 +379,9 @@ export default function RouteDetail({ session }: { session: Session }) {
         </button>
       </div>
       <p className="subtitle">
-        {[sheet.driver_name ?? 'No driver yet', sheet.vehicle,
+        {[sheet.name ? `${sheet.zone} zone` : null,
+          otherZones(sheet).length ? `also ${otherZones(sheet).join(', ')}` : null,
+          sheet.driver_name ?? 'No driver yet', sheet.vehicle,
           sheet.started_at ? `started ${time(sheet.started_at)}` : null,
           `${visitCount} ${visitCount === 1 ? 'stop' : 'stops'}`].filter(Boolean).join(' · ')}
       </p>
@@ -269,11 +393,55 @@ export default function RouteDetail({ session }: { session: Session }) {
           This round has been settled. It is shown for reference and cannot be changed.
         </div>
       )}
-      {office && open && !sheet.started_at && worked === 0 && (
+      {office && open && (
         <p className="small" style={{ marginTop: -6 }}>
-          Made by mistake?{' '}
-          <button type="button" className="as-link small bad-text" disabled={busy} onClick={deleteRound}>Delete this round</button>
+          <button type="button" className="as-link small" disabled={busy}
+                  onClick={() => { setNaming(!naming); setNameDraft(sheet.name ?? ''); setVehicleDraft(sheet.vehicle ?? ''); }}>
+            Name and vehicle
+          </button>
+          {!sheet.started_at && worked === 0 && (
+            <>
+              {' · '}
+              <button type="button" className="as-link small" disabled={busy}
+                      onClick={() => setToRound(toRound?.mode === 'merge' ? null : { mode: 'merge', stopIds: [] })}>
+                Merge into another round
+              </button>
+              {' · '}Made by mistake?{' '}
+              <button type="button" className="as-link small bad-text" disabled={busy} onClick={deleteRound}>Delete this round</button>
+            </>
+          )}
         </p>
+      )}
+      {naming && office && open && (
+        <div className="panel">
+          <div className="row" style={{ alignItems: 'flex-end' }}>
+            <div className="field">
+              <label htmlFor="rd-name">Name (optional)</label>
+              <input id="rd-name" value={nameDraft} placeholder={sheet.zone} onChange={(e) => setNameDraft(e.target.value)} />
+            </div>
+            <div className="field">
+              <label htmlFor="rd-vehicle">Vehicle</label>
+              <input id="rd-vehicle" value={vehicleDraft} onChange={(e) => setVehicleDraft(e.target.value)} />
+            </div>
+            <div className="field">
+              <button type="button" disabled={busy} onClick={saveName}>Save</button>{' '}
+              <button type="button" className="secondary" disabled={busy} onClick={() => setNaming(false)}>Cancel</button>
+            </div>
+          </div>
+        </div>
+      )}
+      {toRound && office && open && (
+        <ToRoundPanel sheetId={sheet.id} mode={toRound.mode} stopIds={toRound.stopIds}
+                      names={sheet.stops.filter((x) => toRound.stopIds.includes(x.id)).map((x) => x.order_ref ?? x.customer_name)}
+                      onDone={movedOrMerged} onCancel={() => setToRound(null)} />
+      )}
+      {open && sheet.started_at && sheet.resort_needed_at && (
+        <div className="notice warn">
+          <strong>Stops changed while the round is out.</strong>{' '}
+          {sheet.resort_note ? `${sheet.resort_note}. ` : ''}
+          {sheet.driver_name ?? 'The driver'} is asked to sort the stops left to do on My route.
+          {office && <>{' '}<button type="button" className="as-link small" disabled={busy} onClick={keepOrder}>Keep the order as it is</button></>}
+        </div>
       )}
 
       <ol className="steps" aria-label="Round progress">
@@ -334,7 +502,8 @@ export default function RouteDetail({ session }: { session: Session }) {
         <LoadingPanel sheetId={sheet.id} onDone={done} onCancel={() => setLoading(false)} />
       )}
 
-      {open && office && !sheet.started_at && sheet.stops.length > 1 && (
+      {open && office && (!sheet.started_at || sheet.resort_needed_at)
+        && sheet.stops.filter((x) => !sheet.started_at || x.stop_outcome === 'Pending').length > 1 && (
         <SortStopsPanel sheetId={sheet.id} onDone={done} />
       )}
 
@@ -342,7 +511,14 @@ export default function RouteDetail({ session }: { session: Session }) {
         <section className="panel" style={{ padding: 0 }}>
           <div className="panel-pad" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
             <h2 style={{ margin: 0, fontSize: 17 }}>Stops, in visit order</h2>
-            {open && office && sheet.stops.length > 1 && <span className="muted small">↑ ↓ change the order</span>}
+            {open && office && picked.length > 0 ? (
+              <span className="small">
+                {picked.length} ticked ·{' '}
+                <button type="button" className="as-link small" onClick={() => setToRound({ mode: 'move', stopIds: picked })}>Move to another round</button>
+                {' · '}
+                <button type="button" className="as-link small" onClick={() => setPicked([])}>Clear</button>
+              </span>
+            ) : open && office && sheet.stops.length > 1 && <span className="muted small">↑ ↓ change the order · tick stops to move several</span>}
           </div>
           <table className="orders-table round-table">
             <thead>
@@ -351,7 +527,15 @@ export default function RouteDetail({ session }: { session: Session }) {
             <tbody>
               {sheet.stops.map((s, i) => (
                 <tr key={s.id}>
-                  <td data-label="Order"><span className="stop-no">{i + 1}</span></td>
+                  <td data-label="Order">
+                    {open && office && s.stop_outcome === 'Pending' && s.order_ref ? (
+                      <label style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                        <input type="checkbox" aria-label={`Tick ${s.customer_name} to move`} checked={picked.includes(s.id)}
+                               onChange={(e) => setPicked(e.target.checked ? [...picked, s.id] : picked.filter((x) => x !== s.id))} />
+                        <span className="stop-no">{i + 1}</span>
+                      </label>
+                    ) : <span className="stop-no">{i + 1}</span>}
+                  </td>
                   <td data-label="Customer">
                     <strong>{s.customer_name}</strong>
                     {s.lat == null && <span className="chip warn" style={{ marginLeft: 6 }}>no map pin</span>}
@@ -397,6 +581,10 @@ export default function RouteDetail({ session }: { session: Session }) {
                         <button type="button" className="secondary more-button"
                                 disabled={busy || i === sheet.stops.length - 1}
                                 onClick={() => move(i, 1)} aria-label={`Visit ${s.customer_name} later`}>↓</button>
+                        {s.order_ref && (
+                          <button type="button" className="secondary" disabled={busy}
+                                  onClick={() => setToRound({ mode: 'move', stopIds: [s.id] })}>Move</button>
+                        )}
                         <button type="button" className="danger-soft" disabled={busy}
                                 onClick={() => removeStop(s)}>Remove</button>
                       </>

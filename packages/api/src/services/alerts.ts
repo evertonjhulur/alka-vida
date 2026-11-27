@@ -241,7 +241,7 @@ export async function runAlerts(db: Db): Promise<AlertRun> {
 
   // Drivers: something added to their load after they confirmed it.
   const added = await db.query<{ id: string; driver: string; zone: string; day: string; by: string | null }>(
-    `SELECT a.id, d.assigned_driver_id AS driver, d.zone, d.delivery_date::text AS day, a.added_by_name AS by
+    `SELECT a.id, d.assigned_driver_id AS driver, COALESCE(d.name, d.zone) AS zone, d.delivery_date::text AS day, a.added_by_name AS by
      FROM round_load_additions a JOIN delivery_sheets d ON d.id = a.delivery_sheet_id
      WHERE a.added_at > $1::timestamptz AND a.driver_confirmed_at IS NULL AND a.cancelled_at IS NULL
        AND d.assigned_driver_id IS NOT NULL
@@ -260,6 +260,24 @@ export async function runAlerts(db: Db): Promise<AlertRun> {
       title: 'Something was added to your load',
       body: `${a.zone} round, ${shortDay(a.day)}${a.by ? ` · added by ${a.by}` : ''}. Confirm it on My route.`,
       url: '/#/route', tag: `load-${a.id}`,
+    });
+  }
+
+  // Drivers: stops moved onto their round while it is out (27 Nov 2026).
+  const resort = await db.query<{ id: string; driver: string; zone: string; at: string; note: string | null }>(
+    `SELECT d.id, d.assigned_driver_id AS driver, COALESCE(d.name, d.zone) AS zone,
+            d.resort_needed_at::text AS at, d.resort_note AS note
+     FROM delivery_sheets d
+     WHERE d.resort_needed_at > $1::timestamptz AND d.status = 'Open' AND d.assigned_driver_id IS NOT NULL
+     LIMIT 50`, [since],
+  );
+  for (const r of resort) {
+    if (!(await claimKey(db, 'resort', `${r.id}|${r.at}`))) continue;
+    if (!wantsLoad.has(r.driver)) continue;
+    await notifyUsers(db, [r.driver], {
+      title: 'Your stops changed',
+      body: `${r.zone} round: ${r.note ?? 'stops were moved onto it'}. Sort the stops left to do on My route.`,
+      url: '/#/route', tag: `resort-${r.id}`,
     });
   }
 

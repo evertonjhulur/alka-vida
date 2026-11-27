@@ -369,7 +369,8 @@ export async function salesReport(db: Db, from?: string | null, to?: string | nu
             COALESCE(SUM(st.bottles_empties_picked_up),0)::int AS back,
             COALESCE(SUM(st.bottles_lost_damaged),0)::int AS lost
      FROM delivery_stops st JOIN delivery_sheets d ON d.id = st.delivery_sheet_id
-     WHERE ($1::date IS NULL OR d.delivery_date >= $1::date)
+     WHERE st.stop_outcome = 'Delivered'
+       AND ($1::date IS NULL OR d.delivery_date >= $1::date)
        AND ($2::date IS NULL OR d.delivery_date <= $2::date)`, p,
   );
 
@@ -535,7 +536,7 @@ export async function roundsReport(db: Db, from?: string | null, to?: string | n
     bottle_variance: number | null; full_out: number; settlement_notes: string | null; bottle_settle_notes: string | null;
     same_person: string | null;
   }>(
-    `SELECT d.id, d.delivery_date::text AS delivery_date, d.zone, d.status,
+    `SELECT d.id, d.delivery_date::text AS delivery_date, COALESCE(d.name, d.zone) AS zone, d.status,
             COALESCE(u.name, d.driver_name) AS driver, (d.started_at IS NOT NULL) AS started,
             COUNT(s.id)::int AS stops,
             COUNT(s.id) FILTER (WHERE s.stop_outcome = 'Delivered')::int AS delivered,
@@ -544,7 +545,7 @@ export async function roundsReport(db: Db, from?: string | null, to?: string | n
             COALESCE(SUM(i.grand_total_cents), 0)::bigint AS invoiced_cents,
             COALESCE(SUM(s.payment_amount_cents), 0)::bigint AS recorded_cents,
             d.actual_cash_cents, d.cash_variance_cents,
-            (COALESCE(SUM(s.bottles_empties_picked_up), 0)
+            (COALESCE(SUM(s.bottles_empties_picked_up) FILTER (WHERE s.stop_outcome = 'Delivered'), 0)
               + (SELECT COALESCE(SUM(rc.empties_count), 0) FROM round_collections rc
                  WHERE rc.delivery_sheet_id = d.id AND rc.kind = 'Empties' AND rc.status = 'Collected'))::int AS empties_recorded,
             COALESCE(SUM(s.bottles_delivered_full), 0)::int AS full_out,

@@ -16,6 +16,7 @@ import type { Actor } from './core.ts';
 import { audit, requireRole } from './core.ts';
 import { RuleViolation } from '@alka/shared';
 import { shortDay } from './noround.ts';
+import { STOP_ZONES_SQL } from './roundzones.ts';
 
 /**
  * The people a route can be handed to: driver logins, plus office and
@@ -154,7 +155,7 @@ export async function listSheets(
 ) {
   const driverScope = actor.role === 'driver';
   return db.query(
-    `SELECT d.*, COUNT(s.id)::int AS stop_count
+    `SELECT d.*, COUNT(s.id)::int AS stop_count, ${STOP_ZONES_SQL} AS stop_zones
      FROM delivery_sheets d LEFT JOIN delivery_stops s ON s.delivery_sheet_id = d.id
      WHERE ($1::date IS NULL OR d.delivery_date = $1::date)
        AND ($2::text IS NULL OR d.status = $2)
@@ -162,7 +163,7 @@ export async function listSheets(
             OR d.assigned_driver_id IS NULL
             OR d.assigned_driver_id = $4::uuid)
      GROUP BY d.id
-     ORDER BY d.delivery_date DESC, d.zone`,
+     ORDER BY d.delivery_date DESC, d.zone, d.created_at`,
     [filter.date ?? null, filter.status ?? null, driverScope, actor.id],
   );
 }
@@ -225,7 +226,7 @@ export async function removeStop(
       order_id: string | null; zone: string; day: string;
     }>(
       `SELECT st.order_ref, st.stop_outcome, st.settled_at, st.invoice_id,
-              ds.status AS sheet_status, st.order_id, ds.zone, ds.delivery_date::text AS day
+              ds.status AS sheet_status, st.order_id, COALESCE(ds.name, ds.zone) AS zone, ds.delivery_date::text AS day
        FROM delivery_stops st JOIN delivery_sheets ds ON ds.id = st.delivery_sheet_id
        WHERE st.id = $1`,
       [stopId],
@@ -273,7 +274,7 @@ export async function deleteRound(
   requireRole(actor, 'admin', 'user');
   return db.tx(async (t) => {
     const s = await t.maybeOne<{ zone: string; day: string; status: string; started_at: string | null }>(
-      `SELECT zone, delivery_date::text AS day, status, started_at FROM delivery_sheets WHERE id = $1 FOR UPDATE`, [sheetId]);
+      `SELECT COALESCE(name, zone) AS zone, delivery_date::text AS day, status, started_at FROM delivery_sheets WHERE id = $1 FOR UPDATE`, [sheetId]);
     if (!s) throw new RuleViolation('that round no longer exists');
     if (s.status !== 'Open') throw new RuleViolation('a settled round cannot be deleted');
     if (s.started_at) throw new RuleViolation('this round has started; take the stops off it one by one, or settle it');
@@ -330,4 +331,22 @@ export async function deleteRound(
     });
     return { zone: s.zone, day: s.day, ordersBackToWaiting, stockBack };
   });
+}
+
+/**
+ * The driver (or the office) keeps the round's order as it is after stops
+ * were moved onto it mid-round (27 Nov 2026): the re-sort prompt goes.
+ */
+export async function keepStopOrder(db: Db, actor: Actor, sheetId: string): Promise<{ ok: true }> {
+  requireRole(actor, 'admin', 'user', 'driver');
+  await db.tx(async (t) => {
+    const s = await t.maybeOne<{ assigned_driver_id: string | null; resort_needed_at: string | null }>(
+      `SELECT assigned_driver_id, resort_needed_at FROM delivery_sheets WHERE id = $1 FOR UPDATE`, [sheetId]);
+    if (!s) throw new RuleViolation('that round no longer exists');
+    if (actor.role === 'driver' && s.assigned_driver_id !== actor.id) throw new RuleViolation('this is not your round');
+    if (!s.resort_needed_at) return;
+    await t.query(`UPDATE delivery_sheets SET resort_needed_at = NULL, resort_note = NULL WHERE id = $1`, [sheetId]);
+    await audit(t, actor, 'update', 'DeliverySheet', sheetId, sheetId, { keptStopOrder: true });
+  });
+  return { ok: true };
 }

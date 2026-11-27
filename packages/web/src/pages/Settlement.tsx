@@ -65,6 +65,11 @@ interface Review {
 
 /** "3 out · 2 empties back · 1 lost", or a dash when the stop moved no bottles. */
 function bottleWords(s: StopRow): string {
+  // Recorded on a stop that did not happen (the old pre-filled empties, 27 Nov
+  // 2026): not counted anywhere; clear it with Correct this stop.
+  if (s.outcome !== 'Delivered' && (s.bottlesEmptiesPickedUp > 0 || s.bottlesDeliveredFull > 0)) {
+    return `${s.bottlesEmptiesPickedUp} empt${s.bottlesEmptiesPickedUp === 1 ? 'y' : 'ies'} listed, not counted (not delivered)`;
+  }
   const bits = [
     s.bottlesDeliveredFull > 0 ? `${s.bottlesDeliveredFull} full out` : '',
     s.bottlesEmptiesPickedUp > 0 ? `${s.bottlesEmptiesPickedUp} empt${s.bottlesEmptiesPickedUp === 1 ? 'y' : 'ies'} back` : '',

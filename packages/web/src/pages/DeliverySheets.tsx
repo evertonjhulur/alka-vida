@@ -1,14 +1,100 @@
 import { useEffect, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import { api } from '../lib/api';
 import { SortTh, MultiStatusSelect, passes, useSort } from '../components/ListTools';
 import NoRoundPanel from '../components/NoRoundPanel';
+import { otherZones, roundTitle } from '../lib/rounds';
 import { money, date, todayInJamaica, when } from '../lib/format';
 
 interface Sheet {
   id: string; delivery_date: string; zone: string; status: string;
   stop_count: number; driver_name: string | null; cash_variance_cents: number | null;
   started_at: string | null;
+  /** Several rounds a day (27 Nov 2026): an optional name, the vehicle, and the zones of its stops. */
+  name?: string | null; vehicle?: string | null; stop_zones?: string[];
+}
+
+
+interface Zone { id: string; name: string; retired_at: string | null }
+interface Driver { id: string; name: string; office?: boolean }
+
+/**
+ * + New round (27 Nov 2026): another round for a day - a second truck for a
+ * zone, or a driver taking stops from several zones. Orders join the first
+ * round of their zone that has not started; stops are moved across by hand.
+ */
+function NewRoundPanel({ defaultDay, onCancel }: { defaultDay: string; onCancel: () => void }) {
+  const navigate = useNavigate();
+  const [zones, setZones] = useState<Zone[]>([]);
+  const [drivers, setDrivers] = useState<Driver[]>([]);
+  const [day, setDay] = useState(defaultDay);
+  const [zone, setZone] = useState('');
+  const [name, setName] = useState('');
+  const [driverId, setDriverId] = useState('');
+  const [vehicle, setVehicle] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    api.get<Zone[]>('/api/zones').then((z) => setZones(z.filter((x) => !x.retired_at))).catch(() => {});
+    api.get<Driver[]>('/api/drivers').then(setDrivers).catch(() => {});
+  }, []);
+  async function make() {
+    setBusy(true); setError(null);
+    try {
+      const r = await api.post<{ id: string; label: string; warnings: string[] }>('/api/delivery-sheets', {
+        day, zone, name: name.trim() || null, driverId: driverId || null, vehicle: vehicle.trim() || null,
+      });
+      navigate(`/delivery/${r.id}`, { state: { made: `The ${r.label} round was made.${r.warnings.length ? ` ${r.warnings.join(' ')}` : ''}` } });
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'The round could not be made');
+      setBusy(false);
+    }
+  }
+  return (
+    <div className="panel">
+      <h2 style={{ marginTop: 0 }}>New round</h2>
+      {error && <div className="notice error">{error}</div>}
+      <div className="row" style={{ alignItems: 'flex-end' }}>
+        <div className="field">
+          <label htmlFor="nr-day">Day</label>
+          <input id="nr-day" type="date" value={day} min={todayInJamaica()} onChange={(e) => setDay(e.target.value)} />
+        </div>
+        <div className="field">
+          <label htmlFor="nr-zone">Zone</label>
+          <select id="nr-zone" value={zone} onChange={(e) => setZone(e.target.value)}>
+            <option value="">Choose a zone…</option>
+            {zones.map((z) => <option key={z.id} value={z.name}>{z.name}</option>)}
+          </select>
+        </div>
+        <div className="field">
+          <label htmlFor="nr-name">Name (optional)</label>
+          <input id="nr-name" value={name} placeholder={zone ? `e.g. ${zone} 2` : 'e.g. Portmore 2'}
+                 onChange={(e) => setName(e.target.value)} />
+        </div>
+        <div className="field">
+          <label htmlFor="nr-driver">Driver</label>
+          <select id="nr-driver" value={driverId} onChange={(e) => setDriverId(e.target.value)}>
+            <option value="">Choose later</option>
+            {drivers.map((d) => <option key={d.id} value={d.id}>{d.name}{d.office ? ' (office)' : ''}</option>)}
+          </select>
+        </div>
+        <div className="field">
+          <label htmlFor="nr-vehicle">Vehicle (optional)</label>
+          <input id="nr-vehicle" value={vehicle} onChange={(e) => setVehicle(e.target.value)} />
+        </div>
+      </div>
+      <p className="muted small" style={{ marginTop: 0 }}>
+        New orders go on the first round of their zone that has not started. Move customers onto this one from the other round's page.
+        A second round for the same zone and day is named "{zone || 'Zone'} 2" unless you name it.
+      </p>
+      <div className="row" style={{ gap: 8 }}>
+        <button type="button" className="approve-soft" disabled={busy || !day || !zone} onClick={make}>
+          {busy ? 'Making…' : 'Make the round'}
+        </button>
+        <button type="button" className="secondary" disabled={busy} onClick={onCancel}>Cancel</button>
+      </div>
+    </div>
+  );
 }
 
 /*
@@ -42,6 +128,7 @@ export default function DeliverySheets() {
   const [phase, setPhase] = useState<string[]>([]);
   /** Standing orders due on the chosen day but not raised yet (point 16). */
   const [expected, setExpected] = useState<Expected[]>([]);
+  const [making, setMaking] = useState(false);
 
   const loadSheets = () => api.get<Sheet[]>('/api/delivery-sheets').then(setSheets);
   useEffect(() => { loadSheets().catch((e) => setError(e.message)); }, []);
@@ -79,17 +166,24 @@ export default function DeliverySheets() {
   const filtered = onDay.filter((s) => passes(phase, (v) => phaseOf(s) === v));
   // Click a heading to sort (11 Oct 2026); until then, as they come.
   const { sorted: shown, sort, onSort } = useSort(filtered, {
-    date: (s) => dayOf(s), zone: (s) => s.zone, driver: (s) => s.driver_name ?? '',
+    date: (s) => dayOf(s), zone: (s) => roundTitle(s), driver: (s) => s.driver_name ?? '',
     stops: (s) => Number(s.stop_count), status: (s) => PHASES.findIndex((p) => p.key === phaseOf(s)),
     variance: (s) => (s.cash_variance_cents === null ? null : Number(s.cash_variance_cents)),
   });
 
   return (
     <>
-      <h1>Delivery rounds</h1>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 12 }}>
+        <h1>Delivery rounds</h1>
+        <button type="button" onClick={() => setMaking(!making)} aria-expanded={making}>
+          {making ? 'Close' : '+ New round'}
+        </button>
+      </div>
       <p className="subtitle">
-        Orders are auto-routed onto the sheet for the customer's zone and requested date.
+        Orders go on the first round for the customer's zone and day that has not started. Make another round for a second driver,
+        then move customers onto it.
       </p>
+      {making && <NewRoundPanel defaultDay={day && day >= todayInJamaica() ? day : todayInJamaica()} onCancel={() => setMaking(false)} />}
       {error && <div className="notice error">{error}</div>}
       {msg && <div className="notice ok">{msg}</div>}
 
@@ -167,7 +261,7 @@ export default function DeliverySheets() {
           <thead>
             <tr>
               <SortTh label="Date" k="date" sort={sort} onSort={onSort} />
-              <SortTh label="Zone" k="zone" sort={sort} onSort={onSort} />
+              <SortTh label="Round" k="zone" sort={sort} onSort={onSort} />
               <SortTh label="Driver" k="driver" sort={sort} onSort={onSort} />
               <SortTh label="Stops" k="stops" sort={sort} onSort={onSort} />
               <SortTh label="Status" k="status" sort={sort} onSort={onSort} />
@@ -179,7 +273,15 @@ export default function DeliverySheets() {
             {shown.map((s) => (
               <tr key={s.id}>
                 <td>{when(s.delivery_date)}</td>
-                <td>{s.zone}</td>
+                <td>
+                  {roundTitle(s)}
+                  {(s.name || otherZones(s).length > 0 || s.vehicle) && (
+                    <div className="muted small">
+                      {[s.name ? s.zone : null, otherZones(s).length ? `+ ${otherZones(s).join(', ')}` : null, s.vehicle]
+                        .filter(Boolean).join(' · ')}
+                    </div>
+                  )}
+                </td>
                 <td>
                   {s.driver_name ?? <span className="muted">Not assigned</span>}
                 </td>

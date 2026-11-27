@@ -9,7 +9,7 @@ import type { Db, Queryable } from '../db/index.ts';
 import type { Actor } from './core.ts';
 import { audit, businessTimeNow, businessToday, getSetting, nextNumber, num, requireRole } from './core.ts';
 import { assertAvailable } from './brands.ts';
-import { NEEDS_ROUND_SQL } from './noround.ts';
+import { NEEDS_ROUND_SQL, shortDay } from './noround.ts';
 import type { Cents, DeliveryMode, PaymentMethod, RecurrencePattern } from '@alka/shared';
 import {
   computeTotals, computeLineTotal, totalBottles, RuleViolation, composeAddress,
@@ -714,13 +714,31 @@ export async function placeOnDeliverySheet(
 
   const date = requestedDate ?? businessToday();
 
-  // The partial unique index permits only one OPEN sheet per (date, zone), so
-  // this either finds the live sheet or creates it.
+  // Several rounds a day (27 Nov 2026): a zone can have more than one open
+  // round on a day. The order follows the FIRST of them that has not started.
+  // If every one has started it waits under Deliveries with no round, rather
+  // than landing on a truck that is already out; with none at all, one is made.
   let sheet = await t.maybeOne<{ id: string }>(
     `SELECT id FROM delivery_sheets
-     WHERE delivery_date = $1::date AND zone = $2 AND status = 'Open'`,
+     WHERE delivery_date = $1::date AND zone = $2 AND status = 'Open' AND started_at IS NULL
+     ORDER BY created_at, id LIMIT 1`,
     [date, customer.delivery_zone],
   );
+  if (!sheet) {
+    const out = await t.one<{ n: number }>(
+      `SELECT COUNT(*)::int AS n FROM delivery_sheets
+       WHERE delivery_date = $1::date AND zone = $2 AND status = 'Open'`,
+      [date, customer.delivery_zone],
+    );
+    if (Number(out.n) > 0) {
+      const why = `Every ${customer.delivery_zone} round for ${shortDay(date)} had already started`;
+      await t.query(
+        `UPDATE customer_orders SET off_round_at = now(), off_round_note = $2 WHERE id = $1`, [orderId, why]);
+      warnings.push(`${why}, so ${state.order_number} is waiting under Deliveries with no round. `
+        + 'Add it to a round by hand, or make a new round for it.');
+      return { sheetId: null, stopId: null, warnings };
+    }
+  }
   if (!sheet) {
     sheet = await t.one<{ id: string }>(
       `INSERT INTO delivery_sheets (delivery_date, zone) VALUES ($1::date, $2) RETURNING id`,

@@ -24,6 +24,7 @@ import * as roundsheet from './services/roundsheet.ts';
 import * as endofday from './services/endofday.ts';
 import * as undoDelivery from './services/undodelivery.ts';
 import * as routing from './services/routing.ts';
+import * as rounds from './services/rounds.ts';
 import * as settlement from './services/settlement.ts';
 import * as opsreports from './services/opsreports.ts';
 import * as invoices from './services/invoices.ts';
@@ -1220,6 +1221,29 @@ export async function buildServer(db: Db) {
   // Delete a round that has not started and has nothing recorded (27 Oct 2026).
   app.delete('/api/delivery-sheets/:id', { preHandler: allow('admin', 'user') },
     async (req) => routing.deleteRound(db, actorOf(req), (req.params as { id: string }).id));
+
+  /* ---------------- several rounds a day (27 Nov 2026) ---------------- */
+
+  app.post('/api/delivery-sheets', { preHandler: allow('admin', 'user') },
+    async (req) => rounds.createRound(db, actorOf(req), (req.body ?? {}) as rounds.NewRoundInput));
+
+  app.patch('/api/delivery-sheets/:id', { preHandler: allow('admin', 'user') },
+    async (req) => rounds.updateRound(db, actorOf(req), (req.params as { id: string }).id,
+      (req.body ?? {}) as { name?: string | null; vehicle?: string | null }));
+
+  app.get('/api/delivery-sheets/:id/move-targets', { preHandler: allow('admin', 'user') },
+    async (req) => rounds.moveTargets(db, (req.params as { id: string }).id));
+
+  app.post('/api/stops/move', { preHandler: allow('admin', 'user') },
+    async (req) => rounds.moveStops(db, actorOf(req), (req.body ?? {}) as rounds.MoveInput));
+
+  app.post('/api/delivery-sheets/:id/merge', { preHandler: allow('admin', 'user') },
+    async (req) => rounds.mergeRound(db, actorOf(req), (req.params as { id: string }).id,
+      (req.body ?? {}) as { intoSheetId?: string; reason?: string | null }));
+
+  // Stops moved onto a round that is out: the driver keeps the order as it is.
+  app.post('/api/delivery-sheets/:id/keep-order', { preHandler: allow('admin', 'user', 'driver') },
+    async (req) => routing.keepStopOrder(db, actorOf(req), (req.params as { id: string }).id));
 
   app.delete('/api/stops/:id', { preHandler: allow('admin', 'user') },
     async (req) => {

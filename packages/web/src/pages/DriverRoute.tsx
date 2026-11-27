@@ -27,6 +27,8 @@ interface Sheet {
   id: string; delivery_date: string; zone: string; status: string;
   assigned_driver_id: string | null; driver_name: string | null;
   started_at: string | null; stops: Stop[]; collections: Collection[]; truck: Truck | null;
+  /** Several rounds a day (27 Nov 2026): its own name, and stops moved onto it while out. */
+  name?: string | null; resort_needed_at?: string | null; resort_note?: string | null;
 }
 
 /** One visit-ordered list: delivery and payment stops, and collection stops. */
@@ -38,7 +40,7 @@ const visitsOf = (sheet: Sheet): Visit[] => [
 const pending = (v: Visit) => (v.kind === 'stop' ? v.stop.stop_outcome === 'Pending' : v.c.status === 'Pending');
 /** Empties picked up at stops and collected on collection stops: what should be on the truck. */
 const emptiesOnRound = (sheet: Sheet) =>
-  sheet.stops.reduce((t, s) => t + Number(s.bottles_empties_picked_up ?? 0), 0)
+  sheet.stops.filter((s) => s.stop_outcome === 'Delivered').reduce((t, s) => t + Number(s.bottles_empties_picked_up ?? 0), 0)
   + (sheet.collections ?? []).filter((c) => c.kind === 'Empties' && c.status === 'Collected')
     .reduce((t, c) => t + Number(c.empties_count), 0);
 
@@ -173,7 +175,7 @@ export default function DriverRoute({ session }: { session: Session }) {
 
   const heading = (sheet: Sheet) => (
     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
-      <h2>{when(sheet.delivery_date)} — {sheet.zone}</h2>
+      <h2>{when(sheet.delivery_date)} — {sheet.name || sheet.zone}</h2>
       <span className="muted small">
         {visitsOf(sheet).filter((v) => !pending(v)).length} of{' '}
         {visitsOf(sheet).length} done
@@ -228,6 +230,24 @@ export default function DriverRoute({ session }: { session: Session }) {
                 <AdditionsList additions={(sheet.truck.additions ?? []).filter((a) => !a.driverConfirmedAt)} role="driver" onDone={done} />
               </div>
             )}
+            {/* Stops moved onto the round while it is out (27 Nov 2026): sort what is left. */}
+            {sheet.started_at && sheet.resort_needed_at && sheet.assigned_driver_id === session.id && (
+              <div className="panel" style={{ borderColor: 'var(--warn)' }}>
+                <h2 className="side-h" style={{ marginTop: 0 }}>Your stops changed</h2>
+                <p className="small" style={{ marginTop: 0 }}>
+                  {sheet.resort_note ? `${sheet.resort_note}. ` : ''}Sort the stops you still have to do, or keep the order as it is.
+                </p>
+                {sheet.stops.filter((st) => st.stop_outcome === 'Pending').length > 1 && (
+                  <SortStopsPanel sheetId={sheet.id} onDone={done} driver />
+                )}
+                <button type="button" className="secondary" style={{ marginTop: 8 }}
+                        onClick={() => api.post(`/api/delivery-sheets/${sheet.id}/keep-order`)
+                          .then(() => done('Stop order kept as it is.'))
+                          .catch((e) => setError(e instanceof Error ? e.message : 'That did not work'))}>
+                  Keep the order as it is
+                </button>
+              </div>
+            )}
             {sheet.started_at && stopList(sheet)}
             {sheet.started_at && (
               <>
@@ -257,7 +277,7 @@ export default function DriverRoute({ session }: { session: Session }) {
           {finished.map((sheet) => (
             <details className="panel" key={sheet.id}>
               <summary style={{ cursor: 'pointer' }}>
-                <strong>{when(sheet.delivery_date)} — {sheet.zone}</strong>
+                <strong>{when(sheet.delivery_date)} — {sheet.name || sheet.zone}</strong>
                 <span className="muted small"> · all {visitsOf(sheet).length} stops done{sheet.truck?.returnedAt ? ', truck counted back' : ''}</span>
               </summary>
               <div style={{ marginTop: 12 }}>{stopList(sheet)}</div>
@@ -276,7 +296,7 @@ export default function DriverRoute({ session }: { session: Session }) {
                 display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 16,
               }}>
                 <div>
-                  <strong>{when(sheet.delivery_date)} — {sheet.zone}</strong>
+                  <strong>{when(sheet.delivery_date)} — {sheet.name || sheet.zone}</strong>
                   <div className="muted small">
                     {visitsOf(sheet).length} stop{visitsOf(sheet).length === 1 ? '' : 's'}
                   </div>

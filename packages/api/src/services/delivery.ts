@@ -27,6 +27,7 @@ import { applyDeliveryMovement, bottleAccount, recordBottlesSold } from './bottl
 import { takeFinishedGoods, stopBottles } from './stockmoves.ts';
 import { deliversFromTruck, truckPosition } from './trucks.ts';
 import { listCollections } from './collections.ts';
+import { STOP_ZONES_SQL } from './roundzones.ts';
 import { computeTotals, computeLineTotal } from '@alka/shared';
 import { businessToday } from './core.ts';
 import { weekdayOf } from '@alka/shared';
@@ -137,6 +138,12 @@ async function recordStopOutcome(
       );
     }
 
+    // Bottles only change hands on a delivery: the customer's bottle account
+    // and the empties at the plant count Delivered stops only. A stop that did
+    // not happen records none (Everton, 27 Nov 2026: failed stops showed the
+    // pre-filled empties as collected). Empties handed over without a
+    // delivery go on an Empties collection stop, which does move them.
+    const bottlesHere = input.outcome === 'Delivered';
     // Record what the driver reported. Payment fields are stored exactly as
     // entered and are NOT validated here - nothing about money may prevent a
     // delivery from being marked complete.
@@ -153,8 +160,9 @@ async function recordStopOutcome(
            signature = COALESCE($11, signature)
        WHERE id = $1`,
       [input.stopId, input.outcome, input.outcomeNotes ?? null,
-       input.bottlesDeliveredFull ?? null, input.bottlesEmptiesPickedUp ?? null,
-       input.bottlesLostDamaged ?? null, input.paymentReceived ?? null,
+       bottlesHere ? input.bottlesDeliveredFull ?? null : 0,
+       bottlesHere ? input.bottlesEmptiesPickedUp ?? null : 0,
+       bottlesHere ? input.bottlesLostDamaged ?? null : 0, input.paymentReceived ?? null,
        input.paymentMethod ?? null, input.paymentAmountCents ?? null,
        input.driverNotes ?? null, input.signature ?? null],
     );
@@ -810,7 +818,7 @@ export async function getStopForDriver(db: Db, stopId: string) {
             COALESCE(ca.delivery_instructions, c.delivery_instructions) AS delivery_instructions,
             o.notes AS order_notes, o.customer_po, o.requested_delivery_date::text AS order_date_wanted,
             o.empties_expected, o.status AS order_status, o.pay_when,
-            d.zone AS sheet_zone, d.delivery_date::text AS sheet_date, d.status AS sheet_status,
+            COALESCE(d.name, d.zone) AS sheet_zone, d.delivery_date::text AS sheet_date, d.status AS sheet_status,
             (SELECT COUNT(*) FROM delivery_stops x
               WHERE x.delivery_sheet_id = s.delivery_sheet_id)::int AS stop_count,
             (SELECT COUNT(*) FROM delivery_stops x JOIN customers xc ON xc.id = x.customer_id
@@ -1103,8 +1111,8 @@ export async function resequenceStops(
 
 export async function getSheet(db: Db, sheetId: string) {
   const sheet = await db.maybeOne(
-    `SELECT ds.*, u.name AS reconciled_by_name FROM delivery_sheets ds
-     LEFT JOIN users u ON u.id = ds.reconciled_by WHERE ds.id = $1`, [sheetId]);
+    `SELECT d.*, u.name AS reconciled_by_name, ${STOP_ZONES_SQL} AS stop_zones FROM delivery_sheets d
+     LEFT JOIN users u ON u.id = d.reconciled_by WHERE d.id = $1`, [sheetId]);
   if (!sheet) return null;
   const stops = await db.query(
     `SELECT s.*, c.name AS customer_name,

@@ -276,7 +276,8 @@ export async function getSettlementReview(
     });
   }
 
-  const emptiesFromStops = rows.reduce((s, r) => s + r.bottlesEmptiesPickedUp, 0);
+  // Delivered stops only: a stop that did not happen moved no bottles (27 Nov 2026).
+  const emptiesFromStops = rows.filter((r) => r.outcome === 'Delivered').reduce((s, r) => s + r.bottlesEmptiesPickedUp, 0);
   const emptiesFromCollections = await collectedEmpties(db, sheetId);
   return {
     sheetId,
@@ -285,7 +286,7 @@ export async function getSettlementReview(
     totalCollectedCents: rows.reduce((s, r) => s + r.collectedCents, 0),
     totalExpectedCents: rows.reduce((s, r) => s + r.expectedCents, 0),
     bottles: {
-      fullOut: rows.reduce((s, r) => s + r.bottlesDeliveredFull, 0),
+      fullOut: rows.filter((r) => r.outcome === 'Delivered').reduce((s, r) => s + r.bottlesDeliveredFull, 0),
       emptiesFromStops,
       emptiesFromCollections,
       emptiesRecorded: emptiesFromStops + emptiesFromCollections,
@@ -400,6 +401,13 @@ export async function applyStopCorrection(
   // Re-checked here as well as at the entry point: an approval can be granted
   // minutes after it was raised, and the round may have been settled since.
   checkCorrectionAllowed(before, changes);
+  // A stop that was not delivered moved no bottles (27 Nov 2026): its
+  // empties can only be cleared, and clearing them moves no stock.
+  const delivered = before.stop_outcome === 'Delivered';
+  if (!delivered && Math.round(Number(changes.bottlesEmptiesPickedUp ?? 0)) > 0) {
+    throw new RuleViolation('this stop was not delivered, so no empties can be recorded on it. '
+      + 'Empties handed over without a delivery go on an Empties stop (+ Add a stop)');
+  }
 
   const int = (v: number | undefined) => (v === undefined || v === null ? null : Math.round(Number(v)));
   await t.query(
@@ -423,7 +431,7 @@ export async function applyStopCorrection(
   // the stock of empties drift apart.
   if (changes.bottlesEmptiesPickedUp !== undefined && changes.bottlesEmptiesPickedUp !== null) {
     const delta = Math.round(Number(changes.bottlesEmptiesPickedUp)) - num(before.bottles_empties_picked_up);
-    if (delta !== 0) {
+    if (delta !== 0 && delivered) {
       const n = Math.abs(delta);
       await moveEmpties(t, delta, delta > 0 ? 'BottleReturn' : 'Adjustment', `Correction ${stopId}`,
         delta > 0
@@ -437,7 +445,8 @@ export async function applyStopCorrection(
       `SELECT bottle_actual_returned AS counted FROM delivery_sheets WHERE id = $1`, [before.sheet_id]);
     if (sheet.counted !== null) {
       const rec = await t.one<{ n: string }>(
-        `SELECT COALESCE(SUM(bottles_empties_picked_up), 0)::text AS n FROM delivery_stops WHERE delivery_sheet_id = $1`,
+        `SELECT COALESCE(SUM(bottles_empties_picked_up), 0)::text AS n FROM delivery_stops
+         WHERE delivery_sheet_id = $1 AND stop_outcome = 'Delivered'`,
         [before.sheet_id]);
       await t.query(`UPDATE delivery_sheets SET bottle_variance = $2 WHERE id = $1`,
         [before.sheet_id, num(sheet.counted) - num(rec.n) - await collectedEmpties(t, before.sheet_id)]);
@@ -893,7 +902,7 @@ export async function settleRoute(
     // check on the driver; it has nothing to do with any customer's account.
     const totals = await t.one<{ recorded: number; bottles_out: number }>(
       `SELECT COALESCE(SUM(payment_amount_cents),0)::bigint AS recorded,
-              COALESCE(SUM(bottles_empties_picked_up),0)::int AS bottles_out
+              (COALESCE(SUM(bottles_empties_picked_up) FILTER (WHERE stop_outcome = 'Delivered'),0))::int AS bottles_out
        FROM delivery_stops WHERE delivery_sheet_id = $1`,
       [sheetId],
     );

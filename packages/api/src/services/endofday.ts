@@ -37,7 +37,7 @@ export async function endOfDay(db: Db, day: string) {
      JOIN customers c ON c.id = i.customer_id
      JOIN invoice_ledger l ON l.invoice_id = i.id
      LEFT JOIN LATERAL (
-       SELECT d.zone FROM delivery_stops st JOIN delivery_sheets d ON d.id = st.delivery_sheet_id
+       SELECT COALESCE(d.name, d.zone) AS zone FROM delivery_stops st JOIN delivery_sheets d ON d.id = st.delivery_sheet_id
         WHERE st.invoice_id = i.id LIMIT 1) ds ON true
      LEFT JOIN LATERAL (
        SELECT MIN(co.delivery_mode) AS delivery_mode, bool_or(co.recorded_late) AS recorded_late,
@@ -94,7 +94,7 @@ export async function endOfDay(db: Db, day: string) {
   const payRows = await db.query<Record<string, unknown>>(
     `SELECT p.id, p.amount_cents, p.method, p.status, p.is_reversal, p.receipt_number, p.reference,
             c.name AS customer, i.invoice_number,
-            COALESCE(du.name, d.driver_name) AS driver, d.zone, cu.name AS taken_by,
+            COALESCE(du.name, d.driver_name) AS driver, COALESCE(d.name, d.zone) AS zone, cu.name AS taken_by,
             to_char(p.payment_date AT TIME ZONE 'America/Jamaica', 'HH12:MI am') AS at
      FROM payments p
      JOIN customers c ON c.id = p.customer_id

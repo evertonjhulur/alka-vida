@@ -74,10 +74,11 @@ export { moveWarehouse };
 /** "Round Mon 12 Oct, Portmore" - the reference written on the stock ledger. */
 async function roundLabel(t: Queryable, sheetId: string): Promise<string> {
   const s = await t.one<{ zone: string; day: string }>(
-    `SELECT zone, to_char(delivery_date, 'Dy DD Mon') AS day FROM delivery_sheets WHERE id = $1`, [sheetId],
+    `SELECT COALESCE(name, zone) AS zone, to_char(delivery_date, 'Dy DD Mon') AS day FROM delivery_sheets WHERE id = $1`, [sheetId],
   );
   return `Round ${s.day}, ${s.zone}`;
 }
+export { roundLabel };
 
 /** Is this round's stock on a truck (loaded, returns not yet confirmed)? */
 export async function deliversFromTruck(t: Queryable, sheetId: string): Promise<boolean> {
@@ -112,6 +113,72 @@ async function orderedOnRound(t: Queryable, sheetId: string) {
      GROUP BY oli.product_id`,
     [sheetId],
   );
+}
+
+/**
+ * Per product, what these stops still have to take out (the same sum as
+ * orderedOnRound, for a few stops): used when stops move between rounds
+ * (27 Nov 2026).
+ */
+export async function goodsForStops(t: Queryable, stopIds: readonly string[]) {
+  if (stopIds.length === 0) return [];
+  return t.query<{ product_id: string; bottles: number }>(
+    `SELECT oli.product_id,
+            SUM(GREATEST(oli.total_bottles - COALESCE(d.bottles, 0), 0))::int AS bottles
+     FROM delivery_stops st
+     JOIN order_line_items oli ON oli.order_id = st.order_id
+     JOIN products p ON p.id = oli.product_id
+     LEFT JOIN (
+       SELECT sl.order_line_id, SUM(sl.total_bottles) AS bottles
+       FROM delivery_stop_lines sl JOIN delivery_stops x ON x.id = sl.stop_id
+       WHERE x.stop_outcome = 'Delivered'
+       GROUP BY sl.order_line_id
+     ) d ON d.order_line_id = oli.id
+     WHERE st.id = ANY($1::uuid[]) AND st.stop_outcome = 'Pending' AND st.order_id IS NOT NULL
+       AND NOT (p.is_bottle_charge OR p.is_charge)
+     GROUP BY oli.product_id
+     HAVING SUM(GREATEST(oli.total_bottles - COALESCE(d.bottles, 0), 0)) > 0`,
+    [stopIds],
+  );
+}
+
+/**
+ * The heart of a last-minute addition, inside a transaction the caller holds:
+ * record it for the driver to reconfirm and, when the goods come off the
+ * warehouse shelf, move them. `fromWarehouse: false` is for goods already
+ * off the shelf - another round's loading carried over when two rounds merge
+ * (27 Nov 2026) - so nothing is taken off the shelf a second time.
+ */
+export async function recordAddition(
+  t: Queryable, actor: Actor, sheetId: string,
+  lines: Array<{ productId: string; bottles: number }>,
+  opts: { note: string | null; loaderId?: string | null; fromWarehouse: boolean; why: string },
+): Promise<{ id: string; addedBottles: number } | null> {
+  const kept = lines.filter((l) => num(l.bottles) > 0).map((l) => ({ productId: l.productId, bottles: num(l.bottles) }));
+  if (kept.length === 0) return null;
+  const people = [await resolveLoader(t, actor, { loaderId: opts.loaderId ?? null })];
+  const row = await t.one<{ id: string }>(
+    `INSERT INTO round_load_additions (delivery_sheet_id, lines, note, added_by, added_by_name, loader_ids, loader_names)
+     VALUES ($1,$2::jsonb,$3,$4,$5,$6::uuid[],$7::text[]) RETURNING id`,
+    [sheetId, JSON.stringify(kept), opts.note, actor.id, actor.name,
+     people.map((p) => p.id), people.map((p) => p.name)],
+  );
+  const label = await roundLabel(t, sheetId);
+  for (const l of kept) {
+    await t.query(
+      `INSERT INTO round_load_lines (delivery_sheet_id, product_id, loaded_bottles, added_bottles)
+       VALUES ($1,$2,0,$3)
+       ON CONFLICT (delivery_sheet_id, product_id) DO UPDATE
+         SET added_bottles = round_load_lines.added_bottles + EXCLUDED.added_bottles`,
+      [sheetId, l.productId, l.bottles],
+    );
+    if (opts.fromWarehouse) await moveWarehouse(t, l.productId, -l.bottles, 'TruckLoad', label, opts.why);
+  }
+  await audit(t, actor, 'update', 'DeliverySheet', sheetId, label, {
+    loadAddition: row.id, lines: kept, loaders: people.map((p) => p.name), waitsForDriver: true,
+    ...(opts.fromWarehouse ? {} : { carriedFromAnotherRound: true }),
+  });
+  return { id: row.id, addedBottles: kept.reduce((s, l) => s + l.bottles, 0) };
 }
 
 /** Products that can go on a truck, with how they are counted. */

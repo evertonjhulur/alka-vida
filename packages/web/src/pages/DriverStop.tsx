@@ -283,7 +283,11 @@ export default function DriverStop() {
         // What actually went out on loan. Without this the pool never learns
         // the bottles left the truck.
         bottlesDeliveredFull: outcome === 'Delivered' ? Number(fullsShown) || 0 : 0,
-        bottlesEmptiesPickedUp: Number(emptiesShown) || 0,
+        // The empties box is pre-filled with what we expect back on a
+        // delivery. A stop that did not happen (not home, refused, another
+        // day, did not pay) only records empties the driver actually typed
+        // (Everton, 27 Nov 2026: failed stops were showing empties collected).
+        bottlesEmptiesPickedUp: outcome === 'Delivered' || emptiesTouched ? Number(emptiesShown) || 0 : 0,
         bottlesLostDamaged: Number(lost) || 0,
         driverNotes: notes || null,
         bottlesCharged: outcome === 'Delivered' && chargeN > 0 ? chargeN : undefined,
@@ -590,6 +594,9 @@ export default function DriverStop() {
             <label htmlFor="empties">Empties picked up</label>
             <input id="empties" type="number" min="0" inputMode="numeric" placeholder="0" readOnly={delivered_}
                    value={emptiesShown} onChange={(e) => { setEmptiesTouched(true); setEmpties(e.target.value); }} />
+            {!delivered_ && carriesReturnables && !emptiesTouched && emptiesShown !== '' && (
+              <div className="muted small">Filled in for a delivery. If the stop doesn't happen, it only counts if you type it.</div>
+            )}
             {delivered_ ? null : expectedEmpties !== null ? (
               <div className="small"><strong>Expect {expectedEmpties} back</strong> (they said when ordering).</div>
             ) : carriesReturnables && (stop.bottlesHeld ?? 0) > 0 && (

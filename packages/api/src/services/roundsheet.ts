@@ -84,7 +84,7 @@ async function sheetData(db: Db, sheetId: string) {
   const sheet = await db.maybeOne<{
     zone: string; delivery_date: string; driver: string | null; status: string;
   }>(
-    `SELECT d.zone, d.delivery_date::text AS delivery_date, d.status,
+    `SELECT COALESCE(d.name, d.zone) AS zone, d.delivery_date::text AS delivery_date, d.status,
             COALESCE(u.name, d.driver_name) AS driver
      FROM delivery_sheets d LEFT JOIN users u ON u.id = d.assigned_driver_id
      WHERE d.id = $1`, [sheetId],

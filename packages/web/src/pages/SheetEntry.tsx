@@ -31,7 +31,7 @@ interface SheetCollection {
   customer_name: string | null; supplier_name: string | null; empties_count: number;
 }
 interface Sheet {
-  id: string; zone: string; delivery_date: string; status: string; driver_name: string | null;
+  id: string; zone: string; name?: string | null; delivery_date: string; status: string; driver_name: string | null;
   stops: SheetStop[]; collections: SheetCollection[];
 }
 interface StopLine {
@@ -158,7 +158,7 @@ export default function SheetEntry() {
         </button>
       </div>
       <p className="subtitle">
-        {sheet.zone} · {day(sheet.delivery_date)} {date(sheet.delivery_date).slice(0, 4)} · {sheet.driver_name ?? 'no driver'}.
+        {sheet.name || sheet.zone} · {day(sheet.delivery_date)} {date(sheet.delivery_date).slice(0, 4)} · {sheet.driver_name ?? 'no driver'}.
         Type in what the driver wrote on the paper sheet. Delivered means the whole order;
         for a part delivery, another day or a bottle charge, use Open on that stop.
       </p>

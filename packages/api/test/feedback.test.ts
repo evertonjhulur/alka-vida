@@ -91,7 +91,9 @@ describe('Orders and rounds (points 7, 9, 10, 15, 16)', () => {
   });
 
   test('a customer cannot cancel once the driver has started the round', async () => {
-    const o = await order(0);
+    // A day nothing else here uses: once its round has started, new orders for
+    // that day no longer join it (several rounds a day, 27 Nov 2026).
+    const o = await order(9);
     const stop = await stopOf(o.id);
     await startRoute(f.db, f.driver, stop!.delivery_sheet_id);
     await assert.rejects(cancelOwnOrder(f.db, f.admin, f.customerId, o.id), /out for delivery/);

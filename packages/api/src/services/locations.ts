@@ -207,17 +207,25 @@ export async function routingSettings(db: Queryable) {
 interface SortStop { id: string; name: string; sequence_no: number; lat: number | null; lng: number | null; location_source: string | null }
 
 async function loadSheetForSort(db: Queryable, actor: Actor, sheetId: string) {
-  const sheet = await db.maybeOne<{ status: string; started_at: string | null; assigned_driver_id: string | null; zone: string }>(
-    `SELECT status, started_at, assigned_driver_id, zone FROM delivery_sheets WHERE id = $1`, [sheetId]);
+  const sheet = await db.maybeOne<{
+    status: string; started_at: string | null; assigned_driver_id: string | null; zone: string;
+    resort_needed_at: string | null;
+  }>(
+    `SELECT status, started_at, assigned_driver_id, zone, resort_needed_at FROM delivery_sheets WHERE id = $1`, [sheetId]);
   if (!sheet) throw new RuleViolation('that delivery round no longer exists');
   if (actor.role === 'driver' && sheet.assigned_driver_id !== actor.id) {
     throw new RuleViolation('only the driver who has this round can sort it');
   }
-  if (sheet.status !== 'Open' || sheet.started_at) {
+  if (sheet.status !== 'Open') throw new RuleViolation('this round has been settled');
+  // Out on the road, the order is locked - unless stops were moved onto the
+  // round since it started (27 Nov 2026): then the stops still to do are
+  // sorted again, from the last one worked.
+  const midRound = !!sheet.started_at;
+  if (midRound && !sheet.resort_needed_at) {
     throw new RuleViolation('this round has started, so its order is locked. The driver can still move a stop to the end or skip it');
   }
-  const stops = await db.query<SortStop>(
-    `SELECT s.id, c.name, s.sequence_no,
+  const all = await db.query<SortStop & { stop_outcome: string }>(
+    `SELECT s.id, c.name, s.sequence_no, s.stop_outcome,
             CASE WHEN o.address_id IS NOT NULL THEN ca.lat ELSE c.lat END AS lat,
             CASE WHEN o.address_id IS NOT NULL THEN ca.lng ELSE c.lng END AS lng,
             CASE WHEN o.address_id IS NOT NULL THEN ca.location_source ELSE c.location_source END AS location_source
@@ -226,11 +234,19 @@ async function loadSheetForSort(db: Queryable, actor: Actor, sheetId: string) {
      LEFT JOIN customer_addresses ca ON ca.id = o.address_id
      WHERE s.delivery_sheet_id = $1
      ORDER BY s.sequence_no, c.name`, [sheetId]);
-  return { sheet, stops };
+  const stops = midRound ? all.filter((s) => s.stop_outcome === 'Pending') : all;
+  const worked = midRound ? all.filter((s) => s.stop_outcome !== 'Pending') : [];
+  // Where the truck is now: the last stop worked that has a pin.
+  const lastPinned = [...worked].reverse().find((s) => s.lat != null && s.lng != null);
+  return {
+    sheet, stops, midRound,
+    after: worked.reduce((m, s) => Math.max(m, Number(s.sequence_no) || 0), 0),
+    from: lastPinned ? { lat: Number(lastPinned.lat), lng: Number(lastPinned.lng) } : null,
+  };
 }
 
 /** openrouteservice's optimiser: the order and the drive, or null when it cannot help. */
-async function roadOrder(plant: LatLng, pts: LatLng[]): Promise<{ order: number[]; durationS: number | null; distanceM: number | null } | null> {
+async function roadOrder(plant: LatLng, pts: LatLng[], start: LatLng = plant): Promise<{ order: number[]; durationS: number | null; distanceM: number | null } | null> {
   const key = process.env.ORS_API_KEY?.trim();
   if (!key || pts.length === 0 || pts.length > ORS_MAX_JOBS) return null;
   const res = await fetch(ORS_URL, {
@@ -238,7 +254,7 @@ async function roadOrder(plant: LatLng, pts: LatLng[]): Promise<{ order: number[
     headers: { Authorization: key, 'Content-Type': 'application/json', Accept: 'application/json' },
     body: JSON.stringify({
       jobs: pts.map((p, i) => ({ id: i + 1, location: [p.lng, p.lat] })),
-      vehicles: [{ id: 1, profile: 'driving-car', start: [plant.lng, plant.lat], end: [plant.lng, plant.lat] }],
+      vehicles: [{ id: 1, profile: 'driving-car', start: [start.lng, start.lat], end: [plant.lng, plant.lat] }],
     }),
     signal: AbortSignal.timeout(15000),
   });
@@ -289,7 +305,9 @@ export async function proposeSort(
     const r = await approximatePinsForSheet(db, actor, sheetId);
     if (r) { approxPlaced = r.placed; approxNote = r.stopped; }
   } catch { /* sort without them */ }
-  const { stops } = await loadSheetForSort(db, actor, sheetId);
+  const { stops, from } = await loadSheetForSort(db, actor, sheetId);
+  // Mid-round (27 Nov 2026): from where the truck is now, back to the plant.
+  const start = from ?? plant;
 
   const pinned = stops.filter((s) => s.lat != null && s.lng != null);
   const unpinned = stops.filter((s) => s.lat == null || s.lng == null);
@@ -305,7 +323,7 @@ export async function proposeSort(
     else if (pts.length > ORS_MAX_JOBS) note = `More than ${ORS_MAX_JOBS} stops is too many for the road map, so this is sorted by straight-line distance.`;
     else {
       try {
-        const r = await roadOrder(plant, pts);
+        const r = await roadOrder(plant, pts, start);
         if (r) { order = r.order; method = 'Road'; roadDurationS = r.durationS; roadDistanceM = r.distanceM; }
         else note = 'The road map did not answer, so this is sorted by straight-line distance.';
       } catch {
@@ -313,7 +331,7 @@ export async function proposeSort(
       }
     }
   }
-  if (!order) order = orderStops(plant, pts);
+  if (!order) order = orderStops(start, pts);
 
   const sorted = [...order.map((i) => pinned[i]), ...unpinned];
   const pinnedNow = stops.filter((s) => s.lat != null).map((s) => ({ lat: Number(s.lat), lng: Number(s.lng) }));
@@ -344,16 +362,17 @@ export async function applySort(
   db: Db, actor: Actor, sheetId: string, input: { order?: string[]; saveAsUsual?: boolean },
 ): Promise<{ ok: true }> {
   requireRole(actor, 'admin', 'user', 'driver');
-  const { stops } = await loadSheetForSort(db, actor, sheetId);
+  const { stops, midRound, after } = await loadSheetForSort(db, actor, sheetId);
   const order = Array.isArray(input.order) ? input.order.map(String) : [];
   const ids = new Set(stops.map((s) => s.id));
   if (order.length !== stops.length || order.some((id) => !ids.has(id)) || new Set(order).size !== order.length) {
     throw new RuleViolation('the round changed while you were sorting it - sort it again');
   }
-  const usual = input.saveAsUsual === true && actor.role !== 'driver';
+  // A mid-round re-sort is for today only, never the customers' usual order.
+  const usual = input.saveAsUsual === true && actor.role !== 'driver' && !midRound;
   await db.tx(async (t) => {
     for (let i = 0; i < order.length; i++) {
-      await t.query(`UPDATE delivery_stops SET sequence_no = $2 WHERE id = $1`, [order[i], (i + 1) * 10]);
+      await t.query(`UPDATE delivery_stops SET sequence_no = $2 WHERE id = $1`, [order[i], after + (i + 1) * 10]);
       if (usual) {
         const s = await t.one<{ customer_id: string; address_id: string | null }>(
           `SELECT s.customer_id, o.address_id FROM delivery_stops s LEFT JOIN customer_orders o ON o.id = s.order_id WHERE s.id = $1`,
@@ -362,7 +381,9 @@ export async function applySort(
         else await t.query(`UPDATE customers SET route_sequence = $2 WHERE id = $1`, [s.customer_id, (i + 1) * 10]);
       }
     }
-    await audit(t, actor, 'update', 'DeliverySheet', sheetId, 'stops sorted', { order, savedAsUsual: usual });
+    // Sorted: whatever asked for a re-sort has been dealt with.
+    await t.query(`UPDATE delivery_sheets SET resort_needed_at = NULL, resort_note = NULL WHERE id = $1`, [sheetId]);
+    await audit(t, actor, 'update', 'DeliverySheet', sheetId, 'stops sorted', { order, savedAsUsual: usual, ...(midRound ? { midRound: true } : {}) });
   });
   return { ok: true };
 }
