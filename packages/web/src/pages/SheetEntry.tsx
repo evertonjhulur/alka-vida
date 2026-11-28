@@ -41,7 +41,8 @@ interface StopLine {
 interface StopDetail { id: string; lines: StopLine[]; amountOwedCents: number; empties_expected?: number | null; invoice_cycle?: string | null; pay_when?: string | null }
 
 type Outcome = '' | 'Delivered' | 'Customer Not Home' | 'Refused' | 'Other' | 'Payment Only';
-interface Row { outcome: Outcome; empties: string; method: string; amount: string }
+/** delivered: what the driver wrote in the Delivered box, per order line (27 Nov 2026). */
+interface Row { outcome: Outcome; empties: string; method: string; amount: string; delivered: Record<string, string> }
 
 const PAY_WAYS = [['', 'None'], ['Cash', 'Cash'], ['Cheque', 'Cheque'], ['Card', 'Card'], ['Bank Transfer', 'Transfer']] as const;
 const OUTCOMES: Array<[Outcome, string]> = [
@@ -75,7 +76,7 @@ export default function SheetEntry() {
     const got = await Promise.all(todo.map((s) => api.get<StopDetail>(`/api/stops/${s.id}`)));
     setDetail(Object.fromEntries(got.map((d) => [d.id, d])));
     setRows(Object.fromEntries(todo.map((s) => [s.id, {
-      outcome: (s.payment_only ? 'Payment Only' : 'Delivered') as Outcome, empties: '', method: '', amount: '',
+      outcome: (s.payment_only ? 'Payment Only' : 'Delivered') as Outcome, empties: '', method: '', amount: '', delivered: {},
     }])));
     setCols(Object.fromEntries(sh.collections.filter((c) => c.kind === 'Empties' && c.status === 'Pending')
       .map((c) => [c.id, { got: '' as const, count: String(c.empties_count) }])));
@@ -97,7 +98,25 @@ export default function SheetEntry() {
   const emptiesIn = entering.reduce((t, s) => t + (Number(rows[s.id].empties) || 0), 0)
     + colsEntering.reduce((t, [, c]) => t + (c.got === 'yes' ? Number(c.count) || 0 : 0), 0);
 
+  /** What was handed over on a line: the figure typed from the sheet. */
+  const handedOver = (r: Row, l: StopLine) => Math.max(0, Math.round(Number(r.delivered[l.order_line_id]) || 0));
+  const ordered = (l: StopLine) => (l.bottles_per_case > 0 ? l.cases : l.loose_bottles);
+
   async function saveAll() {
+    // Every delivered stop needs the Delivered figures and the empties
+    // typed from the sheet; nothing is assumed (27 Nov 2026).
+    const missing = entering.filter((s) => {
+      const r = rows[s.id];
+      if (r.outcome !== 'Delivered') return false;
+      const lines = detail[s.id]?.lines ?? [];
+      const needsEmpties = lines.some((l) => l.is_returnable);
+      return lines.some((l) => (r.delivered[l.order_line_id] ?? '').trim() === '')
+        || (needsEmpties && r.empties.trim() === '');
+    });
+    if (missing.length) {
+      setError(`Type the Delivered figure and the empties (0 if none) for: ${missing.map((s) => s.customer_name).join(', ')}.`);
+      return;
+    }
     setBusy(true); setError(null); setMsg(null); setProblems([]);
     const bad: string[] = [];
     let done = 0;
@@ -110,14 +129,15 @@ export default function SheetEntry() {
       try {
         await api.post(`/api/stops/${s.id}/outcome`, {
           outcome: r.outcome,
+          // Less than ordered closes the order short, invoiced for what went out.
           deliveredLines: delivered ? lines.map((l) => (l.bottles_per_case > 0
-            ? { orderLineId: l.order_line_id, cases: l.cases, looseBottles: 0 }
-            : { orderLineId: l.order_line_id, cases: 0, looseBottles: l.loose_bottles })) : undefined,
+            ? { orderLineId: l.order_line_id, cases: handedOver(r, l), looseBottles: 0 }
+            : { orderLineId: l.order_line_id, cases: 0, looseBottles: handedOver(r, l) })) : undefined,
           paymentReceived: paid > 0,
           paymentMethod: paid > 0 ? r.method : null,
           paymentAmountCents: paid,
           bottlesDeliveredFull: delivered
-            ? lines.filter((l) => l.is_returnable).reduce((t, l) => t + (l.bottles_per_case > 0 ? l.cases * l.bottles_per_case : l.loose_bottles), 0)
+            ? lines.filter((l) => l.is_returnable).reduce((t, l) => t + handedOver(r, l) * (l.bottles_per_case > 0 ? l.bottles_per_case : 1), 0)
             : 0,
           bottlesEmptiesPickedUp: Number(r.empties) || 0,
           bottlesLostDamaged: 0,
@@ -159,8 +179,9 @@ export default function SheetEntry() {
       </div>
       <p className="subtitle">
         {sheet.name || sheet.zone} · {day(sheet.delivery_date)} {date(sheet.delivery_date).slice(0, 4)} · {sheet.driver_name ?? 'no driver'}.
-        Type in what the driver wrote on the paper sheet. Delivered means the whole order;
-        for a part delivery, another day or a bottle charge, use Open on that stop.
+        Type in what the driver wrote on the paper sheet: what was delivered and the empties, exactly as written.
+        Less than ordered closes the order short and invoices what went out; for the rest on another day
+        or a bottle charge, use Open on that stop.
       </p>
 
       {error && <div className="notice error">{error}</div>}
@@ -178,7 +199,7 @@ export default function SheetEntry() {
           <thead>
             <tr>
               <th>#</th><th>Customer and order</th><th className="num">To collect</th>
-              <th>What happened</th><th>Empties collected</th><th>Payment</th><th className="num">Amount</th><th />
+              <th>What happened</th><th>Delivered</th><th>Empties collected</th><th>Payment</th><th className="num">Amount</th><th />
             </tr>
           </thead>
           <tbody>
@@ -209,11 +230,25 @@ export default function SheetEntry() {
                             .map(([v, label]) => <option key={label} value={v}>{label}</option>)}
                         </select>
                       </td>
+                      <td data-label="Delivered">
+                        {r.outcome === 'Delivered' && (d?.lines ?? []).map((l) => (
+                          <div key={l.order_line_id} className="row" style={{ gap: 4, alignItems: 'center', marginBottom: 2 }}>
+                            <input type="number" min="0" inputMode="numeric" style={{ width: 60 }} disabled={busy}
+                                   aria-label={`Delivered ${l.product_name} to ${s.customer_name}`}
+                                   placeholder={`of ${ordered(l)}`}
+                                   value={r.delivered[l.order_line_id] ?? ''}
+                                   onChange={(e) => set(s.id, { delivered: { ...r.delivered, [l.order_line_id]: e.target.value } })} />
+                            {(d?.lines.length ?? 0) > 1 && (
+                              <span className="muted small">{l.bottles_per_case > 0 ? 'cs ' : ''}{l.product_name.replace(/^Alka Vida\s+/i, '')}</span>
+                            )}
+                          </div>
+                        ))}
+                      </td>
                       <td data-label="Empties collected">
                         {!s.payment_only && (
                           <input type="number" min="0" inputMode="numeric" style={{ width: 70 }} disabled={busy || !r.outcome}
                                  aria-label={`Empties collected at ${s.customer_name}`}
-                                 placeholder={d?.empties_expected != null ? `exp. ${d.empties_expected}` : '0'}
+                                 placeholder="Count"
                                  value={r.empties} onChange={(e) => set(s.id, { empties: e.target.value })} />
                         )}
                       </td>
@@ -235,7 +270,7 @@ export default function SheetEntry() {
                       </td>
                     </>
                   ) : (
-                    <td colSpan={4} className="small">
+                    <td colSpan={5} className="small">
                       <span className={`chip ${s.stop_outcome === 'Delivered' ? 'ok' : s.stop_outcome === 'Pending' ? 'neutral' : 'warn'}`}>
                         {DONE_WORDS[s.stop_outcome] ?? s.stop_outcome}
                       </span>

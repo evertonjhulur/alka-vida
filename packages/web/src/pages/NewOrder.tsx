@@ -368,8 +368,14 @@ export default function NewOrder() {
     return p?.is_returnable ? n + qtyOf(l) * (p.bottles_per_case > 0 ? p.bottles_per_case : 1) : n;
   }, 0);
   const bottleOnOrder = !!bottleProduct && lines.some((l) => l.productId === bottleProduct.id);
+  // Empties are asked for only when the bottles change hands now: at the
+  // counter, or when recording a delivery that already went out. A future
+  // delivery or collection no longer asks how many will come back: the
+  // driver counts them at the door and a short customer gets the bottle
+  // charge there (Everton, 27 Nov 2026).
+  const asksEmpties = past || outMode === 'Counter';
   const emptiesN = emptiesBack === '' ? null : Math.max(0, Math.round(Number(emptiesBack)) || 0);
-  const shortfall = fullFives > 0 && emptiesN !== null && !bottleOnOrder && bottleProduct
+  const shortfall = asksEmpties && fullFives > 0 && emptiesN !== null && !bottleOnOrder && bottleProduct
     ? Math.max(0, fullFives - emptiesN) : 0;
 
   const totals = useMemo(() => {
@@ -519,9 +525,8 @@ export default function NewOrder() {
     const fail = (m: string) => { setError(m); setBusy(false); };
     if (payloadLines.length === 0) return fail('Add at least one product, with its size and how many.');
     if (lines.some((l) => l.group && !l.productId)) return fail('Choose the size for every product, or remove the line.');
-    if (fullFives > 0 && emptiesN === null && !bottleOnOrder) {
-      return fail(outMode === 'Delivery' && !past ? 'How many 5-gallon empties will they hand over? Put 0 if none.'
-        : 'How many 5-gallon empties did they hand in? Put 0 if none.');
+    if (asksEmpties && fullFives > 0 && emptiesN === null && !bottleOnOrder) {
+      return fail('How many 5-gallon empties did they hand in? Put 0 if none.');
     }
     if (walkInShort) return fail(`A walk-in pays in full: ${money(totals.grandTotal)}. To take part payment, choose their customer account.`);
     const money_ = { discountPercent: totals.pct, discountFixedCents: totals.fixed, gctExempt: !chargeGct,
@@ -618,7 +623,7 @@ export default function NewOrder() {
           notes: note.trim() || null,
           ...money_,
           lines: payloadLines,
-          emptiesExpected: fullFives > 0 && !bottleOnOrder ? emptiesN : null,
+          emptiesExpected: null,
           payWhen: when,
           payment,
         });
@@ -949,9 +954,9 @@ export default function NewOrder() {
             </div>
           )}
 
-          {fullFives > 0 && !bottleOnOrder && (
+          {asksEmpties && fullFives > 0 && !bottleOnOrder && (
             <div className="ns-empties">
-              <label htmlFor="ns-emp">{outMode === 'Delivery' && !past ? '5-gal empties to hand over' : '5-gal empties handed in'}</label>
+              <label htmlFor="ns-emp">5-gal empties handed in</label>
               <input id="ns-emp" inputMode="numeric" value={emptiesBack} placeholder={String(fullFives)}
                      onChange={(e) => setEmptiesBack(e.target.value.replace(/[^0-9]/g, ''))} />
               <span className="small">

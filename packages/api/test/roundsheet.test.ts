@@ -51,6 +51,24 @@ describe('delivery sheet PDF', () => {
     }
   });
 
+  test('has a Delivered box and no expected empties (27 Nov 2026)', async () => {
+    const day = addDays(businessToday(), 6);
+    const o = await createOrder(f.db, f.office, {
+      customerId: f.otherCustomerId, deliveryMode: 'Delivery', requestedDeliveryDate: day,
+      lines: [{ productId: f.fiveGalProductId, looseBottles: 4 }],
+      emptiesExpected: 4,
+    } as never);
+    const st = await f.db.one<{ delivery_sheet_id: string }>(`SELECT delivery_sheet_id FROM delivery_stops WHERE order_id = $1`, [o.id]);
+    const doc = await renderDeliverySheetPdf(f.db, st.delivery_sheet_id);
+    if (process.env.SHEET_SAMPLE) (await import('node:fs')).writeFileSync(process.env.SHEET_SAMPLE, doc.pdf);
+    const text = pdfText(doc.pdf).replace(/\s+/g, ' ');
+    for (const want of ['Delivered', 'Empties collected', 'Full returned unused', 'Empties returned']) {
+      assert.ok(text.includes(want), `the sheet shows "${want}"`);
+    }
+    assert.ok(!/expect \d/.test(text), 'no expected empties under the box');
+    assert.ok(!text.includes('Empties expected'), 'no expected empties total');
+  });
+
   test('an unknown round is refused', async () => {
     await assert.rejects(renderDeliverySheetPdf(f.db, '00000000-0000-0000-0000-000000000000'), /no longer exists/);
   });

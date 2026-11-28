@@ -99,8 +99,6 @@ export default function Portal({ session }: { session: Session }) {
   const [notes, setNotes] = useState('');
   const [po, setPo] = useState('');
   const [addressId, setAddressId] = useState('');
-  /** 5-gallon empties they will hand over; '' until they say. */
-  const [empties, setEmpties] = useState('');
   const [bottle, setBottle] = useState<Priced | null>(null);
   /** Their delivery days for the chosen address, and the next dates on them (15 Oct 2026). */
   const [dd, setDd] = useState<{ days: string[]; next: string[] } | null>(null);
@@ -222,7 +220,10 @@ export default function Portal({ session }: { session: Session }) {
   // empty in exchange: those are bought, at the bottle's price.
   const fullFives = prices.filter((p) => p.is_returnable)
     .reduce((n, p) => n + (qty[p.product_id] ?? 0) * (p.bottles_per_case > 0 ? p.bottles_per_case : 1), 0);
-  const shortfall = fullFives > 0 && empties !== '' ? Math.max(0, fullFives - (Math.round(Number(empties)) || 0)) : 0;
+  // The order no longer asks how many empties will come back (27 Nov 2026):
+  // the driver counts them at the door, and adds the bottle charge there
+  // for any full bottle without an empty in exchange.
+  const shortfall = 0;
   const totals = useMemo(() => {
     const items: Array<readonly [number, number]> = [];
     for (const p of prices) {
@@ -258,11 +259,6 @@ export default function Portal({ session }: { session: Session }) {
       setBusy(false);
       return;
     }
-    if (fullFives > 0 && empties === '') {
-      setError('Tell us how many empty 5-gallon bottles you will hand over.');
-      setBusy(false);
-      return;
-    }
     if (repeat && mode === 'Pickup' && !wanted) {
       setError('Choose the day of your first collection, so the standing order can count from it.');
       setBusy(false);
@@ -282,7 +278,7 @@ export default function Portal({ session }: { session: Session }) {
           notes: notes || null,
           customerPo: po || null,
           addressId: mode === 'Delivery' ? (addressId || null) : null,
-          emptiesExpected: fullFives > 0 ? Math.max(0, Math.round(Number(empties)) || 0) : null,
+          emptiesExpected: null,
           repeat: repeat || undefined,
         },
       );
@@ -296,12 +292,11 @@ export default function Portal({ session }: { session: Session }) {
               : `It came in after our ${cutoff} cut-off for same-day delivery, so we will check it and confirm the day with you shortly.`)
             : order.deliveryDate ? `It is booked for delivery on ${when(order.deliveryDate)}.`
               : 'It will go out on the next round for your area.')
-        + (fullFives > 0 && empties !== '' ? ` Empties to be returned: ${Math.max(0, Math.round(Number(empties)) || 0)}.` : '')
         + (order.standing ? ` It is now a standing order, ${REPEATS.find(([k]) => k === order.standing!.pattern)?.[1].toLowerCase()}; the next is on ${when(order.standing.nextDeliveryDate)}.` : '')
         + (order.standingError ? ` We could not make it a standing order: ${order.standingError}` : ''),
       );
       setQty({});
-      setWanted(''); setNotes(''); setPo(''); setEmpties(''); setRepeat(''); setOtherDay(false);
+      setWanted(''); setNotes(''); setPo(''); setRepeat(''); setOtherDay(false);
       await load();
       setTab('orders');
     } catch (err) {
@@ -503,17 +498,9 @@ export default function Portal({ session }: { session: Session }) {
 
           {fullFives > 0 && (
             <section className="panel bottle-box">
-              <div className="field" style={{ marginBottom: 4 }}>
-                <label htmlFor="empties">How many empty 5-gallon bottles will you hand over?</label>
-                <input id="empties" type="number" min="0" inputMode="numeric" style={{ maxWidth: 140 }}
-                       value={empties} placeholder={String(fullFives)}
-                       onChange={(e) => setEmpties(e.target.value)} />
-              </div>
               <p className="small" style={{ margin: 0 }}>
-                Each full bottle is swapped for an empty one.{' '}
-                {shortfall > 0 && bottle
-                  ? <strong>{shortfall} short, so {shortfall === 1 ? 'that bottle is' : 'those bottles are'} added at {money(Number(bottle.price_per_bottle_cents))} each. They are yours to keep and swap next time.</strong>
-                  : `Fewer empties than full bottles and the extra bottles are charged${bottle ? ` at ${money(Number(bottle.price_per_bottle_cents))} each` : ''}; they are then yours to keep.`}
+                Each full 5-gallon bottle is swapped for an empty one at the door.{' '}
+                {`If you have fewer empties than full bottles, the driver adds the extra bottles${bottle ? ` at ${money(Number(bottle.price_per_bottle_cents))} each` : ''}; they are then yours to keep and swap next time.`}
               </p>
             </section>
           )}

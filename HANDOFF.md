@@ -3583,3 +3583,46 @@ whatever the rest of the balance; admin-only, ticked from a list; a
 - Payments screen (admin): "Stray cents on credit (N)" panel, Review and
   clear…, every row ticked by default.
 - Tests: straycents.test.ts (2). API 740.
+
+---
+
+## Delivery sheet "Delivered" box; no expected empties (27 Nov 2026, evening)
+
+Asked by Everton after the 5-gallon sheet audit (project doc
+claude/5-gallon-recon-sheets-vs-app-nov-2026.md):
+- The printed sheet had nowhere to write what was actually delivered, so
+  short deliveries could not be checked (Lightfire 2 Nov, Kadine Stewart,
+  Betty Williams / Fr. Clifton Harris 3 Nov).
+- "expect N" under the empties box was copied into the app instead of the
+  driver's figure (Universal Shocks, Betty Williams, Rubis). Not needed.
+- He chose to drop the "empties to hand over" question from orders and stop
+  pre-filling empties anywhere.
+
+What changed:
+- services/roundsheet.ts: new **Delivered** column (one blank box per order
+  line; on multi-item orders each box carries a tiny product label). No
+  "expect N" under Empties, no "Empties expected" total. Footer adds
+  **Full returned unused** (loaded = delivered + returned unused).
+  Column widths re-balanced (still 732 pt, landscape Letter).
+- web NewOrder.tsx: empties are asked only when bottles change hands now
+  (counter sale, or recording a past delivery). Future delivery/collection
+  orders send emptiesExpected: null and add no bottle charge for a shortfall.
+- web Portal.tsx: the customer's "how many empties will you hand over?"
+  question is gone; a note explains the driver adds the bottle charge at the
+  door for any full bottle without an empty.
+- web DriverStop.tsx: the empties box starts blank (placeholder "Count");
+  a Delivered stop with 5-gallon on it needs a typed figure (0 allowed).
+  The bottle-charge offer now appears when full out > empties typed (never
+  added by itself). Only typed empties are sent, on any outcome.
+- web SheetEntry.tsx: new **Delivered** field per order line, required for
+  a Delivered stop, with "of N" as the hint; empties required for
+  5-gallon stops, hint "Count". Less than ordered goes through the same
+  call as the driver: the order closes short and is invoiced for what went
+  out (closeShortIn, 27 Nov).
+- Unchanged: website guest orders still send emptiesExpected 0 when the
+  guest ticks "no empties" (first-time buyer gets the bottle charge).
+  Old orders keep their empties_expected; it is simply no longer printed or
+  pre-filled. PortalOrders still shows it for old orders.
+
+Tests: roundsheet.test.ts (+1). API 741 pass, web 16 pass, tsc clean,
+vite build OK.

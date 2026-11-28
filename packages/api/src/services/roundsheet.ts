@@ -39,12 +39,15 @@ const BOTTOM = 572;
 /** Columns, left to right. Widths add up to W. */
 const COLS = [
   { key: 'n', label: '#', w: 20 },
-  { key: 'who', label: 'Customer and phone', w: 128 },
-  { key: 'where', label: 'Address', w: 150 },
-  { key: 'what', label: 'Order', w: 138 },
-  { key: 'owed', label: 'To collect', w: 64 },
-  { key: 'empties', label: 'Empties collected', w: 62 },
-  { key: 'paid', label: 'Payment collected', w: 170 },
+  { key: 'who', label: 'Customer and phone', w: 120 },
+  { key: 'where', label: 'Address', w: 132 },
+  { key: 'what', label: 'Order', w: 124 },
+  { key: 'owed', label: 'To collect', w: 60 },
+  // What actually went out, per order line (Everton, 27 Nov 2026: the sheet
+  // had nowhere to write it, so a short delivery could not be checked).
+  { key: 'delivered', label: 'Delivered', w: 56 },
+  { key: 'empties', label: 'Empties collected', w: 56 },
+  { key: 'paid', label: 'Payment collected', w: 164 },
 ] as const;
 
 const cash = (cents: number) => {
@@ -221,13 +224,14 @@ export async function renderDeliverySheetPdf(db: Db, sheetId: string): Promise<{
     const whoH = nameH + 2 + doc.heightOfString(t.who, { width: COLS[1].w - 8 });
     const whereH = doc.heightOfString(t.where, { width: COLS[2].w - 8 });
     const whatH = doc.heightOfString(t.what, { width: COLS[3].w - 8 });
-    // Room to write: at least enough for the payment boxes and a line.
-    return Math.max(58, whoH, whereH, whatH) + 12;
+    // Room to write: at least enough for the payment boxes and a line,
+    // and one Delivered box per order line.
+    const boxesH = s.paymentOnly ? 0 : Math.max(1, s.lines.length) * 22;
+    return Math.max(58, whoH, whereH, whatH, boxesH) + 12;
   };
 
   let y = header(true);
   let totalOwed = 0;
-  let totalEmptiesExpected = 0;
 
   for (const s of stops) {
     const h = rowHeight(s);
@@ -256,17 +260,30 @@ export async function renderDeliverySheetPdf(db: Db, sheetId: string): Promise<{
       totalOwed += s.owedCents;
     }
     x += COLS[4].w;
-    // Empties collected: a box to write in, with what they said they would hand over.
+    // Delivered: a blank box per order line for what was actually handed
+    // over (the order column shows what was ordered).
     if (!s.paymentOnly) {
-      doc.save().lineWidth(0.8).strokeColor(SOFT).rect(x + 10, top, COLS[5].w - 20, 20).stroke().restore();
-      if (s.emptiesExpected !== null) {
-        doc.font(R).fontSize(7).fillColor(MUTED).text(`expect ${s.emptiesExpected}`, x + 4, top + 24, { width: COLS[5].w - 8, align: 'center' });
-        totalEmptiesExpected += s.emptiesExpected;
-      } else if (!s.takesReturnables) {
-        doc.font(R).fontSize(7).fillColor(MUTED).text('if any', x + 4, top + 24, { width: COLS[5].w - 8, align: 'center' });
+      const n = Math.max(1, s.lines.length);
+      for (let i = 0; i < n; i++) {
+        doc.save().lineWidth(0.8).strokeColor(SOFT).rect(x + 8, top + i * 22, COLS[5].w - 16, 18).stroke().restore();
+        // Several items: say which box is which, small, inside the box.
+        if (s.lines.length > 1) {
+          const what = s.lines[i].replace(/^\s*\d+\s+(bottles?|cases?|cs)\s+/i, '').replace(/^Alka Vida\s+/i, '');
+          doc.font(R).fontSize(5.5).fillColor(MUTED)
+            .text(what, x + 10, top + i * 22 + 12, { width: COLS[5].w - 20, lineBreak: false, ellipsis: true });
+        }
       }
     }
     x += COLS[5].w;
+    // Empties collected: a blank box. No expected figure is printed, so the
+    // driver writes his own count (27 Nov 2026).
+    if (!s.paymentOnly) {
+      doc.save().lineWidth(0.8).strokeColor(SOFT).rect(x + 8, top, COLS[6].w - 16, 20).stroke().restore();
+      if (!s.takesReturnables) {
+        doc.font(R).fontSize(7).fillColor(MUTED).text('if any', x + 4, top + 24, { width: COLS[6].w - 8, align: 'center' });
+      }
+    }
+    x += COLS[6].w;
     // Payment collected: how, and how much.
     const px = x + 6;
     doc.font(R).fontSize(8).fillColor(INK);
@@ -278,7 +295,7 @@ export async function renderDeliverySheetPdf(db: Db, sheetId: string): Promise<{
       wx += 11 + doc.widthOfString(w) + 6;
     }
     doc.font(R).fontSize(8).fillColor(SOFT).text('Amount $', px, top + 22, { lineBreak: false });
-    blank(doc, px + 40, top + 31, COLS[6].w - 52);
+    blank(doc, px + 40, top + 31, COLS[7].w - 52);
     if (s.outcome !== 'Pending') {
       doc.font(R).fontSize(7).fillColor(MUTED).text(`Recorded: ${s.outcome}`, px, top + 38, { lineBreak: false });
     }
@@ -322,12 +339,12 @@ export async function renderDeliverySheetPdf(db: Db, sheetId: string): Promise<{
   if (y + 92 > BOTTOM) { doc.addPage(); y = header(false); }
   y += 14;
   doc.font(B).fontSize(9).fillColor(INK)
-    .text(`To collect on this round: ${cash(totalOwed)}`, L, y, { continued: true })
-    .font(R).fillColor(SOFT)
-    .text(totalEmptiesExpected ? `      Empties expected: ${totalEmptiesExpected}` : '');
+    .text(`To collect on this round: ${cash(totalOwed)}`, L, y);
   y = doc.y + 16;
+  // Loaded = delivered + returned unused: the unused full bottles have a
+  // line of their own (27 Nov 2026).
   const sign = [
-    ['Cash handed in $', 150], ['Cheques $', 120], ['Empties returned', 110],
+    ['Cash handed in $', 140], ['Cheques $', 110], ['Empties returned', 110], ['Full returned unused', 130],
   ] as const;
   let sx = L;
   doc.font(R).fontSize(8.5).fillColor(INK);
@@ -335,7 +352,7 @@ export async function renderDeliverySheetPdf(db: Db, sheetId: string): Promise<{
     doc.text(label, sx, y, { lineBreak: false });
     const lw = doc.widthOfString(label) + 4;
     blank(doc, sx + lw, y + 9, w - lw);
-    sx += w + 30;
+    sx += w + 22;
   }
   y += 26;
   sx = L;

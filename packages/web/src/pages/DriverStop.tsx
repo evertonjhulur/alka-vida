@@ -238,16 +238,14 @@ export default function DriverStop() {
       return sum + qty * (l.bottles_per_case > 0 ? l.bottles_per_case : 1);
     }, 0);
   const fullsShown = fullsTouched ? fulls : String(bottlesFromLines);
-  // A 5-gallon delivery is normally an exchange: full ones in, empties out,
-  // up to what they are holding. Suggested, and the driver changes it.
-  // What they said they would hand over, when they were asked (point 13).
-  const expectedEmpties = stop.empties_expected ?? null;
-  const emptiesShown = emptiesTouched ? empties
-    : (carriesReturnables
-      ? String(expectedEmpties ?? Math.min(Number(fullsShown) || 0, Math.max(stop.bottlesHeld ?? 0, 0))) : '');
-  // Fewer empties than they said: the driver can add the bottle charge.
-  const shortAtDoor = expectedEmpties !== null && emptiesShown !== ''
-    ? Math.max(0, expectedEmpties - (Number(emptiesShown) || 0)) : 0;
+  // The empties box starts blank: the driver types what he actually picked
+  // up. It used to be filled with what was expected, and that figure was
+  // too often left in place (Everton, 27 Nov 2026, after the sheet audit).
+  const emptiesShown = emptiesTouched ? empties : '';
+  // Full bottles out with no empty in exchange: the driver can add the
+  // bottle charge (it is never added by itself).
+  const shortAtDoor = carriesReturnables && emptiesShown !== ''
+    ? Math.max(0, (Number(fullsShown) || 0) - (Number(emptiesShown) || 0)) : 0;
   const chargeN = charge ? Math.max(0, Math.round(Number(chargeQty || shortAtDoor) || 0)) : 0;
 
   const collectedCents = method ? toCents(collected || '0') : 0;
@@ -261,6 +259,10 @@ export default function DriverStop() {
    * block recording that goods were delivered.
    */
   async function record(outcome: string, extra: Record<string, unknown> = {}) {
+    if (outcome === 'Delivered' && carriesReturnables && emptiesShown.trim() === '') {
+      setError('Type how many empties you picked up. Put 0 if none.');
+      return;
+    }
     setBusy(true);
     setError(null);
     setSaved(null);
@@ -283,11 +285,8 @@ export default function DriverStop() {
         // What actually went out on loan. Without this the pool never learns
         // the bottles left the truck.
         bottlesDeliveredFull: outcome === 'Delivered' ? Number(fullsShown) || 0 : 0,
-        // The empties box is pre-filled with what we expect back on a
-        // delivery. A stop that did not happen (not home, refused, another
-        // day, did not pay) only records empties the driver actually typed
-        // (Everton, 27 Nov 2026: failed stops were showing empties collected).
-        bottlesEmptiesPickedUp: outcome === 'Delivered' || emptiesTouched ? Number(emptiesShown) || 0 : 0,
+        // Only what the driver typed counts, on any outcome.
+        bottlesEmptiesPickedUp: Number(emptiesShown) || 0,
         bottlesLostDamaged: Number(lost) || 0,
         driverNotes: notes || null,
         bottlesCharged: outcome === 'Delivered' && chargeN > 0 ? chargeN : undefined,
@@ -592,15 +591,11 @@ export default function DriverStop() {
           )}
           <div className="field">
             <label htmlFor="empties">Empties picked up</label>
-            <input id="empties" type="number" min="0" inputMode="numeric" placeholder="0" readOnly={delivered_}
+            <input id="empties" type="number" min="0" inputMode="numeric" placeholder="Count" readOnly={delivered_}
                    value={emptiesShown} onChange={(e) => { setEmptiesTouched(true); setEmpties(e.target.value); }} />
-            {!delivered_ && carriesReturnables && !emptiesTouched && emptiesShown !== '' && (
-              <div className="muted small">Filled in for a delivery. If the stop doesn't happen, it only counts if you type it.</div>
-            )}
-            {delivered_ ? null : expectedEmpties !== null ? (
-              <div className="small"><strong>Expect {expectedEmpties} back</strong> (they said when ordering).</div>
-            ) : carriesReturnables && (stop.bottlesHeld ?? 0) > 0 && (
-              <div className="muted small">They have {stop.bottlesHeld} of our bottles.</div>
+            {!delivered_ && carriesReturnables && (
+              <div className="muted small">Count them and type the number, 0 if none.
+                {(stop.bottlesHeld ?? 0) > 0 ? ` They have ${stop.bottlesHeld} of our bottles.` : ''}</div>
             )}
           </div>
           <div className="field">
